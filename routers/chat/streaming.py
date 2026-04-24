@@ -11,6 +11,7 @@ from typing import AsyncGenerator
 
 from core.config import Config
 from core.models import ChatRequest
+from core.logging_context import set_log_context, reset_log_context
 from services import (
     call_llm_api,
     unified_preprocess,
@@ -44,9 +45,15 @@ from ..deps import (
 )
 from .helpers import _get_rag_processor, _run_query_recreation
 from .conversation import _save_stream_history
-from services.more_results_service import is_more_results_intent, get_excluded_info_from_history
+from services.more_results_service import (
+    is_more_results_intent,
+    get_excluded_info_from_history,
+    get_base_user_query_from_history,
+    get_last_preprocess_from_history,
+)
 from utils.keyword_extractor import extract_nouns
 from services.rag_service import filter_okms_keywords
+from services.router_service import classify_next_intent
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +100,7 @@ async def _streaming_chat_flow(
     t_request_start: float = 0.0,
 ) -> AsyncGenerator[str, None]:
     """스트리밍 채팅 응답 전체 흐름을 처리하는 비동기 제너레이터."""
+    _log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
     assistant_content = ""
     _referenced_chunk_ids: list = []
     _referenced_service_names: list = []
@@ -101,10 +109,17 @@ async def _streaming_chat_flow(
     _timings: dict = {f: "-" for f in _TIMING_FIELDS}
     _timings["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _timings["user_query"] = original_user_message[:200]
+    _preprocess_to_persist: dict = {}
     # PreCheck 기본값 (is_clarification 경로에서는 pre_check 스킵)
     _timings["use_rag"] = True
     _timings["clarification_question"] = ""
     try:
+        logger.info(
+            "[ChatFlow] conv_id=%s | user_id=%s | is_clarification=%s",
+            chat_request.conv_id,
+            chat_request.user_id,
+            is_clarification,
+        )
         yield f"data: {json.dumps({'conv_id': chat_request.conv_id}, ensure_ascii=False)}\n\n"
 
         # is_clarification=True 경로를 위한 기본값 초기화
@@ -117,11 +132,64 @@ async def _streaming_chat_flow(
         # ── "더 알려줘" 감지: 이전 응답 chunk_ids/서비스명 추출 ───────────────
         excluded_chunk_ids: list = []
         excluded_service_names: list = []
-        if is_more_results_intent(user_message):
-            excluded_chunk_ids, excluded_service_names = get_excluded_info_from_history(chat_request.messages)
-            logger.info("[MoreResults] 추가 결과 요청 감지, 제외 chunk_ids=%s, 제외 서비스명=%s",
-                        excluded_chunk_ids, excluded_service_names)
+        more_results_re_query: str | None = None
+        more_results_detected = is_more_results_intent(user_message)
+        base_user_query = get_base_user_query_from_history(chat_request.messages)
+        logger.info(
+            "[MoreResults] conv_id=%s | 초기 감지 pattern_hit=%s | user_message=%s",
+            chat_request.conv_id,
+            more_results_detected,
+            shorten_text(user_message, 80),
+        )
+        next_intent = None
+        if not more_results_detected:
+            # 패턴에 안 걸린 후속 질문도 LLM 분류로 보조 감지
+            next_intent = await classify_next_intent(chat_request.messages, user_message)
+            more_results_detected = (next_intent.get("intent") == "MORE_INFO")
+            logger.info(
+                "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
+                chat_request.conv_id,
+                next_intent.get("intent"),
+                shorten_text(str(next_intent.get("re_query", "") or ""), 80),
+            )
+
+        if more_results_detected:
+            # MORE_INFO는 질의 정제 대신 원질문(직전 non-more-results user 질문)을 우선 재사용
+            if base_user_query:
+                more_results_re_query = base_user_query
+                logger.info(
+                    "[MoreResults] conv_id=%s | 원질문 재사용: %s",
+                    chat_request.conv_id,
+                    shorten_text(more_results_re_query, 80),
+                )
+            elif next_intent and next_intent.get("intent") == "MORE_INFO":
+                re_query = str(next_intent.get("re_query", "") or "").strip()
+                if re_query:
+                    more_results_re_query = re_query
+                    logger.info(
+                        "[MoreResults] conv_id=%s | fallback re_query 적용: %s",
+                        chat_request.conv_id,
+                        shorten_text(more_results_re_query, 80),
+                    )
+            excluded_chunk_ids, excluded_service_names = get_excluded_info_from_history(
+                chat_request.messages
+            )
+            logger.info(
+                "[MoreResults] conv_id=%s | 제외 대상 집계 chunk_ids=%d | service_names=%d",
+                chat_request.conv_id,
+                len(excluded_chunk_ids),
+                len(excluded_service_names),
+            )
         # ──────────────────────────────────────────────────────────────────────
+
+        if more_results_re_query:
+            # 검색 전 단계에서 후속질문을 완성 질의로 치환
+            user_message = more_results_re_query
+            logger.info(
+                "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
+                chat_request.conv_id,
+                shorten_text(user_message, 100),
+            )
 
         # ── [1단계] 선행 판단: use_rag + 되묻기 (is_clarification이면 스킵) ──
         if not is_clarification:
@@ -286,25 +354,71 @@ async def _streaming_chat_flow(
             logger.info(f"[SigunCheck/stream] sigun_filters={resolved_sigun_filters}")
         # ──────────────────────────────────────────────────────────────────────
 
-        # ── [2단계] 통합 전처리 (5개 작업, use_rag 전달) ─────────────────────
-        yield build_status_message("질문을 재구성하고 있습니다")
-        _t = time.monotonic()
-        _preprocess_messages = None if skip_clarification_check else chat_request.messages
-        preprocess = await unified_preprocess(user_message, _preprocess_messages, use_rag=use_rag)
+        # ── [2단계] 통합 전처리 (MORE_INFO면 히스토리 재사용 우선) ──────────────
+        preprocess = None
+        reused_preprocess = None
+        if more_results_detected:
+            reused_preprocess = get_last_preprocess_from_history(chat_request.messages)
+            if reused_preprocess:
+                user_message = reused_preprocess["query"]
+                await _update_user_message(chat_request.messages, user_message)
+                user_intent = reused_preprocess["intent"]
+                reformed_query = reused_preprocess["reformed_query"]
+                expanded_queries = reused_preprocess["expanded_queries"] or [reformed_query]
+                try:
+                    keywords = extract_nouns(reformed_query)
+                except Exception:
+                    keywords = []
+                preprocess = {
+                    "query": user_message,
+                    "intent": user_intent,
+                    "intent_reason": "reused_from_history_on_more_info",
+                    "reformed_query": reformed_query,
+                    "expanded_queries": expanded_queries,
+                    "keywords": keywords,
+                }
+                logger.info(
+                    "[MoreResults] conv_id=%s | unified_preprocess 스킵, 히스토리 재사용 intent=%s | reformed=%s | expanded=%d",
+                    chat_request.conv_id,
+                    user_intent,
+                    shorten_text(reformed_query or "", 80),
+                    len(expanded_queries or []),
+                )
+
+        if preprocess is None:
+            yield build_status_message("질문을 재구성하고 있습니다")
+            _t = time.monotonic()
+            _preprocess_messages = None if skip_clarification_check else chat_request.messages
+            preprocess = await unified_preprocess(user_message, _preprocess_messages, use_rag=use_rag)
+            _timings["t_unified_preprocess"] = round(time.monotonic() - _t, 3)
+            logger.info("[TIMING] 통합 전처리(unified_preprocess): %.3fs", _timings["t_unified_preprocess"])
+
+            user_message = preprocess["query"]
+            await _update_user_message(chat_request.messages, user_message)
+
+            user_intent      = preprocess["intent"]
+            reformed_query   = preprocess["reformed_query"]
+            expanded_queries = preprocess["expanded_queries"]
+            keywords         = preprocess["keywords"]
+            if more_results_detected:
+                logger.info(
+                    "[MoreResults] conv_id=%s | preprocess 결과 intent=%s | reformed=%s | expanded=%d",
+                    chat_request.conv_id,
+                    user_intent,
+                    shorten_text(reformed_query or "", 80),
+                    len(expanded_queries or []),
+                )
+
         yield f"data: {json.dumps({'chat-intent': preprocess['intent']})}\n\n"
         # 클라이언트에 preprocess 전체 결과 전송 (테스트/로깅용)
         yield f"data: {json.dumps({'preprocess': {'query': preprocess.get('query', ''), 'intent': preprocess.get('intent', ''), 'intent_reason': preprocess.get('intent_reason', ''), 'reformed_query': preprocess.get('reformed_query', ''), 'expanded_queries': preprocess.get('expanded_queries', [])}}, ensure_ascii=False)}\n\n"
-
-        _timings["t_unified_preprocess"] = round(time.monotonic() - _t, 3)
-        logger.info("[TIMING] 통합 전처리(unified_preprocess): %.3fs", _timings["t_unified_preprocess"])
-
-        user_message = preprocess["query"]
-        await _update_user_message(chat_request.messages, user_message)
-
-        user_intent      = preprocess["intent"]
-        reformed_query   = preprocess["reformed_query"]
-        expanded_queries = preprocess["expanded_queries"]
-        keywords         = preprocess["keywords"]
+        _preprocess_to_persist = {
+            "query": preprocess.get("query", ""),
+            "intent": preprocess.get("intent", ""),
+            "intent_reason": preprocess.get("intent_reason", ""),
+            "reformed_query": preprocess.get("reformed_query", ""),
+            "expanded_queries": preprocess.get("expanded_queries", []),
+        }
 
         # ── CSV 캡처: UnifiedPreprocess 결과 ─────────────────────────────────
         _timings["query"]           = preprocess.get("query", "")[:200]
@@ -361,6 +475,13 @@ async def _streaming_chat_flow(
                 **{k: v for k, v in llm_kwargs.items() if k != "messages"}
             )
         )
+        if more_results_detected:
+            logger.info(
+                "[MoreResults] conv_id=%s | RAG 호출 전달값 excluded_chunk_ids=%d | excluded_service_names=%d",
+                chat_request.conv_id,
+                len(excluded_chunk_ids or []),
+                len(excluded_service_names or []),
+            )
         while True:
             if rag_task.done() and status_queue.empty():
                 break
@@ -458,4 +579,6 @@ async def _streaming_chat_flow(
             assistant_content,
             _referenced_chunk_ids or None,
             _referenced_service_names or None,
+            _preprocess_to_persist or None,
         )
+        reset_log_context(_log_context_tokens)

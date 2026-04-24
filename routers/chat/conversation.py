@@ -139,6 +139,7 @@ def _save_stream_history(
     assistant_content: str,
     referenced_chunk_ids: list = None,
     referenced_service_names: list = None,
+    preprocess: dict = None,
 ) -> None:
     """스트리밍 응답 완료 후 대화 히스토리를 저장합니다."""
     if not (original_user_message or assistant_content.strip()):
@@ -157,6 +158,8 @@ def _save_stream_history(
             assistant_entry["referenced_chunk_ids"] = referenced_chunk_ids
         if referenced_service_names:
             assistant_entry["referenced_service_names"] = referenced_service_names
+        if isinstance(preprocess, dict) and preprocess:
+            assistant_entry["preprocess"] = preprocess
         existing_history.append(assistant_entry)
         history_service.upsert_history(
             user_id=persist_user_id,

@@ -21,6 +21,8 @@ from core.constants import (
     MARINER_WS_AND,
     MARINER_WS_END,
     MARINER_WS_FILTER,
+    MARINER_WS_NOT,
+    MARINER_WS_EXACT,
     MARINER_WEIGHT_HIGH,
 )
 from core.exceptions import RAGServiceError
@@ -33,6 +35,7 @@ def query_welfare_tel_documents(
     keyword: str,
     sigun_filters: Optional[List[str]] = None,
     eupmyeondong_filters: Optional[List[str]] = None,
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     GSND_OUR_REGION_TEL 컬렉션 전용 Mariner 검색
@@ -61,6 +64,12 @@ def query_welfare_tel_documents(
         return []
 
     collection = Config.RAG_WELFARE_TEL_COLLECTION
+
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -117,6 +126,20 @@ def query_welfare_tel_documents(
             jpkg_query.WhereSet(MARINER_WS_END),                                       # )
         ]
 
+        # CHUNK_ID(ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        if excluded_chunk_set:
+            excluded_values = sorted(excluded_chunk_set)
+            logger.debug(
+                "[MoreResults][Mariner/our_region_tel] 검색단 제외 IDs(%d): %s",
+                len(excluded_values),
+                excluded_values,
+            )
+            for chunk_id in excluded_values:
+                where_set_array += [
+                    jpkg_query.WhereSet(MARINER_WS_NOT),
+                    jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
+                ]
+
         # SIGUN 스크립틀릿 미적용
         # OUR_REGION_TEL은 창원시 구(區) 단위("경상남도 의창구" 등)로 SIGUN을 저장하여
         # 정규화된 시 단위("경상남도 창원시")와 포맷 불일치가 발생합니다.
@@ -159,6 +182,7 @@ def query_welfare_tel_documents(
         doc_list = []
         logger.info(f"[Mariner/our_region_tel] raw 결과: {result_size}개, 키워드: {keyword[:50]}")
 
+        excluded_count = 0
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -169,6 +193,9 @@ def query_welfare_tel_documents(
             doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
             doc["WEIGHT"] = str(weight_val)
             doc["CHUNK_ID"] = doc.get("ID", "")
+            if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
+                excluded_count += 1
+                continue
             doc["_source"] = "our_region_tel"
 
             # CHUNK_PATH: 핵심 필드 스니펫
@@ -185,6 +212,9 @@ def query_welfare_tel_documents(
             doc["CHUNK_PATH"] = "\n".join(snippet_parts)
 
             doc_list.append(doc)
+
+        if excluded_chunk_set:
+            logger.info(f"[MoreResults][Mariner/our_region_tel] CHUNK_ID 1차 제외: {excluded_count}개")
 
         t2 = time.monotonic()
         logger.info(

@@ -86,26 +86,14 @@ async def process_rag_search(
         t_total = time.monotonic()
 
         # ====================================================================
-        # Step 1: 쿼리 확장
+        # Step 1: 1차 검색 질의는 "정제 질의" 단건만 사용
         # ====================================================================
-        if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/search_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
-        else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            expanded_queries = await expand_query(reformed_query)
-            logger.info("[TIMING][search] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not expanded_queries:
-                logger.warning("[RAG/search_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                expanded_queries = [reformed_query]
-        logger.info(f"[RAG/search_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
-        for i, eq in enumerate(expanded_queries, 1):
-            logger.info(f"[RAG/search_v2] [벡터검색어] #{i}: {eq}")
+        expanded_queries = [reformed_query]
+        logger.info("[RAG/search_v2] 1차 검색 질의: reformed_query 단건 사용")
+        logger.info(f"[RAG/search_v2] [벡터검색어] #1: {reformed_query}")
 
         # ====================================================================
-        # Step 2: 트리플(키워드) 추출 (확장쿼리별 병렬)
+        # Step 2: 키워드 추출 (1차는 정제 질의 기준)
         # ====================================================================
         if precomputed_keywords:
             keyword_str = " ".join(precomputed_keywords)
@@ -115,9 +103,7 @@ async def process_rag_search(
             if status_callback:
                 await status_callback("내용을 정리하고 있습니다")
             _t = time.monotonic()
-            triples_list = await asyncio.gather(
-                *[extract_triples(eq) for eq in expanded_queries]
-            )
+            triples_list = [await extract_triples(reformed_query)]
             search_queries = _build_search_queries(list(triples_list))
             logger.info("[TIMING][search] Step2 트리플 추출: %.3fs", time.monotonic() - _t)
             logger.info(
@@ -174,6 +160,7 @@ async def process_rag_search(
                 return query_welfare_center_documents(
                     query,
                     sigun_filters=search_sigun_filters,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/search_v2] WELFARE_CENTER 검색 실패: {e}")
@@ -190,6 +177,7 @@ async def process_rag_search(
                     query,
                     sigun_filters=search_sigun_filters,
                     eupmyeondong_filters=_search_eupmyeondong_filters,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/search_v2] OUR_REGION_TEL 검색 실패: {e}")
@@ -259,6 +247,48 @@ async def process_rag_search(
             logger.info("[RAG/search_v2] OUR_REGION_TEL 결과 충분 — WELFARE_CENTER 결과 제외")
             all_docs = tel_docs
         else:
+            # 2차 fallback: 확장 쿼리 기반 보강 검색
+            fallback_center_docs: List[Dict[str, Any]] = []
+            fallback_tel_docs: List[Dict[str, Any]] = []
+            _t = time.monotonic()
+            if precomputed_expanded_queries:
+                _candidates = precomputed_expanded_queries
+                logger.info("[RAG/search_v2] fallback: 사전 계산 확장 쿼리 사용")
+            else:
+                _candidates = await expand_query(reformed_query)
+            fallback_expanded = [
+                q for q in (str(x).strip() for x in (_candidates or []))
+                if q and q != reformed_query
+            ]
+            logger.info("[TIMING][search] Step4-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
+            if fallback_expanded:
+                _t = time.monotonic()
+                fb_center_futures = [
+                    loop.run_in_executor(None, _run_welfare_center_query, q)
+                    for q in fallback_expanded
+                ]
+                fb_tel_futures = [
+                    loop.run_in_executor(None, _run_welfare_tel_query, q)
+                    for q in fallback_expanded
+                ]
+                fb_center_results, fb_tel_results = await asyncio.gather(
+                    asyncio.gather(*fb_center_futures),
+                    asyncio.gather(*fb_tel_futures),
+                )
+                logger.info("[TIMING][search] Step4-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
+                for docs in fb_center_results:
+                    if docs:
+                        fallback_center_docs.extend(docs[:_SEARCH_PER_QUERY])
+                for docs in fb_tel_results:
+                    if docs:
+                        fallback_tel_docs.extend(docs[:_SEARCH_PER_QUERY])
+                logger.info(
+                    "[RAG/search_v2] fallback 보강: CENTER %d개 + TEL %d개",
+                    len(fallback_center_docs),
+                    len(fallback_tel_docs),
+                )
+            center_docs.extend(fallback_center_docs)
+            tel_docs.extend(fallback_tel_docs)
             if tel_sufficiency.get("reason") == "judgment_disabled":
                 logger.info("[RAG/search_v2] 판단 비활성화 — OUR_REGION_TEL + WELFARE_CENTER 결과 합산")
             else:

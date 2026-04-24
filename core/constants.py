@@ -26,6 +26,7 @@ MARINER_WS_OR = 9                    # OR 그룹 시작
 MARINER_WS_AND = 6                   # AND 연결
 MARINER_WS_END = 10                  # 그룹 종료
 MARINER_WS_FILTER = 5                # 필터 조건 시작
+MARINER_WS_NOT = 7                   # NOT 조건
 
 # WhereSet 검색 모드
 MARINER_WS_BM25 = 2                  # BM25 키워드 검색
@@ -64,7 +65,7 @@ CSV_WELFARE_TEL_TYPE_BONUS: float = 0.1
 # ============================================================================
 # Logging
 # ============================================================================
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s [conv_id=%(conv_id)s] - %(message)s"
 LOG_MAX_BYTES = 10_000_000
 LOG_BACKUP_COUNT = 5
 LOG_ENCODING = "utf-8"

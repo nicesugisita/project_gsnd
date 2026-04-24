@@ -24,6 +24,7 @@ from core.constants import (
     MARINER_WS_AND,
     MARINER_WS_END,
     MARINER_WS_FILTER,
+    MARINER_WS_NOT,
     MARINER_WS_BM25,
     MARINER_WS_EXACT,
     MARINER_WEIGHT_HIGH,
@@ -75,6 +76,7 @@ def _query_dual_documents(
     user_id: Optional[str] = None,
     conv_id: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     QuerySet(2) 듀얼 검색 공통 로직 — TEST_OKMS_V4 Fallback 전용.
@@ -104,6 +106,12 @@ def _query_dual_documents(
         logger.warning(f"[Mariner/GroupA/FB] vector가 비어 있어 검색을 건너뜁니다.")
         return [], []
 
+
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -144,7 +152,7 @@ def _query_dual_documents(
         ]
 
         # Query[0]: keyword(트리플쿼리) 사용, Query[1]: vector(확장쿼리) 사용
-        logger.info(
+        logger.debug(
             f"[query_okms keywords] keywords = {keyword} / vector = {vector}")
         search_strings = [JString(keyword), JString(vector)]
 
@@ -211,6 +219,21 @@ def _query_dual_documents(
                     where_set_array.append(jpkg_query.WhereSet(MARINER_WS_END))  # )
                 logger.debug(f"[Mariner/{log_label}] Fallback SIGUN 스크립틀릿 적용: {sigun_scriptlet_values}")
 
+            # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
+            if excluded_chunk_set:
+                excluded_values = sorted(excluded_chunk_set)
+                logger.debug(
+                    "[MoreResults][Mariner/%s] 검색단 제외 IDs(%d): %s",
+                    log_label,
+                    len(excluded_values),
+                    excluded_values,
+                )
+                for chunk_id in excluded_values:
+                    where_set_array += [
+                        jpkg_query.WhereSet(MARINER_WS_NOT),
+                        jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
+                    ]
+
             query.setWhere(where_set_array)
             queryset.addQuery(query)
 
@@ -235,6 +258,7 @@ def _query_dual_documents(
             result = resultSet.getResult(result_idx)
             result_size = result.getRealSize()
             logger.info(f"[Mariner/{log_label}] [{label}] raw 결과: {result_size}개 (필터 전)")
+            excluded_count = 0
 
             for i in range(result_size):
                 try:
@@ -252,6 +276,12 @@ def _query_dual_documents(
                     if result_user_id != normalized_user_id or result_conv_id != normalized_conv_id:
                         continue
 
+                if excluded_chunk_set:
+                    result_chunk_id = str(result.getResult(i, field_indexes["ID"]) or "").strip()
+                    if result_chunk_id and result_chunk_id in excluded_chunk_set:
+                        excluded_count += 1
+                        continue
+
                 doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
                 doc["WEIGHT"] = str(weight_val)
 
@@ -261,6 +291,11 @@ def _query_dual_documents(
                 doc["CHUNK_PATH"] = str(doc.get("CONTENT", "") or "")
 
                 doc_list_ref.append(doc)
+
+            if excluded_chunk_set:
+                logger.info(
+                    f"[MoreResults][Mariner/{log_label}] [{label}] CHUNK_ID 1차 제외: {excluded_count}개"
+                )
 
         t2 = time.monotonic()
         logger.info(
@@ -288,6 +323,7 @@ def query_group_a_fallback(
     user_id: Optional[str] = None,
     conv_id: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Group A Fallback — 듀얼 검색 (QuerySet(2))
@@ -303,4 +339,5 @@ def query_group_a_fallback(
         vector, keyword, collection,
         user_id=user_id, conv_id=conv_id,
         sigun_filters=sigun_filters,
+        excluded_chunk_ids=excluded_chunk_ids,
     )

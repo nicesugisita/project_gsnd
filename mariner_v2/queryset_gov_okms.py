@@ -14,6 +14,14 @@ import jpype
 from jpype import JString
 
 from core.config import Config
+from core.constants import (
+    MARINER_WS_OR,
+    MARINER_WS_AND,
+    MARINER_WS_END,
+    MARINER_WS_FILTER,
+    MARINER_WS_NOT,
+    MARINER_WS_EXACT,
+)
 from core.exceptions import RAGServiceError
 from mariner_v2.jvm_manager import ensure_jvm_thread
 
@@ -45,6 +53,7 @@ def query_gov_okms_documents(
     search_string: str,
     collection: str = None,
     lifecycle_filter: Optional[str] = None,
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     GOV_OKMS_V1 단일 검색 (QuerySet(1))
@@ -69,6 +78,12 @@ def query_gov_okms_documents(
     mapped_lifecycle = _map_lifecycle_for_gov_okms(lifecycle_filter)
     if mapped_lifecycle != lifecycle_filter:
         logger.debug(f"[GOV_OKMS] lifecycle 매핑: '{lifecycle_filter}' → '{mapped_lifecycle}'")
+
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
 
     try:
         ensure_jvm_thread()
@@ -119,22 +134,36 @@ def query_gov_okms_documents(
 
         # WHERE: 4-field OR (sample code 기준)
         where_set_array = [
-            jpkg_query.WhereSet(9),                                          # OR (
+            jpkg_query.WhereSet(MARINER_WS_OR),                              # OR (
             jpkg_query.WhereSet("SERVICE_NAME_KO", 2,  ks, 0.7),            #   서비스명 키워드
-            jpkg_query.WhereSet(6),                                          #   OR
+            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  ks, 0.7),            #   텍스트 키워드
-            jpkg_query.WhereSet(6),                                          #   OR
+            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
             jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks),                 #   서비스명 벡터
-            jpkg_query.WhereSet(6),                                          #   OR
+            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_MI",   96, ks, 0.3),            #   텍스트 벡터
-            jpkg_query.WhereSet(10),                                         # )
+            jpkg_query.WhereSet(MARINER_WS_END),                             # )
         ]
 
         if mapped_lifecycle:
             where_set_array += [
-                jpkg_query.WhereSet(5),
+                jpkg_query.WhereSet(MARINER_WS_FILTER),
                 jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
             ]
+
+        # CHUNK_ID(SERVICE_ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        if excluded_chunk_set:
+            excluded_values = sorted(excluded_chunk_set)
+            logger.debug(
+                "[MoreResults][Mariner/GOV_OKMS] 검색단 제외 IDs(%d): %s",
+                len(excluded_values),
+                excluded_values,
+            )
+            for chunk_id in excluded_values:
+                where_set_array += [
+                    jpkg_query.WhereSet(MARINER_WS_NOT),
+                    jpkg_query.WhereSet("SERVICE_ID", MARINER_WS_EXACT, chunk_id, 0),
+                ]
 
         query.setWhere(where_set_array)
 
@@ -162,6 +191,7 @@ def query_gov_okms_documents(
         logger.info(f"[Mariner/GOV_OKMS] raw 결과: {result_size}개")
 
         docs: List[Dict[str, Any]] = []
+        excluded_count = 0
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -174,6 +204,9 @@ def query_gov_okms_documents(
 
             # 파이프라인 공통 정규화 필드
             doc["CHUNK_ID"]      = doc.get("SERVICE_ID", "")
+            if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
+                excluded_count += 1
+                continue
             doc["NAME"]          = _build_gov_okms_document_name(doc)
             doc["BUSINESS_NAME"] = doc.get("SERVICE_NAME", "")
             doc["ORG_NM"]        = doc.get("RESPONSIBLE_MINISTRY", "")
@@ -201,6 +234,9 @@ def query_gov_okms_documents(
             doc.setdefault("YEAR", "")
 
             docs.append(doc)
+
+        if excluded_chunk_set:
+            logger.info(f"[MoreResults][Mariner/GOV_OKMS] CHUNK_ID 1차 제외: {excluded_count}개")
 
         logger.info(
             f"[Mariner/GOV_OKMS] {time.monotonic() - t1:.3f}초, 결과: {len(docs)}개 "

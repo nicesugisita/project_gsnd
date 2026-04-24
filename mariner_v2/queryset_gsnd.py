@@ -23,6 +23,8 @@ from core.constants import (
     MARINER_WS_AND,
     MARINER_WS_END,
     MARINER_WS_FILTER,
+    MARINER_WS_NOT,
+    MARINER_WS_EXACT,
     MARINER_WS_BM25, MARINER_WS_VECTOR,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
@@ -87,6 +89,7 @@ def query_GSND_general_documents(
     lifecycle_filter: Optional[str] = None,
     facility_type_filter: Optional[str] = None,
     search_mode: str = "hybrid",
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     general 플로우의 GSND 보강 검색 (Step 7-B)에서 사용하는 Mariner 검색 함수.
@@ -101,6 +104,12 @@ def query_GSND_general_documents(
 
     if collection is None:
         collection = Config.RAG_COLLECTION
+
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -182,6 +191,27 @@ def query_GSND_general_documents(
                 where_set_array += [
                     jpkg_query.WhereSet(MARINER_WS_FILTER),
                     jpkg_query.WhereSet("SIGUN", 1, sigun_str, 0),
+                ]
+
+        # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        if excluded_chunk_set:
+            excluded_values = sorted(excluded_chunk_set)
+            # 컬렉션 스키마별 식별 필드 결정
+            if _uses_okms_document_schema(collection) or _uses_welfare_center_schema(collection):
+                id_field = "ID"
+            else:
+                id_field = "CHUNK_ID"
+
+            logger.debug(
+                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs(%d) field=%s: %s",
+                len(excluded_values),
+                id_field,
+                excluded_values,
+            )
+            for chunk_id in excluded_values:
+                where_set_array += [
+                    jpkg_query.WhereSet(MARINER_WS_NOT),
+                    jpkg_query.WhereSet(id_field, MARINER_WS_EXACT, chunk_id, 0),
                 ]
 
         query.setWhere(where_set_array)
@@ -306,6 +336,16 @@ def query_GSND_general_documents(
                         continue
 
             doc_list.append(doc)
+
+        if excluded_chunk_set:
+            before_count = len(doc_list)
+            doc_list = [
+                doc for doc in doc_list
+                if str(doc.get("CHUNK_ID", "")).strip() not in excluded_chunk_set
+            ]
+            logger.info(
+                f"[MoreResults][Mariner/general/GSND] CHUNK_ID 1차 제외: {before_count - len(doc_list)}개"
+            )
 
         t2 = time.monotonic()
         logger.info(f"[Mariner/general/GSND] 검색 시간: {t2 - t1:.3f}초, 키워드: {keyword[:50]}, 결과: {len(doc_list)}개")

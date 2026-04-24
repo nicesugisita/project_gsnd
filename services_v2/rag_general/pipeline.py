@@ -108,33 +108,21 @@ async def process_rag_general(
         logger.info(f"[RAG/general_v2] 선택된 컬렉션: {selected_collection}")
         logger.info("[TIMING][general] Step1 컬렉션 선택: %.3fs", time.monotonic() - _t)
 
-        # Step 2: 쿼리 확장
-        if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/general_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
-        else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            expanded_queries = await expand_query(reformed_query)
-            logger.info("[TIMING][general] Step2 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not expanded_queries:
-                logger.warning("[RAG/general_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                expanded_queries = [reformed_query]
-        logger.info(f"[RAG/general_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
-        for i, eq in enumerate(expanded_queries, 1):
-            logger.info(f"[RAG/general_v2] [벡터검색어] #{i}: {eq}")
+        # Step 2: 1차 검색 질의는 "정제 질의" 단건만 사용
+        expanded_queries = [reformed_query]
+        logger.info("[RAG/general_v2] 1차 검색 질의: reformed_query 단건 사용")
+        logger.info(f"[RAG/general_v2] [벡터검색어] #1: {reformed_query}")
 
-        # Step 3: 트리플(키워드) 추출 (확장쿼리별 병렬)
+        # Step 3: 키워드 추출 (1차는 정제 질의 기준)
         if status_callback:
             await status_callback("내용을 정리하고 있습니다")
-        if precomputed_keywords:
-            logger.info("[RAG/general_v2] 사전 계산된 키워드 (참고): %s", precomputed_keywords)
         _t = time.monotonic()
-        triples_list = await asyncio.gather(
-            *[extract_triples(eq) for eq in expanded_queries]
-        )
-        triples_list = [filter_okms_keywords(kws) for kws in triples_list]
+        if precomputed_keywords:
+            triples_list = [filter_okms_keywords(precomputed_keywords)]
+            logger.info("[RAG/general_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+        else:
+            _triples = await extract_triples(reformed_query)
+            triples_list = [filter_okms_keywords(_triples)]
         search_queries = _build_search_queries(list(triples_list))
         logger.info("[TIMING][general] Step3 트리플 추출: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -188,6 +176,7 @@ async def process_rag_general(
                     year_filters=gen_year_filters or None,
                     sigun_filters=gen_sigun_filters,
                     lifecycle_filter=gen_lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] Group A 쿼리 검색 실패: {e}")
@@ -199,6 +188,7 @@ async def process_rag_general(
                 return query_group_a_fallback(
                     vector, keywords, Config.RAG_OKMS_COLLECTION,
                     sigun_filters=gen_sigun_filters,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] Group A Fallback 검색 실패: {e}")
@@ -211,6 +201,7 @@ async def process_rag_general(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
                     lifecycle_filter=gen_lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] GOV_OKMS 쿼리 실패: {e}")
@@ -361,9 +352,28 @@ async def process_rag_general(
         welfare_tel_docs: List[Dict[str, Any]] = []
         gsnd_top: List[Dict[str, Any]] = []
 
+        fallback_expanded_queries: List[str] = []
         if okms_sufficiency["sufficient"]:
             logger.info("[RAG/general_v2] OKMS 결과 충분 — OUR_REGION_TEL/GSND 검색 생략")
         else:
+            # 2차 fallback: 확장 쿼리 사용
+            if status_callback:
+                await status_callback("검색을 보강하고 있습니다")
+            _t = time.monotonic()
+            if precomputed_expanded_queries:
+                _candidates = precomputed_expanded_queries
+                logger.info("[RAG/general_v2] fallback: 사전 계산 확장 쿼리 사용")
+            else:
+                _candidates = await expand_query(reformed_query)
+            logger.info("[TIMING][general] Step6-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
+            fallback_expanded_queries = [
+                q for q in (str(x).strip() for x in (_candidates or []))
+                if q and q != reformed_query
+            ]
+            if fallback_expanded_queries:
+                logger.info("[RAG/general_v2] fallback 확장 쿼리 적용: %d개", len(fallback_expanded_queries))
+            else:
+                logger.info("[RAG/general_v2] fallback 확장 쿼리 없음 — 정제 질의 유지")
             logger.info("[RAG/general_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
 
             from services.sigun_service import extract_eupmyeondong_from_message
@@ -373,7 +383,8 @@ async def process_rag_general(
             _t = time.monotonic()
             welfare_tel_docs = await run_welfare_tel_queries(
                 message, gen_sigun_filters, gen_eupmyeondong_filters,
-                _WELFARE_TEL_PER_QUERY, "RAG/general_v2"
+                _WELFARE_TEL_PER_QUERY, "RAG/general_v2",
+                excluded_chunk_ids=excluded_chunk_ids,
             )
             logger.info("[TIMING][general] Step7 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
             logger.info(f"[RAG/general_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
@@ -408,7 +419,8 @@ async def process_rag_general(
                 logger.info("[RAG/general_v2] OKMS+OUR_REGION_TEL 결과 부족 → GSND 병렬 검색")
                 _GSND_SUPPLEMENT_COUNT = 2
                 _GSND_PER_QUERY = 10
-                gsnd_all_queries = list(expanded_queries) + list(search_queries)
+                gsnd_seed_queries = fallback_expanded_queries or list(expanded_queries)
+                gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
 
                 gsnd_year_filters = extract_year_filters(message)
                 if gsnd_year_filters:
@@ -422,6 +434,7 @@ async def process_rag_general(
                             query, selected_collection,
                             sigun_filters=gen_sigun_filters,
                             year_filters=gsnd_year_filters or None,
+                            excluded_chunk_ids=excluded_chunk_ids,
                         )
                         if docs:
                             return sorted(
@@ -504,9 +517,10 @@ async def process_rag_general(
         if (not top_docs) or excluded_chunk_ids or excluded_service_names:
             logger.info("[RAG/general_v2] 재검색 시작 (0건 또는 제외문서 기반 추가 탐색)")
             _t = time.monotonic()
+            fallback_seed_queries = fallback_expanded_queries or list(expanded_queries)
             fb_futures = [
                 loop.run_in_executor(None, _group_a_run_okms_fallback, eq, sq if sq else "")
-                for eq, sq in zip_longest(expanded_queries, ga_tri_built, fillvalue="")
+                for eq, sq in zip_longest(fallback_seed_queries, ga_tri_built, fillvalue="")
             ]
             fb_results = await asyncio.gather(*fb_futures)
             logger.info(

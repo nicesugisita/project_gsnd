@@ -191,6 +191,11 @@ def load_unified_preprocessing_prompt() -> str:
     return _load_prompt_file('unified_preprocessing_prompt.txt')
 
 
+def load_next_intent_prompt() -> str:
+    """Load next-turn intent classification prompt from file."""
+    return _load_prompt_file('next_intent_prompt.txt')
+
+
 def load_pre_check_prompt() -> str:
     """Load Pre-check prompt (use_rag + clarification) from file."""
     return _load_prompt_file('pre_check_prompt.txt')

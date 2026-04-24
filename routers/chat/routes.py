@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from core.config import Config
 from core.models import ChatRequest, RecommendStartRequest
+from core.logging_context import set_log_context, reset_log_context
 from services import (
     convert_korean_to_standard,
     generate_suggested_questions,
@@ -57,6 +58,7 @@ router = APIRouter()
 @router.post('/v1/chat/completions')
 async def chat_completions(request: Request):
     """Chat Completions API endpoint."""
+    log_context_tokens = None
     t_request_start = time.monotonic()
     origin = request.headers.get("origin")
     logger.info(f"[Chat Completions] origin={origin}")
@@ -68,6 +70,7 @@ async def chat_completions(request: Request):
             return error_response
 
         chat_request = ChatRequest(**data)
+        log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         print("===========================chat_request.messages===========================", chat_request.messages)
 
         first_msg_preview = chat_request.messages[0].get('content', '')[:50] if chat_request.messages else 'None'
@@ -235,6 +238,9 @@ async def chat_completions(request: Request):
             },
             status_code=500,
         )
+    finally:
+        if log_context_tokens is not None:
+            reset_log_context(log_context_tokens)
 
 
 @router.post('/v1/chat/recommend/collect')
@@ -242,21 +248,25 @@ async def collect_recommendation_inputs(body: RecommendStartRequest = Body(defau
     """복지서비스추천 버튼 트리거: 지역·출생연도 수집 질문을 반환합니다."""
     QUESTION = "거주 지역(시.군)과 출생연도를 알려주세요."
     conv_id = body.conv_id or str(uuid.uuid4())
+    log_context_tokens = set_log_context(conv_id, body.user_id)
 
-    response = build_chat_response(
-        response_message=QUESTION,
-        user_message="",
-        model_name=Config.MODEL_NAME,
-        conv_id=conv_id,
-        is_clarification=True,
-    )
-
-    if body.stream:
-        return StreamingResponse(
-            _build_streaming_response(QUESTION, response),
-            media_type="text/event-stream",
+    try:
+        response = build_chat_response(
+            response_message=QUESTION,
+            user_message="",
+            model_name=Config.MODEL_NAME,
+            conv_id=conv_id,
+            is_clarification=True,
         )
-    return JSONResponse(content={"message": QUESTION, "conv_id": conv_id}, status_code=200)
+
+        if body.stream:
+            return StreamingResponse(
+                _build_streaming_response(QUESTION, response),
+                media_type="text/event-stream",
+            )
+        return JSONResponse(content={"message": QUESTION, "conv_id": conv_id}, status_code=200)
+    finally:
+        reset_log_context(log_context_tokens)
 
 
 @router.post('/v1/chat/suggest-questions')

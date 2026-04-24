@@ -20,6 +20,7 @@ from core.constants import (
     LOG_BACKUP_COUNT,
     LOG_ENCODING,
 )
+from core.logging_context import RequestContextFilter
 
 def _setup_logging(config: Config) -> None:
     """
@@ -49,6 +50,11 @@ def _setup_logging(config: Config) -> None:
         ],
         force=True,
     )
+    context_filter = RequestContextFilter()
+    root_logger = logging.getLogger()
+    root_logger.addFilter(context_filter)
+    for handler in root_logger.handlers:
+        handler.addFilter(context_filter)
 
     # httpx/httpcore 라이브러리 로그 억제 (DEBUG 시에도 커넥션 로그 숨김)
     logging.getLogger("httpx").setLevel(logging.WARNING)

@@ -138,34 +138,23 @@ async def process_rag_guide_recommend(
         else:
             logger.info(f"[RAG/guide_recommend_v2] 연도 필터 미적용")
 
-        # Step A-1: 쿼리 확장
+        # Step A-1: 1차 검색 질의는 "정제 질의" 단건만 사용
         gr_expand_base = reformed_query
-        logger.info(f"[RAG/guide_recommend_v2] 쿼리 확장 기준: '{gr_expand_base}'")
-        if precomputed_expanded_queries:
-            gr_expanded = precomputed_expanded_queries
-            logger.info("[RAG/guide_recommend_v2] 사전 계산된 확장 쿼리 사용: %d개", len(gr_expanded))
-        else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            gr_expanded = await expand_query(gr_expand_base)
-            logger.info("[TIMING][guide_recommend] StepA-1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not gr_expanded:
-                logger.warning("[RAG/guide_recommend_v2] 쿼리 확장 실패 - 기준 질의 사용")
-                gr_expanded = [gr_expand_base]
-        logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")
-        for i, eq in enumerate(gr_expanded, 1):
-            logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #{i}: {eq}")
+        gr_expanded = [gr_expand_base]
+        logger.info("[RAG/guide_recommend_v2] 1차 검색 질의: reformed_query 단건 사용")
+        logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #1: {gr_expand_base}")
 
-        # Step A-2: 벡터 검색어에서 키워드 직접 추출 (kiwi 형태소 분석, 로컬)
+        # Step A-2: 키워드 추출 (1차는 정제 질의 기준)
         if status_callback:
             await status_callback("내용을 정리하고 있습니다")
-        if precomputed_keywords:
-            logger.info("[RAG/guide_recommend_v2] 사전 계산된 키워드 (참고): %s", precomputed_keywords)
         _t = time.monotonic()
-        gr_triples_list = [
-            filter_okms_keywords(extract_nouns(eq, use_bigram=False)) for eq in gr_expanded
-        ]
+        if precomputed_keywords:
+            logger.info("[RAG/guide_recommend_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+            gr_triples_list = [filter_okms_keywords(precomputed_keywords)]
+        else:
+            gr_triples_list = [
+                filter_okms_keywords(extract_nouns(gr_expand_base, use_bigram=False))
+            ]
         gr_search_queries = _build_search_queries(list(gr_triples_list))
         logger.info("[TIMING][guide_recommend] StepA-2 키워드 추출 (kiwi): %.3fs", time.monotonic() - _t)
         logger.info(
@@ -195,6 +184,7 @@ async def process_rag_guide_recommend(
                     year_filters=gr_year_filters or None,
                     sigun_filters=gr_sigun_filters,
                     lifecycle_filter=lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] Group A 쿼리 검색 실패: {e}")
@@ -207,6 +197,7 @@ async def process_rag_guide_recommend(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
                     lifecycle_filter=lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] GOV_OKMS 쿼리 실패: {e}")
@@ -315,6 +306,7 @@ async def process_rag_guide_recommend(
                     return query_group_a_fallback(
                         vector, keywords, selected_collection,
                         sigun_filters=gr_sigun_filters,
+                        excluded_chunk_ids=excluded_chunk_ids,
                     )
                 except Exception as e:
                     logger.warning(f"[RAG/guide_recommend_v2] Group A Fallback 검색 실패: {e}")
@@ -369,19 +361,89 @@ async def process_rag_guide_recommend(
         if okms_sufficiency["sufficient"]:
             logger.info("[RAG/guide_recommend_v2] OKMS 결과 충분 — OUR_REGION_TEL 검색 생략")
         else:
-            logger.info("[RAG/guide_recommend_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
-
-            from services.sigun_service import extract_eupmyeondong_from_message
-            gr_eupmyeondong = extract_eupmyeondong_from_message(message)
-            gr_eupmyeondong_filters = [gr_eupmyeondong] if gr_eupmyeondong else []
-
+            # 2차 fallback: 확장 쿼리 기반 OKMS 보강 검색
+            if status_callback:
+                await status_callback("검색을 보강하고 있습니다")
             _t = time.monotonic()
-            gr_welfare_tel_docs = await run_welfare_tel_queries(
-                message, gr_sigun_filters, gr_eupmyeondong_filters,
-                _GR_WELFARE_TEL_PER_QUERY, "RAG/guide_recommend_v2"
-            )
-            logger.info("[TIMING][guide_recommend] StepD-W OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/guide_recommend_v2] OUR_REGION_TEL 검색 합계: {len(gr_welfare_tel_docs)}개")
+            if precomputed_expanded_queries:
+                _candidates = precomputed_expanded_queries
+                logger.info("[RAG/guide_recommend_v2] fallback: 사전 계산 확장 쿼리 사용")
+            else:
+                _candidates = await expand_query(gr_expand_base)
+            logger.info("[TIMING][guide_recommend] StepD-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
+            fallback_expanded = [
+                q for q in (str(x).strip() for x in (_candidates or []))
+                if q and q != gr_expand_base
+            ]
+            if fallback_expanded:
+                _t = time.monotonic()
+                fallback_tri = [
+                    " ".join(
+                        k.strip()
+                        for k in filter_okms_keywords(extract_nouns(eq, use_bigram=False))
+                        if k and k.strip()
+                    )
+                    for eq in fallback_expanded
+                ]
+                fb_pair_futures = [
+                    loop.run_in_executor(None, _group_a_run_okms_query, eq, sq if sq else "")
+                    for eq, sq in zip_longest(fallback_expanded, fallback_tri, fillvalue="")
+                ]
+                fb_gov_futures = [
+                    loop.run_in_executor(None, _run_gov_okms_query, s)
+                    for s in list(fallback_expanded) + [sq for sq in fallback_tri if sq]
+                ]
+                fb_results = await asyncio.gather(*fb_pair_futures, *fb_gov_futures)
+                logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
+                fb_pair_results = fb_results[:len(fb_pair_futures)]
+                fb_gov_results = fb_results[len(fb_pair_futures):]
+                fb_docs: List[Dict[str, Any]] = []
+                for pair in fb_pair_results:
+                    if pair[1]:
+                        fb_docs.extend(pair[1][:_GR_GA_PER_QUERY])
+                    if pair[0]:
+                        fb_docs.extend(pair[0][:_GR_GA_PER_QUERY])
+                for docs in fb_gov_results:
+                    if docs:
+                        fb_docs.extend(docs[:_GR_GA_PER_QUERY])
+                if fb_docs:
+                    gr_top_docs = sorted(
+                        _deduplicate_documents(gr_top_docs + fb_docs),
+                        key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                        reverse=True,
+                    )[:_GR_FINAL_TOP_N]
+                    logger.info("[RAG/guide_recommend_v2] fallback 보강 후 OKMS: %d개", len(gr_top_docs))
+                    _t = time.monotonic()
+                    okms_sufficiency = await retrieval_sufficiency_judgment(
+                        user_question=message,
+                        intent=intent,
+                        collection_name=Config.RAG_OKMS_COLLECTION,
+                        docs=gr_top_docs,
+                    )
+                    logger.info("[TIMING][guide_recommend] StepD-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
+                    logger.info(
+                        "[RAG/guide_recommend_v2] fallback 재판단: sufficient=%s, reason=%s",
+                        okms_sufficiency["sufficient"],
+                        okms_sufficiency["reason"],
+                    )
+
+            if okms_sufficiency["sufficient"]:
+                logger.info("[RAG/guide_recommend_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
+            else:
+                logger.info("[RAG/guide_recommend_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
+
+                from services.sigun_service import extract_eupmyeondong_from_message
+                gr_eupmyeondong = extract_eupmyeondong_from_message(message)
+                gr_eupmyeondong_filters = [gr_eupmyeondong] if gr_eupmyeondong else []
+
+                _t = time.monotonic()
+                gr_welfare_tel_docs = await run_welfare_tel_queries(
+                    message, gr_sigun_filters, gr_eupmyeondong_filters,
+                    _GR_WELFARE_TEL_PER_QUERY, "RAG/guide_recommend_v2",
+                    excluded_chunk_ids=excluded_chunk_ids,
+                )
+                logger.info("[TIMING][guide_recommend] StepD-W OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
+                logger.info(f"[RAG/guide_recommend_v2] OUR_REGION_TEL 검색 합계: {len(gr_welfare_tel_docs)}개")
 
         # OKMS + WELFARE_TEL 합산 (OKMS 쿼터 내 정렬)
         gr_top_docs = sorted(

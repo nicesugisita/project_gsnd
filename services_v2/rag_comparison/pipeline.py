@@ -103,36 +103,24 @@ async def process_rag_with_documents_v2(
         logger.info(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
         # ====================================================================
-        # Step 1: 쿼리 확장
+        # Step 1: 1차 검색 질의는 "정제 질의" 단건만 사용
         # ====================================================================
-        if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/comparison_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
-        else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            expanded_queries = await expand_query(reformed_query)
-            logger.info("[TIMING][comparison] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not expanded_queries:
-                logger.warning("[RAG/comparison_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                expanded_queries = [reformed_query]
-        logger.info(f"[RAG/comparison_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
-        for i, eq in enumerate(expanded_queries, 1):
-            logger.info(f"[RAG/comparison_v2] [벡터검색어] #{i}: {eq}")
+        expanded_queries = [reformed_query]
+        logger.info("[RAG/comparison_v2] 1차 검색 질의: reformed_query 단건 사용")
+        logger.info(f"[RAG/comparison_v2] [벡터검색어] #1: {reformed_query}")
 
         # ====================================================================
-        # Step 2: 트리플(키워드) 추출 (확장쿼리별 병렬)
+        # Step 2: 키워드 추출 (1차는 정제 질의 기준)
         # ====================================================================
         if status_callback:
             await status_callback("내용을 정리하고 있습니다")
-        if precomputed_keywords:
-            logger.info("[RAG/comparison_v2] 사전 계산된 키워드 (참고): %s", precomputed_keywords)
         _t = time.monotonic()
-        triples_list = await asyncio.gather(
-            *[extract_triples(eq) for eq in expanded_queries]
-        )
-        triples_list = [filter_okms_keywords(kws) for kws in triples_list]
+        if precomputed_keywords:
+            triples_list = [filter_okms_keywords(precomputed_keywords)]
+            logger.info("[RAG/comparison_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+        else:
+            _triples = await extract_triples(reformed_query)
+            triples_list = [filter_okms_keywords(_triples)]
         search_queries = _build_search_queries(list(triples_list))
         logger.info("[TIMING][comparison] Step2 트리플 추출: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -180,6 +168,7 @@ async def process_rag_with_documents_v2(
                     year_filters=comp_year_filters or None,
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=comp_lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] Group A 검색 실패: {e}")
@@ -190,6 +179,7 @@ async def process_rag_with_documents_v2(
                 return query_group_a_fallback(
                     vector, keywords, selected_collection,
                     sigun_filters=comp_sigun_filters,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] Group A Fallback 실패: {e}")
@@ -202,6 +192,7 @@ async def process_rag_with_documents_v2(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
                     lifecycle_filter=comp_lifecycle or None,
+                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] GOV_OKMS 쿼리 실패: {e}")
@@ -340,28 +331,95 @@ async def process_rag_with_documents_v2(
         if okms_sufficiency["sufficient"]:
             logger.info("[RAG/comparison_v2] OKMS 결과 충분 — OUR_REGION_TEL 검색 생략")
         else:
-            logger.info("[RAG/comparison_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
-
-            from services.sigun_service import extract_eupmyeondong_from_message
-            comp_eupmyeondong = extract_eupmyeondong_from_message(message)
-            comp_eupmyeondong_filters = [comp_eupmyeondong] if comp_eupmyeondong else []
-
-            def _run_welfare_tel_query():
-                try:
-                    return query_welfare_tel_documents(
-                        message,
-                        sigun_filters=comp_sigun_filters,
-                        eupmyeondong_filters=comp_eupmyeondong_filters,
-                    )
-                except Exception as e:
-                    logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")
-                    return []
-
+            # 2차 fallback: 확장 쿼리 기반 OKMS 보강 검색
+            if status_callback:
+                await status_callback("검색을 보강하고 있습니다")
             _t = time.monotonic()
-            _tel_result = await loop.run_in_executor(None, _run_welfare_tel_query)
-            logger.info("[TIMING][comparison] Step6 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
-            welfare_tel_docs.extend(_tel_result[:_COMP_WELFARE_TEL_PER_QUERY])
-            logger.info(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
+            if precomputed_expanded_queries:
+                _candidates = precomputed_expanded_queries
+                logger.info("[RAG/comparison_v2] fallback: 사전 계산 확장 쿼리 사용")
+            else:
+                _candidates = await expand_query(reformed_query)
+            logger.info("[TIMING][comparison] Step5-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
+            fallback_expanded_queries = [
+                q for q in (str(x).strip() for x in (_candidates or []))
+                if q and q != reformed_query
+            ]
+            if fallback_expanded_queries:
+                _t = time.monotonic()
+                fallback_triples = await asyncio.gather(*[extract_triples(eq) for eq in fallback_expanded_queries])
+                fallback_tri_built = [
+                    " ".join(k.strip() for k in filter_okms_keywords(kws) if k and k.strip())
+                    for kws in fallback_triples
+                ]
+                fb_pair_futures = [
+                    loop.run_in_executor(None, _group_a_run, eq, sq if sq else "")
+                    for eq, sq in zip_longest(fallback_expanded_queries, fallback_tri_built, fillvalue="")
+                ]
+                fb_gov_futures = [
+                    loop.run_in_executor(None, _run_gov_okms_query, s)
+                    for s in list(fallback_expanded_queries) + [sq for sq in fallback_tri_built if sq]
+                ]
+                fb_results = await asyncio.gather(*fb_pair_futures, *fb_gov_futures)
+                logger.info("[TIMING][comparison] Step5-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
+                fb_pair_results = fb_results[:len(fb_pair_futures)]
+                fb_gov_results = fb_results[len(fb_pair_futures):]
+                fb_docs: List[Dict[str, Any]] = []
+                for pair in fb_pair_results:
+                    if pair[1]:
+                        fb_docs.extend(pair[1][:_COMP_GA_PER_QUERY])
+                    if pair[0]:
+                        fb_docs.extend(pair[0][:_COMP_GA_PER_QUERY])
+                for docs in fb_gov_results:
+                    if docs:
+                        fb_docs.extend(docs[:_COMP_GA_PER_QUERY])
+                if fb_docs:
+                    okms_final = sorted(
+                        _deduplicate_documents(okms_final + fb_docs),
+                        key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                        reverse=True,
+                    )[:_COMP_FINAL_TOP_N]
+                    logger.info("[RAG/comparison_v2] fallback 보강 후 OKMS: %d개", len(okms_final))
+                    _t = time.monotonic()
+                    okms_sufficiency = await retrieval_sufficiency_judgment(
+                        user_question=message,
+                        intent=intent,
+                        collection_name=Config.RAG_OKMS_COLLECTION,
+                        docs=okms_final,
+                    )
+                    logger.info("[TIMING][comparison] Step5-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
+                    logger.info(
+                        "[RAG/comparison_v2] fallback 재판단: sufficient=%s, reason=%s",
+                        okms_sufficiency["sufficient"],
+                        okms_sufficiency["reason"],
+                    )
+
+            if okms_sufficiency["sufficient"]:
+                logger.info("[RAG/comparison_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
+            else:
+                logger.info("[RAG/comparison_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
+
+                from services.sigun_service import extract_eupmyeondong_from_message
+                comp_eupmyeondong = extract_eupmyeondong_from_message(message)
+                comp_eupmyeondong_filters = [comp_eupmyeondong] if comp_eupmyeondong else []
+
+                def _run_welfare_tel_query():
+                    try:
+                        return query_welfare_tel_documents(
+                            message,
+                            sigun_filters=comp_sigun_filters,
+                            eupmyeondong_filters=comp_eupmyeondong_filters,
+                            excluded_chunk_ids=excluded_chunk_ids,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")
+                        return []
+
+                _t = time.monotonic()
+                _tel_result = await loop.run_in_executor(None, _run_welfare_tel_query)
+                logger.info("[TIMING][comparison] Step6 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
+                welfare_tel_docs.extend(_tel_result[:_COMP_WELFARE_TEL_PER_QUERY])
+                logger.info(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
 
         # OKMS + WELFARE_TEL 합산
         top_docs = sorted(

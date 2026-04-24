@@ -22,6 +22,8 @@ from core.constants import (
     MARINER_WS_OR,
     MARINER_WS_AND,
     MARINER_WS_END,
+    MARINER_WS_NOT,
+    MARINER_WS_EXACT,
     MARINER_WS_VECTOR,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
@@ -41,6 +43,7 @@ def query_welfare_center_documents(
     keyword: str,
     sigun_filters: Optional[List[str]] = None,
     facility_type_filter: Optional[str] = None,
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     GSND_WELFARE_CENTER_V1 컬렉션 전용 Mariner 검색
@@ -68,6 +71,12 @@ def query_welfare_center_documents(
         return []
 
     collection = Config.RAG_WELFARE_CENTER_COLLECTION
+
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
 
     try:
         # Mariner 설정 — 예제 코드 기준값 사용 (threshold=0.2, top_n=20, vs_size=50)
@@ -131,6 +140,20 @@ def query_welfare_center_documents(
             jpkg_query.WhereSet(MARINER_WS_END),                                       # )
         ]
 
+        # CHUNK_ID(ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        if excluded_chunk_set:
+            excluded_values = sorted(excluded_chunk_set)
+            logger.debug(
+                "[MoreResults][Mariner/welfare] 검색단 제외 IDs(%d): %s",
+                len(excluded_values),
+                excluded_values,
+            )
+            for chunk_id in excluded_values:
+                where_set_array += [
+                    jpkg_query.WhereSet(MARINER_WS_NOT),
+                    jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
+                ]
+
         # SIGUN 스크립틀릿: Mariner 레벨 필터 미적용 — Python 후처리로만 필터링
         # WELFARE_CENTER SIGUN 필드 포맷 미확인 (단축형/전체형 불명), 스크립틀릿 비적용
         # OUR_REGION_TEL도 동일한 이유로 SIGUN 스크립틀릿 미사용
@@ -164,6 +187,7 @@ def query_welfare_center_documents(
         }
         logger.info(f"[Mariner/welfare] raw 결과: {result_size}개 (필터 전), 키워드: {keyword[:50]}, sigun_filters={list(target_siguns) if target_siguns else None}")
 
+        excluded_count = 0
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -179,6 +203,9 @@ def query_welfare_center_documents(
 
             # WELFARE_CENTER 필드 매핑
             doc["CHUNK_ID"] = doc.get("ID", "")
+            if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
+                excluded_count += 1
+                continue
             doc["NAME"] = str(doc.get("FACILITY_NAME", "") or "").strip()
 
             # CHUNK_PATH: 참조문서 스니펫에 표시될 모든 시설 정보
@@ -218,6 +245,9 @@ def query_welfare_center_documents(
                     continue
 
             doc_list.append(doc)
+
+        if excluded_chunk_set:
+            logger.info(f"[MoreResults][Mariner/welfare] CHUNK_ID 1차 제외: {excluded_count}개")
 
         t2 = time.monotonic()
         logger.info(f"[Mariner/welfare] 검색 시간: {t2 - t1:.3f}초, 키워드: {keyword[:50]}, 결과: {len(doc_list)}개")

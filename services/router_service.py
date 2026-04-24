@@ -14,11 +14,13 @@ Router Service - Query Routing and Classification
 
 import json
 import logging
+import re
 from typing import Dict, Any, List
 
 from core.config import Config
 from core.constants import ROLE_USER
 from .llm_service import call_llm_api
+from .more_results_service import is_more_results_intent
 from .deepserver_service import (
     deepserver_reform_query,
     deepserver_expand_query,
@@ -28,8 +30,22 @@ from .deepserver_service import (
 )
 from utils.prompt_loader import load_query_recreation_prompt
 from utils.helpers import shorten_text
+from core.constants import ROLE_ASSISTANT
 
 logger = logging.getLogger(__name__)
+
+
+def _get_base_user_query(messages: list) -> str:
+    """연속된 more-results 구간 이전의 원질문(최근 non-more-results user)을 찾는다."""
+    for msg in reversed(messages or []):
+        if msg.get("role") != ROLE_USER:
+            continue
+        content = str(msg.get("content", "") or "").strip()
+        if not content:
+            continue
+        if not is_more_results_intent(content):
+            return content
+    return ""
 
 
 async def reform_query(user_query: str, chat_messages: Any = None) -> str:
@@ -122,6 +138,84 @@ async def query_recreation(
     except Exception as e:
         logger.error("[Query Recreation] 오류: %s", e)
         return ""
+
+
+async def classify_next_intent(messages: list, current_query: str) -> dict:
+    """
+    이전 대화 + 현재 질문 기반 후속 의도 분류.
+
+    Returns:
+        {"intent": "MORE_INFO" | "OTHER", "re_query": str}
+    """
+    from utils.prompt_loader import load_next_intent_prompt
+
+    base_user_query = _get_base_user_query(messages)
+    fallback_re_query = base_user_query or current_query
+    fallback = {"intent": "OTHER", "re_query": fallback_re_query}
+    try:
+        prompt = load_next_intent_prompt()
+        if not prompt:
+            return fallback
+
+        before_user = ""
+        before_assistant = ""
+        for msg in reversed(messages or []):
+            role = msg.get("role")
+            content = str(msg.get("content", "") or "").strip()
+            if not content:
+                continue
+            if not before_assistant and role == ROLE_ASSISTANT:
+                before_assistant = content
+            elif not before_user and role == ROLE_USER:
+                before_user = content
+            if before_user and before_assistant:
+                break
+
+        formatted_prompt = (
+            prompt
+            .replace("{before_user_input}", before_user)
+            .replace("{before_answer}", before_assistant)
+            .replace("{user_input}", current_query)
+        )
+
+        response = await call_llm_api(
+            message=formatted_prompt,
+            temperature=0,
+            response_format={"type": "json_object"},
+            api_url=Config.LLM_API_URL,
+            extra_system_prompts=[],
+        )
+
+        text = str(response or "").strip()
+        if text.startswith("```"):
+            text = (
+                text.removeprefix("```json")
+                    .removeprefix("```")
+                    .removesuffix("```")
+                    .strip()
+            )
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        parsed = json.loads(match.group(0) if match else text)
+
+        raw_intent = str(parsed.get("intent", "OTHER")).upper()
+        mapped_intent = "MORE_INFO" if raw_intent == "MORE_INFO" else "OTHER"
+        llm_re_query = str(parsed.get("re_query", "") or "").strip()
+        re_query = llm_re_query or fallback_re_query
+        if mapped_intent == "MORE_INFO" and base_user_query:
+            # "더 알려줘"는 원질문 컨텍스트(예: 지역/대상)를 우선 유지한다.
+            re_query = base_user_query
+        result = {"intent": mapped_intent, "re_query": re_query}
+        logger.info(
+            "[NextIntent] intent=%s, base_query=%s, llm_re_query=%s, re_query=%s",
+            mapped_intent,
+            shorten_text(base_user_query, 80),
+            shorten_text(llm_re_query, 80),
+            shorten_text(re_query, 80),
+        )
+        return result
+    except Exception as e:
+        logger.warning("[NextIntent] 분류 실패: %s", e)
+        return fallback
 
 
 async def expand_query(reformed_query: str) -> list:
