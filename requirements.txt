@@ -1,0 +1,39 @@
+# Python >= 3.11, < 3.12
+
+# Web Framework
+fastapi==0.115.2
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+pydantic==2.4.2
+pydantic-settings==2.0.3
+
+# HTTP Client
+httpx==0.27.0
+requests==2.31.0
+
+# Tokenization
+tiktoken==0.5.2
+
+# NLP (Korean morphological analysis)
+kiwipiepy
+numpy>=1.19.0  # kiwipiepy 의존성
+
+# Logging
+python-json-logger==2.0.7
+
+# Type Checking
+typing-extensions==4.8.0
+
+# STT (Speech-to-Text)
+websocket-client==1.9.0
+websockets==12.0  # 비동기 WebSocket 라이브러리
+pyaudio==0.2.14
+
+# Database
+mysql-connector-python==8.2.0
+jpype1==1.7.0
+
+# Caching
+cachetools==5.3.3
+async-lru==2.0.4
+
