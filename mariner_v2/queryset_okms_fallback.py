@@ -230,11 +230,14 @@ def _query_dual_documents(
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
             if excluded_chunk_set:
                 excluded_values = sorted(excluded_chunk_set)
-                logger.debug(
-                    "[MoreResults][Mariner/%s] 검색단 제외 IDs(%d): %s",
+                _n = len(excluded_values)
+                _sample = excluded_values[:20]
+                logger.info(
+                    "[MoreResults][Mariner/%s] 검색단 제외 IDs(%d): %s%s",
                     log_label,
-                    len(excluded_values),
-                    excluded_values,
+                    _n,
+                    _sample,
+                    "..." if _n > 20 else "",
                 )
                 for chunk_id in excluded_values:
                     where_set_array += [

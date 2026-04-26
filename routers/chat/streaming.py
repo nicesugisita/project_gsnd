@@ -46,7 +46,6 @@ from ..deps import (
 from .helpers import _get_rag_processor, _run_query_recreation
 from .conversation import _save_stream_history
 from services.more_results_service import (
-    is_more_results_intent,
     get_excluded_info_from_history,
     get_base_user_query_from_history,
     get_last_preprocess_from_history,
@@ -133,22 +132,13 @@ async def _streaming_chat_flow(
         excluded_chunk_ids: list = []
         excluded_service_names: list = []
         more_results_re_query: str | None = None
+        more_info_final_user_message: str | None = None
         last_preprocess = get_last_preprocess_from_history(chat_request.messages)
-        # NOTE: 임시 조치
-        # MORE_RESULTS_PATTERNS 선판단이 후속 질의 히스토리 재사용과 충돌하는 이슈가 있어
-        # 패턴 기반 감지는 잠시 비활성화하고 LLM 보조분류로만 MORE_INFO를 판단한다.
-        pattern_hit = False  # is_more_results_intent(user_message)
-        more_results_detected = pattern_hit
+        more_results_detected = False
         base_user_query = get_base_user_query_from_history(chat_request.messages)
-        logger.info(
-            "[MoreResults] conv_id=%s | 초기 감지 pattern_hit=%s (임시비활성) | user_message=%s",
-            chat_request.conv_id,
-            pattern_hit,
-            shorten_text(user_message, 80),
-        )
         next_intent = None
         if not more_results_detected:
-            # 패턴에 안 걸린 후속 질문도 LLM 분류로 보조 감지
+            # 패턴 매칭 없이 LLM 분류로만 MORE_INFO를 감지
             next_intent = await classify_next_intent(chat_request.messages, user_message)
             more_results_detected = (next_intent.get("intent") == "MORE_INFO")
             logger.info(
@@ -197,6 +187,13 @@ async def _streaming_chat_flow(
                 chat_request.conv_id,
                 excluded_chunk_ids[:10],
                 excluded_service_names[:10],
+            )
+            _llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
+            more_info_final_user_message = _llm_rq or (original_user_message or "").strip() or None
+            logger.info(
+                "[MoreResults] conv_id=%s | 최종LLM user 문구(next_intent llm_re_query 우선)=%s",
+                chat_request.conv_id,
+                shorten_text(more_info_final_user_message or "", 100),
             )
         # ──────────────────────────────────────────────────────────────────────
 
@@ -436,6 +433,9 @@ async def _streaming_chat_flow(
             "intent_reason": preprocess.get("intent_reason", ""),
             "reformed_query": preprocess.get("reformed_query", ""),
             "expanded_queries": preprocess.get("expanded_queries", []),
+            # RAG strategy intent와 별도: 이번 응답이 MORE_INFO(이전에 이어 '더 보기') 턴이면 True.
+            # more_results_service 누적 제외(히스토리 walk)에만 쓰임.
+            "more_info": bool(more_results_detected),
         }
 
         # ── CSV 캡처: UnifiedPreprocess 결과 ─────────────────────────────────
@@ -490,6 +490,7 @@ async def _streaming_chat_flow(
                 precomputed_keywords=keywords,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
+                final_user_message=more_info_final_user_message,
                 **{k: v for k, v in llm_kwargs.items() if k != "messages"}
             )
         )

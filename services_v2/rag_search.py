@@ -10,7 +10,7 @@ WELFARE_CENTER + WELFARE_TEL 두 컬렉션을 병렬 검색하여 합산합니�
 import logging
 import asyncio
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from core.config import Config
 
@@ -56,6 +56,7 @@ async def process_rag_search(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    final_user_message: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
@@ -147,8 +148,9 @@ async def process_rag_search(
                 logger.info(f"[RAG/search_v2] 시설명 직접 조회 결과: {len(name_docs)}개 → 바로 응답")
                 top_docs = name_docs[:10]
                 referenced_documents = build_referenced_documents(top_docs)
+                _final_user_msg = (final_user_message or "").strip() or message
                 response = await generate_final_response_v2(
-                    message, top_docs, temperature, max_tokens, stream,
+                    _final_user_msg, top_docs, temperature, max_tokens, stream,
                     frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
                     intent=intent, messages=messages,
                 )
@@ -348,8 +350,9 @@ async def process_rag_search(
         if status_callback:
             await status_callback("최종답변을 생성하고 있습니다")
         _t = time.monotonic()
+        _final_user_msg = (final_user_message or "").strip() or message
         response = await generate_final_response_v2(
-            message, top_docs, temperature, max_tokens, stream,
+            _final_user_msg, top_docs, temperature, max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             messages=messages,

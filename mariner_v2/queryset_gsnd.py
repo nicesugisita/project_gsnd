@@ -209,11 +209,14 @@ def query_GSND_general_documents(
             else:
                 id_field = "CHUNK_ID"
 
-            logger.debug(
-                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs(%d) field=%s: %s",
-                len(excluded_values),
+            _n = len(excluded_values)
+            _sample = excluded_values[:20]
+            logger.info(
+                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs(%d) field=%s: %s%s",
+                _n,
                 id_field,
-                excluded_values,
+                _sample,
+                "..." if _n > 20 else "",
             )
             for chunk_id in excluded_values:
                 where_set_array += [

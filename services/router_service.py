@@ -20,7 +20,7 @@ from typing import Dict, Any, List
 from core.config import Config
 from core.constants import ROLE_USER
 from .llm_service import call_llm_api
-from .more_results_service import is_more_results_intent
+from .more_results_service import get_base_user_query_from_history
 from .deepserver_service import (
     deepserver_reform_query,
     deepserver_expand_query,
@@ -33,19 +33,6 @@ from utils.helpers import shorten_text
 from core.constants import ROLE_ASSISTANT
 
 logger = logging.getLogger(__name__)
-
-
-def _get_base_user_query(messages: list) -> str:
-    """연속된 more-results 구간 이전의 원질문(최근 non-more-results user)을 찾는다."""
-    for msg in reversed(messages or []):
-        if msg.get("role") != ROLE_USER:
-            continue
-        content = str(msg.get("content", "") or "").strip()
-        if not content:
-            continue
-        if not is_more_results_intent(content):
-            return content
-    return ""
 
 
 async def reform_query(user_query: str, chat_messages: Any = None) -> str:
@@ -145,13 +132,17 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
     이전 대화 + 현재 질문 기반 후속 의도 분류.
 
     Returns:
-        {"intent": "MORE_INFO" | "OTHER", "re_query": str}
+        {
+            "intent": "MORE_INFO" | "OTHER",
+            "re_query": str,
+            "llm_re_query": str,  # 분류 LLM이 생성한 re_query(검색용 re_query와 별도)
+        }
     """
     from utils.prompt_loader import load_next_intent_prompt
 
-    base_user_query = _get_base_user_query(messages)
+    base_user_query = get_base_user_query_from_history(messages)
     fallback_re_query = base_user_query or current_query
-    fallback = {"intent": "OTHER", "re_query": fallback_re_query}
+    fallback = {"intent": "OTHER", "re_query": fallback_re_query, "llm_re_query": ""}
     try:
         prompt = load_next_intent_prompt()
         if not prompt:
@@ -204,7 +195,12 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
         if mapped_intent == "MORE_INFO" and base_user_query:
             # "더 알려줘"는 원질문 컨텍스트(예: 지역/대상)를 우선 유지한다.
             re_query = base_user_query
-        result = {"intent": mapped_intent, "re_query": re_query}
+        # llm_re_query: next_intent LLM이 생성한 문장(개수/추가요청 등). 최종 LLM에만 쓰고 검색 질의는 streaming/RAG 쪽 히스토리 재사용.
+        result = {
+            "intent": mapped_intent,
+            "re_query": re_query,
+            "llm_re_query": llm_re_query,
+        }
         logger.info(
             "[NextIntent] intent=%s, base_query=%s, llm_re_query=%s, re_query=%s",
             mapped_intent,

@@ -72,6 +72,7 @@ async def process_rag_general(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    final_user_message: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — general 전용
@@ -641,8 +642,9 @@ async def process_rag_general(
         # Step 9: 최종 응답 생성
         # ====================================================================
         _t = time.monotonic()
+        _final_user_msg = (final_user_message or "").strip() or message
         response = await generate_final_response_v2(
-            message, top_docs, temperature, max_tokens, stream,
+            _final_user_msg, top_docs, temperature, max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             lifecycle=gen_lifecycle,
