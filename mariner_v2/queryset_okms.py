@@ -186,7 +186,7 @@ def _query_dual_documents(
                 jpkg_query.WhereSet("BUSINESS_NAME_KO", MARINER_WS_BM25,  ks, ws["biz_ko"]),      #   사업명 키워드
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
                 # jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, ws["txt_ko"]),      #   텍스트 키워드
-                jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, 0.5),      #   텍스트 키워드
+                jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, ws["txt_mi"]),      #   텍스트 키워드
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
                 jpkg_query.WhereSet("BUSINESS_NAME_MI", MARINER_WS_BM25,  ks, ws["biz_mi"]),      #   사업명 벡터
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR

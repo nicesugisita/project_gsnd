@@ -152,9 +152,9 @@ def query_gov_okms_documents(
             jpkg_query.WhereSet(MARINER_WS_OR),                              # OR (
             jpkg_query.WhereSet("SERVICE_NAME_KO", 2,  ks, 0.7),            #   서비스명 키워드
             jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  ks, 0.7),            #   텍스트 키워드
+            jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  ks, 0.3),            #   텍스트 키워드
             jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
-            jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks),                 #   서비스명 벡터
+            jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks, 0.3),                 #   서비스명 벡터
             jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_MI",   96, ks, 0.3),            #   텍스트 벡터
             jpkg_query.WhereSet(MARINER_WS_END),                             # )
