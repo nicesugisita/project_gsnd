@@ -18,6 +18,7 @@ from services import (
     unified_preprocess,
 )
 from services.llm_service.judgment import pre_check
+from services.router_service import classify_next_intent
 from services.sigun_service import (
     check_sigun,
     check_out_of_scope_region,
@@ -120,6 +121,15 @@ async def chat_completions(request: Request):
             logger.info("[TIMING] pre_check: %.3fs", time.monotonic() - _t)
             use_rag = pre_check_result["use_rag"]
             clarification_question = pre_check_result["clarification_question"]
+            if not use_rag:
+                next_intent = await classify_next_intent(chat_request.messages, user_message)
+                if next_intent.get("intent") == "MORE_INFO":
+                    use_rag = True
+                    clarification_question = ""
+                    logger.info(
+                        "[MoreResults/non-stream] MORE_INFO 보정 → use_rag=True | conv_id=%s",
+                        chat_request.conv_id,
+                    )
             if clarification_question:
                 await asyncio.to_thread(_save_chat_history, chat_request, clarification_question, original_user_message)
                 return await _handle_clarify_response(
