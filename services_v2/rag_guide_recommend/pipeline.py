@@ -138,22 +138,37 @@ async def process_rag_guide_recommend(
         else:
             logger.info(f"[RAG/guide_recommend_v2] 연도 필터 미적용")
 
-        # Step A-1: 1차 검색 질의는 "정제 질의" 단건만 사용
+        # Step A-1: 쿼리 확장 (Mariner 검색 전)
         gr_expand_base = reformed_query
-        gr_expanded = [gr_expand_base]
-        logger.info("[RAG/guide_recommend_v2] 1차 검색 질의: reformed_query 단건 사용")
-        logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #1: {gr_expand_base}")
+        if precomputed_expanded_queries:
+            gr_expanded = precomputed_expanded_queries
+            logger.info("[RAG/guide_recommend_v2] 사전 계산된 확장 쿼리 사용: %d개", len(gr_expanded))
+        else:
+            if status_callback:
+                await status_callback("최적의 답변방식을 찾고 있습니다")
+            _t = time.monotonic()
+            gr_expanded = await expand_query(gr_expand_base)
+            logger.info("[TIMING][guide_recommend] StepA-1 쿼리 확장: %.3fs", time.monotonic() - _t)
+            if not gr_expanded:
+                logger.warning("[RAG/guide_recommend_v2] 쿼리 확장 실패 - 기준 질의 사용")
+                gr_expanded = [gr_expand_base]
+        logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")
+        for i, eq in enumerate(gr_expanded, 1):
+            logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #{i}: {eq}")
 
-        # Step A-2: 키워드 추출 (1차는 정제 질의 기준)
+        # Step A-2: 벡터 검색어에서 키워드 추출
         if status_callback:
             await status_callback("내용을 정리하고 있습니다")
         _t = time.monotonic()
         if precomputed_keywords:
             logger.info("[RAG/guide_recommend_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
             gr_triples_list = [filter_okms_keywords(precomputed_keywords)]
+            if len(gr_expanded) > 1:
+                gr_triples_list.extend([[] for _ in range(len(gr_expanded) - 1)])
         else:
             gr_triples_list = [
-                filter_okms_keywords(extract_nouns(gr_expand_base, use_bigram=False))
+                filter_okms_keywords(extract_nouns(eq, use_bigram=False))
+                for eq in gr_expanded
             ]
         gr_search_queries = _build_search_queries(list(gr_triples_list))
         logger.info("[TIMING][guide_recommend] StepA-2 키워드 추출 (kiwi): %.3fs", time.monotonic() - _t)
@@ -197,6 +212,7 @@ async def process_rag_guide_recommend(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
                     lifecycle_filter=lifecycle or None,
+                    sigun_filters=gr_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:

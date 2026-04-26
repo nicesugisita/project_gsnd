@@ -326,11 +326,109 @@ def _is_doc_mentioned_in_response(doc_name: str, response: str, norm_response: s
     return False
 
 
+def _extract_service_aliases(doc: Dict[str, Any]) -> list[str]:
+    """참조 문서에서 서비스명 후보(alias)들을 추출한다."""
+    import re as _re
+
+    aliases: list[str] = []
+    raw_name = str(doc.get("name", "") or "").strip()
+    if raw_name:
+        aliases.append(raw_name)
+
+    # 파일명 패턴(YYYY_시군_서비스명.ext)에서 서비스명 추출
+    if raw_name:
+        service_part = _re.sub(r'^\d{4}_[^_]+_', '', raw_name)
+        service_part = _re.sub(r'\.\w+$', '', service_part)
+        service_part = service_part.strip()
+        if service_part and service_part != raw_name:
+            aliases.append(service_part)
+
+    # snippet에서 "사업명/서비스명" 라벨 값 추출
+    snippet = str(doc.get("snippet", "") or "")
+    for line in snippet.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for label in ("사업명", "서비스명"):
+            prefix = f"{label} :"
+            if line.startswith(prefix):
+                value = line[len(prefix):].strip()
+                if value:
+                    aliases.append(value)
+            prefix = f"{label}:"
+            if line.startswith(prefix):
+                value = line[len(prefix):].strip()
+                if value:
+                    aliases.append(value)
+
+    # 중복 제거
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        key = alias.strip()
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _is_any_alias_mentioned(aliases: list[str], response: str, norm_response: str) -> bool:
+    """alias 목록 중 하나라도 응답에 언급되면 True."""
+    for alias in aliases:
+        if _is_doc_mentioned_in_response(alias, response, norm_response):
+            return True
+    return False
+
+
 def _filter_referenced_documents_by_response(response_content: str, docs: Optional[list]) -> list:
-    """참조 문서를 전체 반환."""
+    """최종 답변 텍스트에 언급된 참조 문서만 반환.
+
+    주의:
+    - LLM 호출 없이 문자열 매칭만 사용한다.
+    - 매칭 결과가 0건이면 과도한 누락을 막기 위해 원본 docs를 그대로 반환한다.
+    """
     if not docs:
         return []
-    return docs
+
+    response = str(response_content or "")
+    norm_response = _normalize_for_match(response)
+
+    # "정보 없음" 고정 응답 계열은 참조 문서를 노출하지 않는다.
+    if any(pattern in response for pattern in INSUFFICIENT_INFO_PATTERNS):
+        logger.info(
+            "[ReferencedDocsFilter] 정보부족 응답 감지 → referenced_documents 0건 반환 (입력=%d건)",
+            len(docs),
+        )
+        return []
+
+    filtered = []
+    removed_names = []
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        aliases = _extract_service_aliases(d)
+        if _is_any_alias_mentioned(aliases, response, norm_response):
+            filtered.append(d)
+        else:
+            removed_names.append(str(d.get("name", "") or "").strip() or "(이름없음)")
+
+    if not filtered:
+        logger.info(
+            "[ReferencedDocsFilter] 매칭 0건: referenced_documents 0건 반환 (입력=%d건)",
+            len(docs),
+        )
+        return []
+
+    logger.info(
+        "[ReferencedDocsFilter] 응답 기반 필터 적용: %d건 → %d건 | 제외=%s",
+        len(docs),
+        len(filtered),
+        removed_names[:10],
+    )
+    return filtered
 
 
 # ============================================================================

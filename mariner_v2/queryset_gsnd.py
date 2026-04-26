@@ -110,6 +110,13 @@ def query_GSND_general_documents(
         for chunk_id in (excluded_chunk_ids or [])
         if str(chunk_id).strip()
     }
+    if excluded_chunk_set:
+        excluded_values = sorted(excluded_chunk_set)
+        logger.info(
+            "[MoreResults][Mariner/general/GSND] 제외 입력 수=%d | 샘플=%s",
+            len(excluded_values),
+            excluded_values[:10],
+        )
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -261,6 +268,7 @@ def query_GSND_general_documents(
             if str(sigun).strip()
         }
         logger.info(f"[Mariner/general/GSND] raw 결과: {result_size}개 (필터 전), 키워드: {keyword[:50]}, sigun_filters={list(target_siguns) if target_siguns else None}")
+        raw_id_samples: List[str] = []
 
         for i in range(result_size):
             try:
@@ -280,6 +288,8 @@ def query_GSND_general_documents(
 
             doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
             doc["WEIGHT"] = str(weight_val)
+            if doc.get("CHUNK_ID") and len(raw_id_samples) < 10:
+                raw_id_samples.append(str(doc.get("CHUNK_ID")))
 
             if _uses_okms_document_schema(collection):
                 doc["CHUNK_ID"] = doc.get("ID", "")
@@ -339,12 +349,23 @@ def query_GSND_general_documents(
 
         if excluded_chunk_set:
             before_count = len(doc_list)
-            doc_list = [
-                doc for doc in doc_list
-                if str(doc.get("CHUNK_ID", "")).strip() not in excluded_chunk_set
-            ]
+            removed_ids: List[str] = []
+            filtered_docs: List[Dict[str, Any]] = []
+            for doc in doc_list:
+                cid = str(doc.get("CHUNK_ID", "")).strip()
+                if cid and cid in excluded_chunk_set:
+                    if len(removed_ids) < 20:
+                        removed_ids.append(cid)
+                    continue
+                filtered_docs.append(doc)
+            doc_list = filtered_docs
             logger.info(
                 f"[MoreResults][Mariner/general/GSND] CHUNK_ID 1차 제외: {before_count - len(doc_list)}개"
+            )
+            logger.info(
+                "[MoreResults][Mariner/general/GSND] 실제 제외 ID 샘플=%s | raw ID 샘플=%s",
+                removed_ids[:10],
+                raw_id_samples,
             )
 
         t2 = time.monotonic()

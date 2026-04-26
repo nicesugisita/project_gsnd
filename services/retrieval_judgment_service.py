@@ -208,12 +208,10 @@ async def retrieval_sufficiency_judgment(
     Returns:
         {"sufficient": bool, "reason": str}
     """
+    # TODO: 임시 강제 활성화
+    # Config.RETRIEVAL_JUDGMENT_ENABLED 값과 무관하게 실제 LLM 판정을 수행한다.
     if not Config.RETRIEVAL_JUDGMENT_ENABLED:
-        """
-        sufficient: False 시 무조건 다음 검색으로 흐르기 때문에 True로 반환함
-        """
-        logger.info("[RetrievalJudgment] 비활성화 상태 → sufficient=True 반환")
-        return {"sufficient": True, "reason": "judgment_disabled"}
+        logger.info("[RetrievalJudgment] 설정 비활성화 감지, 임시 강제 활성화로 계속 진행")
 
     if not docs:
         logger.info(
@@ -229,10 +227,16 @@ async def retrieval_sufficiency_judgment(
 
     target_docs = docs[:_MAX_DOCS_FOR_JUDGMENT]
     logger.info(
-        f"[RetrievalJudgment] 적합성 판단 시작: {len(target_docs)}건, "
-        f"[docs] {', '.join(str(doc.get('NAME', '') or '').strip() or str(doc.get('CHUNK_ID', '') or '').strip() or '?' for doc in target_docs)}, "
-        f"intent={intent}, collection={collection_name}"
+        "[RetrievalJudgment] 적합성 판단 시작: %d건, intent=%s, collection=%s",
+        len(target_docs),
+        intent,
+        collection_name,
     )
+    # 문서명/청크 식별자 노출 방지: target_docs 상세 로그 비활성화
+    # logger.info(
+    #     f"[RetrievalJudgment] [docs] "
+    #     f"{', '.join(str(doc.get('NAME', '') or '').strip() or str(doc.get('CHUNK_ID', '') or '').strip() or '?' for doc in target_docs)}"
+    # )
 
     # 병렬 판단
     t0 = time.monotonic()

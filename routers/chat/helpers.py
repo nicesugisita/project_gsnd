@@ -304,7 +304,8 @@ async def _handle_rag_mode(
                     yield chunk
                 if referenced_documents:
                     logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
-                    logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
+                    # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
+                    # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
                     yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
                     await asyncio.to_thread(_save_chat_history, chat_request, assistant_content, user_message)
@@ -367,7 +368,8 @@ async def _handle_rag_mode(
 
         if referenced_documents:
             logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
-            logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
+            # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
+            # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
 
         response = build_chat_response(
             response_message=response_message,

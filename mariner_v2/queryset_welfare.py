@@ -77,6 +77,13 @@ def query_welfare_center_documents(
         for chunk_id in (excluded_chunk_ids or [])
         if str(chunk_id).strip()
     }
+    if excluded_chunk_set:
+        excluded_values = sorted(excluded_chunk_set)
+        logger.info(
+            "[MoreResults][Mariner/welfare] 제외 입력 수=%d | 샘플=%s",
+            len(excluded_values),
+            excluded_values[:10],
+        )
 
     try:
         # Mariner 설정 — 예제 코드 기준값 사용 (threshold=0.2, top_n=20, vs_size=50)
@@ -188,6 +195,8 @@ def query_welfare_center_documents(
         logger.info(f"[Mariner/welfare] raw 결과: {result_size}개 (필터 전), 키워드: {keyword[:50]}, sigun_filters={list(target_siguns) if target_siguns else None}")
 
         excluded_count = 0
+        raw_id_samples: List[str] = []
+        removed_ids: List[str] = []
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -203,8 +212,12 @@ def query_welfare_center_documents(
 
             # WELFARE_CENTER 필드 매핑
             doc["CHUNK_ID"] = doc.get("ID", "")
+            if doc["CHUNK_ID"] and len(raw_id_samples) < 10:
+                raw_id_samples.append(doc["CHUNK_ID"])
             if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
                 excluded_count += 1
+                if len(removed_ids) < 20:
+                    removed_ids.append(doc["CHUNK_ID"])
                 continue
             doc["NAME"] = str(doc.get("FACILITY_NAME", "") or "").strip()
 
@@ -248,6 +261,11 @@ def query_welfare_center_documents(
 
         if excluded_chunk_set:
             logger.info(f"[MoreResults][Mariner/welfare] CHUNK_ID 1차 제외: {excluded_count}개")
+            logger.info(
+                "[MoreResults][Mariner/welfare] 실제 제외 ID 샘플=%s | raw ID 샘플=%s",
+                removed_ids[:10],
+                raw_id_samples,
+            )
 
         t2 = time.monotonic()
         logger.info(f"[Mariner/welfare] 검색 시간: {t2 - t1:.3f}초, 키워드: {keyword[:50]}, 결과: {len(doc_list)}개")

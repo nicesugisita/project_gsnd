@@ -144,11 +144,12 @@ async def _judge_single_doc(
         "response_format": {"type": "json_object"},
     }
 
-    # 요청 메시지 전체 로그
-    # for m in msgs:
-    #     logger.info(
-    #         f"[RelevanceFilter] #{doc_index + 1} request [{m['role']}]: {m['content']}"
-    #     )
+    # LLM 호출 직전 payload 로그
+    logger.info(
+        "[RelevanceFilter] #%d LLM 요청 파라미터: %s",
+        doc_index + 1,
+        json.dumps(payload, ensure_ascii=False, default=str),
+    )
 
     try:
         try:
@@ -225,7 +226,8 @@ async def filter_irrelevant_docs(
     # 상위 10건만 판단 대상, 나머지 버림
     target_docs = docs[:_MAX_DOCS_FOR_FILTER]
     if len(docs) > _MAX_DOCS_FOR_FILTER:
-        logger.info(f"[RelevanceFilter] ========================= docs: {docs}")
+        # 문서 원문/상세 필드 노출 방지: 전체 docs 로그 비활성화
+        # logger.info(f"[RelevanceFilter] ========================= docs: {docs}")
         logger.info(f"[RelevanceFilter] {len(docs)}건 중 상위 {_MAX_DOCS_FOR_FILTER}건만 판단, 나머지 {len(docs) - _MAX_DOCS_FOR_FILTER}건 제거")
 
     logger.info(
@@ -241,7 +243,8 @@ async def filter_irrelevant_docs(
     ]
     results = await asyncio.gather(*tasks)
     elapsed = time.monotonic() - t0
-    logger.info(f"[RelevanceFilter] LLM 판단 완료  ====================== target_docs: {target_docs}")
+    # 문서 원문/상세 필드 노출 방지: target_docs 상세 로그 비활성화
+    # logger.info(f"[RelevanceFilter] LLM 판단 완료  ====================== target_docs: {target_docs}")
     logger.info(f"[RelevanceFilter] LLM 판단 완료: {len(target_docs)}건, {elapsed:.3f}s")
 
     # 관련 문서만 필터링

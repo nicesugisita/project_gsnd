@@ -133,12 +133,17 @@ async def _streaming_chat_flow(
         excluded_chunk_ids: list = []
         excluded_service_names: list = []
         more_results_re_query: str | None = None
-        more_results_detected = is_more_results_intent(user_message)
+        last_preprocess = get_last_preprocess_from_history(chat_request.messages)
+        # NOTE: 임시 조치
+        # MORE_RESULTS_PATTERNS 선판단이 후속 질의 히스토리 재사용과 충돌하는 이슈가 있어
+        # 패턴 기반 감지는 잠시 비활성화하고 LLM 보조분류로만 MORE_INFO를 판단한다.
+        pattern_hit = False  # is_more_results_intent(user_message)
+        more_results_detected = pattern_hit
         base_user_query = get_base_user_query_from_history(chat_request.messages)
         logger.info(
-            "[MoreResults] conv_id=%s | 초기 감지 pattern_hit=%s | user_message=%s",
+            "[MoreResults] conv_id=%s | 초기 감지 pattern_hit=%s (임시비활성) | user_message=%s",
             chat_request.conv_id,
-            more_results_detected,
+            pattern_hit,
             shorten_text(user_message, 80),
         )
         next_intent = None
@@ -154,11 +159,18 @@ async def _streaming_chat_flow(
             )
 
         if more_results_detected:
-            # MORE_INFO는 질의 정제 대신 원질문(직전 non-more-results user 질문)을 우선 재사용
-            if base_user_query:
+            # MORE_INFO는 사용자 원문 대신 "직전 문서검색에 사용된 질의(reformed_query)"를 우선 재사용
+            if last_preprocess and last_preprocess.get("reformed_query"):
+                more_results_re_query = str(last_preprocess.get("reformed_query", "")).strip()
+                logger.info(
+                    "[MoreResults] conv_id=%s | 검색질의 재사용(reformed_query): %s",
+                    chat_request.conv_id,
+                    shorten_text(more_results_re_query, 80),
+                )
+            elif base_user_query:
                 more_results_re_query = base_user_query
                 logger.info(
-                    "[MoreResults] conv_id=%s | 원질문 재사용: %s",
+                    "[MoreResults] conv_id=%s | fallback 원질문 재사용: %s",
                     chat_request.conv_id,
                     shorten_text(more_results_re_query, 80),
                 )
@@ -179,6 +191,12 @@ async def _streaming_chat_flow(
                 chat_request.conv_id,
                 len(excluded_chunk_ids),
                 len(excluded_service_names),
+            )
+            logger.info(
+                "[MoreResults] conv_id=%s | 제외 샘플 chunk_ids=%s | service_names=%s",
+                chat_request.conv_id,
+                excluded_chunk_ids[:10],
+                excluded_service_names[:10],
             )
         # ──────────────────────────────────────────────────────────────────────
 
@@ -358,12 +376,12 @@ async def _streaming_chat_flow(
         preprocess = None
         reused_preprocess = None
         if more_results_detected:
-            reused_preprocess = get_last_preprocess_from_history(chat_request.messages)
+            reused_preprocess = last_preprocess
             if reused_preprocess:
-                user_message = reused_preprocess["query"]
-                await _update_user_message(chat_request.messages, user_message)
                 user_intent = reused_preprocess["intent"]
                 reformed_query = reused_preprocess["reformed_query"]
+                user_message = reformed_query
+                await _update_user_message(chat_request.messages, user_message)
                 expanded_queries = reused_preprocess["expanded_queries"] or [reformed_query]
                 try:
                     keywords = extract_nouns(reformed_query)
@@ -477,10 +495,12 @@ async def _streaming_chat_flow(
         )
         if more_results_detected:
             logger.info(
-                "[MoreResults] conv_id=%s | RAG 호출 전달값 excluded_chunk_ids=%d | excluded_service_names=%d",
+                "[MoreResults] conv_id=%s | RAG 호출 전달값 excluded_chunk_ids=%d | excluded_service_names=%d | query=%s | reformed=%s",
                 chat_request.conv_id,
                 len(excluded_chunk_ids or []),
                 len(excluded_service_names or []),
+                shorten_text(user_message or "", 80),
+                shorten_text(reformed_query or "", 80),
             )
         while True:
             if rag_task.done() and status_queue.empty():

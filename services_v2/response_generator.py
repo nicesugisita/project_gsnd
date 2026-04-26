@@ -9,6 +9,7 @@ v1 대비 변경:
 기존 services/rag_service.py는 변경하지 않습니다.
 """
 
+import json
 import logging
 import re
 from typing import Dict, Any, List, Optional
@@ -171,6 +172,27 @@ async def generate_final_response_v2(
 
         if not final_prompt:
             logger.warning(f"[Final Response v2] {intent} 프롬프트 로드 실패 - 기본 LLM 사용")
+            logger.info(
+                "[Final Response v2][LLM Input Params/Fallback] %s",
+                json.dumps(
+                    {
+                        "intent": intent,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": stream,
+                        "frequency_penalty": frequency_penalty,
+                        "repetition_penalty": repetition_penalty,
+                        "top_p": top_p,
+                        "top_k": top_k,
+                        "seed": seed,
+                        "tools": tools,
+                        "messages": [{"role": ROLE_USER, "content": message}],
+                        "multi_turn_messages": messages or [],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
             return await call_llm_api(
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -224,6 +246,37 @@ async def generate_final_response_v2(
             combined_prompts = [load_system_prompt(), system_prompt]
         else:
             combined_prompts = [system_prompt]
+
+        logger.info(
+            "[Final Response v2][MultiTurn Full Messages] %s",
+            json.dumps(messages or [], ensure_ascii=False, default=str),
+        )
+        logger.info(
+            "[Final Response v2][LLM Input Params] %s",
+            json.dumps(
+                {
+                    "intent": intent,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": stream,
+                    "frequency_penalty": frequency_penalty,
+                    "repetition_penalty": repetition_penalty,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "seed": seed,
+                    "tools": tools,
+                    "lifecycle": lifecycle,
+                    "user_region": user_region,
+                    "user_birth_year": user_birth_year,
+                    "top_docs_count": len(top_docs or []),
+                    "welfare_docs_count": len(welfare_docs or []),
+                    "extra_system_prompts": combined_prompts,
+                    "messages": final_messages,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
 
         response = await call_llm_api(
             temperature=temperature,

@@ -159,8 +159,11 @@ async def _call_llm_api_sync(
     try:
         # 마지막 user 메시지 추출해서 로깅
         _user_msgs = [m for m in payload.get("messages", []) if m.get("role") == ROLE_USER]
-        _last_user = _user_msgs[-1].get("content", "")[:500] if _user_msgs else "(없음)"
-        logger.info(f"[LLM Request] {_last_user}")
+        _last_user_full = _user_msgs[-1].get("content", "") if _user_msgs else ""
+        _last_user_preview = str(_last_user_full)[:120] if _last_user_full else "(없음)"
+        logger.info("[LLM Request] user_content_len=%d, preview=%s", len(str(_last_user_full or "")), _last_user_preview)
+        # 문서 본문/프롬프트가 로그에 노출되는 것을 막기 위해 원문 로그는 비활성화.
+        # logger.info(f"[LLM Request] {_last_user_full[:500]}")
         logger.debug(f"[LLM Request] Full payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
 
         client = _get_llm_client()

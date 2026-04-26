@@ -53,6 +53,7 @@ def query_gov_okms_documents(
     search_string: str,
     collection: str = None,
     lifecycle_filter: Optional[str] = None,
+    sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -62,6 +63,7 @@ def query_gov_okms_documents(
         search_string:    검색어 (확장쿼리 또는 트리플쿼리)
         collection:       컬렉션명 (None → Config.RAG_GOV_OKMS_COLLECTION)
         lifecycle_filter: 생애주기 필터 (예: "영유아"), None이면 미적용
+        sigun_filters:    시군 필터 목록(표시용 SIGUN 기본값 보정에만 사용)
 
     Returns:
         docs: List[Dict] — CHUNK_ID·NAME·CONTENT·WEIGHT 정규화 필드 포함
@@ -79,11 +81,24 @@ def query_gov_okms_documents(
     if mapped_lifecycle != lifecycle_filter:
         logger.debug(f"[GOV_OKMS] lifecycle 매핑: '{lifecycle_filter}' → '{mapped_lifecycle}'")
 
+    # queryset_okms.py와 동일 패턴: "경상남도" 제외한 실제 시군 목록
+    sigun_scriptlet_values = [
+        s for s in (sigun_filters or [])
+        if s and s != "경상남도"
+    ]
+
     excluded_chunk_set = {
         str(chunk_id).strip()
         for chunk_id in (excluded_chunk_ids or [])
         if str(chunk_id).strip()
     }
+    if excluded_chunk_set:
+        excluded_values = sorted(excluded_chunk_set)
+        logger.info(
+            "[MoreResults][Mariner/GOV_OKMS] 제외 입력 수=%d | 샘플=%s",
+            len(excluded_values),
+            excluded_values[:10],
+        )
 
     try:
         ensure_jvm_thread()
@@ -192,6 +207,8 @@ def query_gov_okms_documents(
 
         docs: List[Dict[str, Any]] = []
         excluded_count = 0
+        raw_id_samples: List[str] = []
+        removed_id_samples: List[str] = []
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -204,8 +221,12 @@ def query_gov_okms_documents(
 
             # 파이프라인 공통 정규화 필드
             doc["CHUNK_ID"]      = doc.get("SERVICE_ID", "")
+            if doc["CHUNK_ID"] and len(raw_id_samples) < 10:
+                raw_id_samples.append(doc["CHUNK_ID"])
             if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
                 excluded_count += 1
+                if len(removed_id_samples) < 20:
+                    removed_id_samples.append(doc["CHUNK_ID"])
                 continue
             doc["NAME"]          = _build_gov_okms_document_name(doc)
             doc["BUSINESS_NAME"] = doc.get("SERVICE_NAME", "")
@@ -229,14 +250,16 @@ def query_gov_okms_documents(
             _combined = "\n".join(_content_parts)
             doc["CONTENT"]       = _combined
             doc["CHUNK_PATH"]    = _combined
-            # GOV_OKMS_V1에는 SIGUN·YEAR 없음 — 로깅·정렬 호환용 빈 문자열
-            doc.setdefault("SIGUN", "")
+            # GOV_OKMS_V1에는 SIGUN 필드가 없어 queryset_okms와 동일하게 보정한다.
+            doc.setdefault("SIGUN", sigun_scriptlet_values[0] if sigun_scriptlet_values else "")
             doc.setdefault("YEAR", "")
 
             docs.append(doc)
 
         if excluded_chunk_set:
             logger.info(f"[MoreResults][Mariner/GOV_OKMS] CHUNK_ID 1차 제외: {excluded_count}개")
+            logger.info("[MoreResults][Mariner/GOV_OKMS] raw ID 샘플=%s", raw_id_samples)
+            logger.info("[MoreResults][Mariner/GOV_OKMS] 실제 제외 ID 샘플=%s", removed_id_samples[:10])
 
         logger.info(
             f"[Mariner/GOV_OKMS] {time.monotonic() - t1:.3f}초, 결과: {len(docs)}개 "

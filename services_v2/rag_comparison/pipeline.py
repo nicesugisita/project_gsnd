@@ -103,24 +103,38 @@ async def process_rag_with_documents_v2(
         logger.info(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
         # ====================================================================
-        # Step 1: 1차 검색 질의는 "정제 질의" 단건만 사용
+        # Step 1: 쿼리 확장 (Mariner 검색 전)
         # ====================================================================
-        expanded_queries = [reformed_query]
-        logger.info("[RAG/comparison_v2] 1차 검색 질의: reformed_query 단건 사용")
-        logger.info(f"[RAG/comparison_v2] [벡터검색어] #1: {reformed_query}")
+        if precomputed_expanded_queries:
+            expanded_queries = precomputed_expanded_queries
+            logger.info("[RAG/comparison_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
+        else:
+            if status_callback:
+                await status_callback("최적의 답변방식을 찾고 있습니다")
+            _t = time.monotonic()
+            expanded_queries = await expand_query(reformed_query)
+            logger.info("[TIMING][comparison] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
+            if not expanded_queries:
+                logger.warning("[RAG/comparison_v2] 쿼리 확장 실패 - 원본 질의 사용")
+                expanded_queries = [reformed_query]
+        logger.info(f"[RAG/comparison_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
+        for i, eq in enumerate(expanded_queries, 1):
+            logger.info(f"[RAG/comparison_v2] [벡터검색어] #{i}: {eq}")
 
         # ====================================================================
-        # Step 2: 키워드 추출 (1차는 정제 질의 기준)
+        # Step 2: 트리플(키워드) 추출 (확장쿼리별)
         # ====================================================================
         if status_callback:
             await status_callback("내용을 정리하고 있습니다")
         _t = time.monotonic()
         if precomputed_keywords:
             triples_list = [filter_okms_keywords(precomputed_keywords)]
+            if len(expanded_queries) > 1:
+                triples_list.extend([[] for _ in range(len(expanded_queries) - 1)])
             logger.info("[RAG/comparison_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
         else:
-            _triples = await extract_triples(reformed_query)
-            triples_list = [filter_okms_keywords(_triples)]
+            triples_list = await asyncio.gather(*[extract_triples(eq) for eq in expanded_queries])
+            triples_list = [filter_okms_keywords(kws) for kws in triples_list]
         search_queries = _build_search_queries(list(triples_list))
         logger.info("[TIMING][comparison] Step2 트리플 추출: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -192,6 +206,7 @@ async def process_rag_with_documents_v2(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
                     lifecycle_filter=comp_lifecycle or None,
+                    sigun_filters=comp_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:

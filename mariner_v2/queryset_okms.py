@@ -92,6 +92,14 @@ def _query_dual_documents(
         for chunk_id in (excluded_chunk_ids or [])
         if str(chunk_id).strip()
     }
+    if excluded_chunk_set:
+        excluded_values = sorted(excluded_chunk_set)
+        logger.info(
+            "[MoreResults][Mariner/%s] 제외 입력 수=%d | 샘플=%s",
+            log_label,
+            len(excluded_values),
+            excluded_values[:10],
+        )
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -177,7 +185,8 @@ def _query_dual_documents(
                 jpkg_query.WhereSet(MARINER_WS_OR),                                              # OR (
                 jpkg_query.WhereSet("BUSINESS_NAME_KO", MARINER_WS_BM25,  ks, ws["biz_ko"]),      #   사업명 키워드
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
-                jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, ws["txt_ko"]),      #   텍스트 키워드
+                # jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, ws["txt_ko"]),      #   텍스트 키워드
+                jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, 0.5),      #   텍스트 키워드
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
                 jpkg_query.WhereSet("BUSINESS_NAME_MI", MARINER_WS_BM25,  ks, ws["biz_mi"]),      #   사업명 벡터
                 jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
@@ -278,6 +287,8 @@ def _query_dual_documents(
             result_size = result.getRealSize()
             logger.info(f"[Mariner/{log_label}] [{label}] raw 결과: {result_size}개 (필터 전)")
             excluded_count = 0
+            raw_id_samples: List[str] = []
+            removed_id_samples: List[str] = []
 
             for i in range(result_size):
                 try:
@@ -297,8 +308,12 @@ def _query_dual_documents(
 
                 if excluded_chunk_set:
                     result_chunk_id = str(result.getResult(i, field_indexes["ID"]) or "").strip()
+                    if result_chunk_id and len(raw_id_samples) < 10:
+                        raw_id_samples.append(result_chunk_id)
                     if result_chunk_id and result_chunk_id in excluded_chunk_set:
                         excluded_count += 1
+                        if len(removed_id_samples) < 20:
+                            removed_id_samples.append(result_chunk_id)
                         continue
 
                 doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
@@ -314,6 +329,18 @@ def _query_dual_documents(
             if excluded_chunk_set:
                 logger.info(
                     f"[MoreResults][Mariner/{log_label}] [{label}] CHUNK_ID 1차 제외: {excluded_count}개"
+                )
+                logger.info(
+                    "[MoreResults][Mariner/%s] [%s] raw ID 샘플=%s",
+                    log_label,
+                    label,
+                    raw_id_samples,
+                )
+                logger.info(
+                    "[MoreResults][Mariner/%s] [%s] 실제 제외 ID 샘플=%s",
+                    log_label,
+                    label,
+                    removed_id_samples[:10],
                 )
 
         t2 = time.monotonic()

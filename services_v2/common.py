@@ -93,15 +93,30 @@ def filter_excluded_docs(
     excluded_chunk_set = set(excluded_chunk_ids or [])
     excluded_name_set = set(n for n in (excluded_service_names or []) if n)
     result = []
+    removed_chunk_ids: List[str] = []
+    removed_names: List[str] = []
     for d in docs:
         chunk_id = str(d.get("CHUNK_ID", ""))
         if chunk_id and chunk_id in excluded_chunk_set:
+            if len(removed_chunk_ids) < 20:
+                removed_chunk_ids.append(chunk_id)
             continue
         if excluded_name_set:
             doc_name = str(d.get("NAME", "") or d.get("BUSINESS_NAME", "") or "").strip()
             if doc_name and doc_name in excluded_name_set:
+                if len(removed_names) < 20:
+                    removed_names.append(doc_name)
                 continue
         result.append(d)
+    logger.info(
+        "[MoreResults][PostFilter] 입력=%d건 | 제외후=%d건 | 제거 chunk_ids=%d(샘플=%s) | 제거 names=%d(샘플=%s)",
+        len(docs),
+        len(result),
+        len(removed_chunk_ids),
+        removed_chunk_ids[:10],
+        len(removed_names),
+        removed_names[:10],
+    )
     return result
 
 
