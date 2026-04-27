@@ -11,7 +11,7 @@ GSND_WELFARE_CENTER_V1 Mariner 검색 실패(결과 없음 또는 예외) 시
 """
 
 import csv
-import loggingimport logging
+import logging
 from core.constants import CSV_WELFARE_BASE_SCORE, CSV_WELFARE_CENTER_NAME_BONUS, CSV_WELFARE_CENTER_TYPE_BONUS
 
 import os
