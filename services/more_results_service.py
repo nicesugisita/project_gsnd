@@ -5,16 +5,53 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.constants import ROLE_ASSISTANT
 
 
-def _assistant_more_info(msg: Dict[str, Any]) -> bool:
+def _assistant_more_info(msg: Dict[str, Any]) -> Optional[bool]:
     """assistant 턴이 MORE_INFO(이전 결과에 이어 '더 보기' 응답)인지.
 
     RAG strategy intent(preprocess.intent)은 guide_recommend 등이며 MORE_INFO가 아님.
     streaming에서만 저장하는 preprocess.more_info=True 일 때 True.
     """
     preprocess = msg.get("preprocess")
-    if not isinstance(preprocess, dict):
-        return False
-    return bool(preprocess.get("more_info"))
+    if isinstance(preprocess, dict) and "more_info" in preprocess:
+        return bool(preprocess.get("more_info"))
+
+    metadata = msg.get("metadata")
+    if isinstance(metadata, dict) and "more_info" in metadata:
+        return bool(metadata.get("more_info"))
+
+    # 과거/프론트 메시지(예: metadata.referenced_documents만 있는 경우)는 판정 불가.
+    return None
+
+
+def _extract_references(msg: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """assistant 메시지에서 chunk_id/name 목록 추출 (신규/구형 스키마 모두 지원)."""
+    chunk_ids: List[str] = []
+    service_names: List[str] = []
+
+    for chunk_id in msg.get("referenced_chunk_ids", []):
+        value = str(chunk_id).strip()
+        if value:
+            chunk_ids.append(value)
+
+    for name in msg.get("referenced_service_names", []):
+        value = str(name).strip()
+        if value:
+            service_names.append(value)
+
+    metadata = msg.get("metadata")
+    docs = metadata.get("referenced_documents", []) if isinstance(metadata, dict) else []
+    if isinstance(docs, list):
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            cid = str(doc.get("chunk_id", "") or "").strip()
+            name = str(doc.get("name", "") or "").strip()
+            if cid:
+                chunk_ids.append(cid)
+            if name:
+                service_names.append(name)
+
+    return chunk_ids, service_names
 
 
 def get_excluded_info_from_history(messages: list) -> Tuple[List[str], List[str]]:
@@ -43,15 +80,14 @@ def get_excluded_info_from_history(messages: list) -> Tuple[List[str], List[str]
             first_in_reverse = False
             saw_assistant = True
             latest_minfo = _assistant_more_info(msg)
-            for chunk_id in msg.get("referenced_chunk_ids", []):
-                chunk_id = str(chunk_id).strip()
+            ref_chunk_ids, ref_service_names = _extract_references(msg)
+            for chunk_id in ref_chunk_ids:
                 if not chunk_id or chunk_id in seen_chunk_ids:
                     continue
                 seen_chunk_ids.add(chunk_id)
                 excluded_chunk_ids.append(chunk_id)
 
-            for name in msg.get("referenced_service_names", []):
-                name = str(name).strip()
+            for name in ref_service_names:
                 if not name or name in seen_names:
                     continue
                 seen_names.add(name)

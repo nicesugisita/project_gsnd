@@ -18,7 +18,6 @@ from services import (
     unified_preprocess,
 )
 from services.llm_service.judgment import pre_check
-from services.router_service import classify_next_intent
 from services.sigun_service import (
     check_sigun,
     check_out_of_scope_region,
@@ -56,6 +55,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _ensure_runtime_user_id(chat_request: ChatRequest) -> None:
+    """비로그인 요청에도 로그인과 동일 경로를 타도록 임시 user_id를 부여."""
+    if isinstance(chat_request.user_id, str) and chat_request.user_id.strip():
+        return
+
+    if not chat_request.conv_id:
+        chat_request.conv_id = str(uuid.uuid4())
+
+    # 요구사항: 비로그인 user_id는 'nologin+conv_id' 형태로 고정
+    chat_request.user_id = f"nologin{chat_request.conv_id}"
+
+
 @router.post('/v1/chat/completions')
 async def chat_completions(request: Request):
     """Chat Completions API endpoint."""
@@ -71,6 +82,7 @@ async def chat_completions(request: Request):
             return error_response
 
         chat_request = ChatRequest(**data)
+        _ensure_runtime_user_id(chat_request)
         log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         print("===========================chat_request.messages===========================", chat_request.messages)
 
@@ -121,15 +133,6 @@ async def chat_completions(request: Request):
             logger.info("[TIMING] pre_check: %.3fs", time.monotonic() - _t)
             use_rag = pre_check_result["use_rag"]
             clarification_question = pre_check_result["clarification_question"]
-            if not use_rag:
-                next_intent = await classify_next_intent(chat_request.messages, user_message)
-                if next_intent.get("intent") == "MORE_INFO":
-                    use_rag = True
-                    clarification_question = ""
-                    logger.info(
-                        "[MoreResults/non-stream] MORE_INFO 보정 → use_rag=True | conv_id=%s",
-                        chat_request.conv_id,
-                    )
             if clarification_question:
                 await asyncio.to_thread(_save_chat_history, chat_request, clarification_question, original_user_message)
                 return await _handle_clarify_response(

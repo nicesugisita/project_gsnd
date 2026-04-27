@@ -211,19 +211,9 @@ async def _streaming_chat_flow(
             yield build_status_message("질문을 분석하고 있습니다")
 
             _t = time.monotonic()
-            # MORE_INFO: 검색용 user_message가 '밀양' 등으로만 치환되면 pre_check가 NO-RAG를 내기 쉬움.
-            # 히스토리 두께와 무관히 로그인과 동일하게 항상 RAG로 진행한다.
-            if more_results_detected:
-                use_rag = True
-                clarification_question = ""
-                logger.info(
-                    "[MoreResults] conv_id=%s | pre_check 생략(MORE_INFO) → use_rag=True",
-                    chat_request.conv_id,
-                )
-            else:
-                pre_check_result = await pre_check(user_message, chat_request.messages)
-                use_rag = pre_check_result["use_rag"]
-                clarification_question = pre_check_result["clarification_question"]
+            pre_check_result = await pre_check(user_message, chat_request.messages)
+            use_rag = pre_check_result["use_rag"]
+            clarification_question = pre_check_result["clarification_question"]
             _timings["t_pre_check"] = round(time.monotonic() - _t, 3)
             logger.info("[TIMING] 선행 판단(pre_check): %.3fs", _timings["t_pre_check"])
             _timings["use_rag"] = use_rag
