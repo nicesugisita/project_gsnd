@@ -306,15 +306,12 @@ async def suggest_questions(request: Request):
         if is_clarification:
             return JSONResponse(content={"questions": []}, status_code=200)
 
-        # TODO: 임시 비활성화
-        # recommended_questions(후속 질문 추천) 전달 중단 요청으로 생성/응답을 막는다.
-        # questions = await generate_suggested_questions(
-        #     user_query=user_query,
-        #     assistant_response=assistant_response,
-        #     max_questions=5
-        # )
-        # return JSONResponse(content={"questions": questions}, status_code=200)
-        return JSONResponse(content={"questions": []}, status_code=200)
+        questions = await generate_suggested_questions(
+            user_query=user_query,
+            assistant_response=assistant_response,
+            max_questions=5
+        )
+        return JSONResponse(content={"questions": questions}, status_code=200)
 
     except Exception as e:
         logger.error(f"Error generating suggested questions: {e}")

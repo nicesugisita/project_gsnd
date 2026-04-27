@@ -274,7 +274,7 @@ async def generate_suggested_questions(
         ]
 
         response = await call_llm_api(
-            temperature=0.7,
+            temperature=0,
             messages=call_messages,
             extra_system_prompts=[prompt],
             response_format={"type": "json_object"}
