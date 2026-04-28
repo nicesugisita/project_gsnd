@@ -21,10 +21,10 @@ from services.sigun_service import (
     MSG_SIGUN_FAILURE,
     MAX_SIGUN_ASK_ATTEMPTS,
 )
-from services_v2.rag_comparison import process_rag_with_documents_v2 as process_rag_comparison
-from services_v2.rag_guide_recommend import process_rag_guide_recommend
-from services_v2.rag_general import process_rag_general
-from services_v2.rag_search import process_rag_search
+from services.rag_service.pipeline_comparison import process_rag_with_documents_v2 as process_rag_comparison
+from services.rag_service.pipeline_guide_recommend import process_rag_guide_recommend
+from services.rag_service.pipeline_general import process_rag_general
+from services.rag_service.pipeline_search import process_rag_search
 from utils import (
     build_chat_response,
     load_system_prompt,
@@ -34,12 +34,16 @@ from utils import (
 )
 from ..deps import (
     _build_llm_kwargs,
-    _enrich_referenced_documents,
-    _filter_referenced_documents_by_response,
-    _build_streaming_response,
-    _stream_delta_content,
     _update_user_message,
     _save_chat_history,
+)
+from ._doc_filter import (
+    _enrich_referenced_documents,
+    _filter_referenced_documents_by_response,
+)
+from ._stream_utils import (
+    _build_streaming_response,
+    _stream_delta_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,54 +147,21 @@ async def _run_query_recreation(
 async def _handle_no_rag_mode(
     user_message: str,
     chat_request: ChatRequest,
-    stream: bool
-) -> JSONResponse | StreamingResponse:
-    """Handle NO-RAG mode response using system prompt only."""
-    from utils.status_messages import build_status_message
-
+) -> JSONResponse:
+    """Handle NO-RAG mode response using system prompt only (non-streaming)."""
     logger.info("[NO-RAG Mode] 질문: %s", shorten_text(user_message, 100))
-    system_prompt = load_system_prompt()
-
-    if stream:
-        async def no_rag_stream():
-            yield f"data: {json.dumps({'conv_id': chat_request.conv_id}, ensure_ascii=False)}\n\n"
-            yield build_status_message("답변 생성 중")
-
-            response_message = await call_llm_api(
-                message=user_message,
-                system_prompt=system_prompt,
-                **_build_llm_kwargs(chat_request)
-            )
-
-            response = build_chat_response(
-                response_message=response_message,
-                user_message=user_message,
-                model_name=Config.MODEL_NAME,
-                conv_id=chat_request.conv_id,
-            )
-
-            async for chunk in _build_streaming_response(
-                response["choices"][0]["message"]["content"],
-                response
-            ):
-                yield chunk
-
-        return StreamingResponse(no_rag_stream(), media_type="text/event-stream")
-    else:
-        response_message = await call_llm_api(
-            message=user_message,
-            system_prompt=system_prompt,
-            **_build_llm_kwargs(chat_request)
-        )
-
-        response = build_chat_response(
-            response_message=response_message,
-            user_message=user_message,
-            model_name=Config.MODEL_NAME,
-            conv_id=chat_request.conv_id,
-        )
-
-        return JSONResponse(content=response, status_code=200)
+    response_message = await call_llm_api(
+        message=user_message,
+        system_prompt=load_system_prompt(),
+        **_build_llm_kwargs(chat_request)
+    )
+    response = build_chat_response(
+        response_message=response_message,
+        user_message=user_message,
+        model_name=Config.MODEL_NAME,
+        conv_id=chat_request.conv_id,
+    )
+    return JSONResponse(content=response, status_code=200)
 
 
 async def _handle_rag_mode(

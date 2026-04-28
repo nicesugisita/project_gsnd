@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from mariner.queryset import _SIGUN_NORMALIZE_MAP
+from mariner.sigun_utils import _SIGUN_NORMALIZE_MAP
 
 _LIFECYCLE_CONTENT_KEYWORDS: Dict[str, List[str]] = {
     "영유아": ["영유아"],

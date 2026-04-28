@@ -16,11 +16,11 @@ from services.chat_history_service import get_chat_history_service
 from services.user_session_service import get_user_session_service
 from utils import build_chat_response
 from ..deps import (
-    _build_streaming_response,
     _resolve_history_user_id,
     _update_user_message,
     ensure_conversation_exists,
 )
+from ._stream_utils import _build_streaming_response
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ import os
 from typing import List, Tuple, Optional, Dict
 
 from core.constants import ROLE_ASSISTANT
-from mariner.queryset import normalize_sigun
+from mariner.sigun_utils import normalize_sigun
 
 logger = logging.getLogger(__name__)
 

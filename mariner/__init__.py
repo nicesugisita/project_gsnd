@@ -1,3 +1,6 @@
 """
-Mariner package for queryset, REST bridge, and parsing utilities.
+mariner — Mariner 쿼리셋 v2 패키지
+
+의도별 전용 쿼리셋을 별도 패키지로 관리합니다.
+기존 mariner/ 패키지는 변경하지 않습니다.
 """

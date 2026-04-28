@@ -4,10 +4,8 @@ import logging
 from typing import Any, Dict, List
 
 from core.constants import ROLE_USER
-from core.exceptions import RAGServiceError
 
 from .document import _get_document_snippet, _get_document_name
-from .mariner import query_mariner_documents
 
 logger = logging.getLogger(__name__)
 
@@ -89,18 +87,3 @@ def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any
     return unique_docs
 
 
-async def _search_documents_parallel(
-    search_queries: List[str],
-    collection: str
-) -> List[Dict[str, Any]]:
-    """병렬로 문서 검색 실행"""
-    all_docs = []
-    for query in search_queries:
-        try:
-            docs = query_mariner_documents(query, collection)
-            if docs:
-                all_docs.extend(docs)
-        except RAGServiceError as e:
-            logger.warning(f"[RAG] '{query}' 검색 실패: {e}")
-            continue
-    return all_docs

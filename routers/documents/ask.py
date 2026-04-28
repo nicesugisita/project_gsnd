@@ -13,10 +13,8 @@ from core.config import Config
 
 from core.constants import ROLE_USER, ROLE_ASSISTANT
 from core.models import ChatRequest
-from services import (
-    query_mariner_documents,
-    call_llm_api,
-)
+from services import call_llm_api
+from mariner.queryset_upload import query_mariner_documents
 from services.chat_history_service import get_chat_history_service
 from services.uploaded_document_service import get_uploaded_document_service
 from services.uploaded_text_transfer_service import load_uploaded_text_content

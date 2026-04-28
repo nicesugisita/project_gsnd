@@ -66,7 +66,7 @@ async def _lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
 
     # JVM 싱글톤 초기화 (서버 기동 시 1회)
-    from mariner_v2.jvm_manager import init_jvm
+    from mariner.jvm_manager import init_jvm
     try:
         init_jvm()
     except Exception as e:

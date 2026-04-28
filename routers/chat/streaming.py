@@ -12,24 +12,21 @@ from typing import AsyncGenerator
 from core.config import Config
 from core.models import ChatRequest
 from core.logging_context import set_log_context, reset_log_context
-from services import (
-    call_llm_api,
-    unified_preprocess,
-)
-from services.llm_service.judgment import pre_check
+from services import call_llm_api
 from services.sigun_service import (
-    check_sigun,
-    check_out_of_scope_region,
     count_sigun_ask_attempts,
     MSG_SIGUN_FAILURE,
     MSG_OUT_OF_SCOPE_TEMPLATE,
     MAX_SIGUN_ASK_ATTEMPTS,
 )
-from services.lifecycle_service import check_lifecycle
-from utils import (
-    build_chat_response,
-    load_system_prompt,
-    shorten_text,
+from utils import build_chat_response, load_system_prompt, shorten_text
+from ._pipeline_steps import (
+    run_pre_check,
+    run_early_sigun_check,
+    run_out_of_scope_check,
+    run_sigun_check,
+    run_unified_preprocess,
+    run_lifecycle_check,
 )
 from utils.status_messages import (
     build_status_message,
@@ -37,12 +34,11 @@ from utils.status_messages import (
 )
 from ..deps import (
     _build_llm_kwargs,
-    _build_streaming_response,
-    _filter_referenced_documents_by_response,
     _save_chat_history,
-    _stream_delta_content,
     _update_user_message,
 )
+from ._doc_filter import _filter_referenced_documents_by_response
+from ._stream_utils import _build_streaming_response, _stream_delta_content
 from .helpers import _get_rag_processor, _run_query_recreation
 from .conversation import _save_stream_history
 from services.more_results_service import (
@@ -134,19 +130,15 @@ async def _streaming_chat_flow(
         more_results_re_query: str | None = None
         more_info_final_user_message: str | None = None
         last_preprocess = get_last_preprocess_from_history(chat_request.messages)
-        more_results_detected = False
         base_user_query = get_base_user_query_from_history(chat_request.messages)
-        next_intent = None
-        if not more_results_detected:
-            # 패턴 매칭 없이 LLM 분류로만 MORE_INFO를 감지
-            next_intent = await classify_next_intent(chat_request.messages, user_message)
-            more_results_detected = (next_intent.get("intent") == "MORE_INFO")
-            logger.info(
-                "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
-                chat_request.conv_id,
-                next_intent.get("intent"),
-                shorten_text(str(next_intent.get("re_query", "") or ""), 80),
-            )
+        next_intent = await classify_next_intent(chat_request.messages, user_message)
+        more_results_detected = (next_intent.get("intent") == "MORE_INFO")
+        logger.info(
+            "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
+            chat_request.conv_id,
+            next_intent.get("intent"),
+            shorten_text(str(next_intent.get("re_query", "") or ""), 80),
+        )
 
         if more_results_detected:
             # MORE_INFO는 사용자 원문 대신 "직전 문서검색에 사용된 질의(reformed_query)"를 우선 재사용
@@ -206,265 +198,162 @@ async def _streaming_chat_flow(
                 shorten_text(user_message, 100),
             )
 
-        # ── [1단계] 선행 판단: use_rag + 되묻기 (is_clarification이면 스킵) ──
+        # [1] PreCheck
         if not is_clarification:
             yield build_status_message("질문을 분석하고 있습니다")
+        pre = await run_pre_check(user_message, chat_request.messages, is_clarification)
+        use_rag = pre.use_rag
+        _timings["t_pre_check"] = pre.elapsed
+        _timings["use_rag"] = use_rag
+        _timings["clarification_question"] = pre.clarification_question[:200] if pre.clarification_question else ""
+        if not is_clarification:
+            yield f"data: {json.dumps({'pre_check': {'use_rag': use_rag, 'clarification_question': pre.clarification_question}}, ensure_ascii=False)}\n\n"
+        if pre.clarification_question:
+            await asyncio.to_thread(_save_chat_history, chat_request, pre.clarification_question, original_user_message)
+            clarify_resp = build_chat_response(response_message=pre.clarification_question, user_message=user_message, model_name=Config.MODEL_NAME, is_clarification=True)
+            assistant_content = pre.clarification_question
+            if not _ttft_logged and t_request_start:
+                _timings["t_ttft"] = round(time.monotonic() - t_request_start, 3)
+                logger.info("[TTFT] 되묻기 첫 토큰까지 %.3fs", _timings["t_ttft"])
+                _ttft_logged = True
+            yield f"data: {json.dumps({'is_clarification': True}, ensure_ascii=False)}\n\n"
+            async for chunk in _build_streaming_response(clarify_resp["choices"][0]["message"]["content"], clarify_resp):
+                yield chunk
+            return
+        if not use_rag:
+            yield build_status_message("답변 생성 중")
+            response_message = await call_llm_api(message=user_message, system_prompt=load_system_prompt(), **_build_llm_kwargs(chat_request))
+            assistant_content = response_message
+            response = build_chat_response(response_message=response_message, user_message=user_message, model_name=Config.MODEL_NAME, conv_id=chat_request.conv_id)
+            if not _ttft_logged and t_request_start:
+                _timings["t_ttft"] = round(time.monotonic() - t_request_start, 3)
+                logger.info("[TTFT] NO-RAG 첫 토큰까지 %.3fs", _timings["t_ttft"])
+                _ttft_logged = True
+            async for chunk in _build_streaming_response(response["choices"][0]["message"]["content"], response):
+                yield chunk
+            return
 
-            _t = time.monotonic()
-            pre_check_result = await pre_check(user_message, chat_request.messages)
-            use_rag = pre_check_result["use_rag"]
-            clarification_question = pre_check_result["clarification_question"]
-            _timings["t_pre_check"] = round(time.monotonic() - _t, 3)
-            logger.info("[TIMING] 선행 판단(pre_check): %.3fs", _timings["t_pre_check"])
-            _timings["use_rag"] = use_rag
-            _timings["clarification_question"] = clarification_question[:200] if clarification_question else ""
-
-            # 클라이언트에 pre_check 결과 전송 (테스트/로깅용)
-            yield f"data: {json.dumps({'pre_check': {'use_rag': use_rag, 'clarification_question': clarification_question}}, ensure_ascii=False)}\n\n"
-
-            if clarification_question:
-                await asyncio.to_thread(_save_chat_history, chat_request, clarification_question, original_user_message)
-                clarify_response = build_chat_response(
-                    response_message=clarification_question,
-                    user_message=user_message,
-                    model_name=Config.MODEL_NAME,
-                    is_clarification=True,
-                )
-                assistant_content = clarification_question
-                if not _ttft_logged and t_request_start:
-                    _ttft = round(time.monotonic() - t_request_start, 3)
-                    _timings["t_ttft"] = _ttft
-                    logger.info("[TTFT] 되묻기 첫 토큰까지 %.3fs", _ttft)
-                    _ttft_logged = True
-                yield f"data: {json.dumps({'is_clarification': True}, ensure_ascii=False)}\n\n"
-                async for chunk in _build_streaming_response(
-                    clarify_response["choices"][0]["message"]["content"], clarify_response
-                ):
-                    yield chunk
-                return
-
-            if not use_rag:
-                yield build_status_message("답변 생성 중")
-                logger.info("[NO-RAG Mode] 질문: %s", shorten_text(user_message, 100))
-                system_prompt = load_system_prompt()
-                response_message = await call_llm_api(
-                    message=user_message,
-                    system_prompt=system_prompt,
-                    **_build_llm_kwargs(chat_request)
-                )
-                assistant_content = response_message
-                response = build_chat_response(
-                    response_message=response_message,
-                    user_message=user_message,
-                    model_name=Config.MODEL_NAME,
-                    conv_id=chat_request.conv_id,
-                )
-                if not _ttft_logged and t_request_start:
-                    _ttft = round(time.monotonic() - t_request_start, 3)
-                    _timings["t_ttft"] = _ttft
-                    logger.info("[TTFT] NO-RAG 첫 토큰까지 %.3fs", _ttft)
-                    _ttft_logged = True
-                async for chunk in _build_streaming_response(
-                    response["choices"][0]["message"]["content"], response
-                ):
-                    yield chunk
-                return
-        # ────────────────────────────────────────────────────────────────────
-
-        # ── 되묻기 답변의 시군 조기 확인 (query_recreation LLM 호출 전) ──────
-        # query_recreation LLM이 임의로 시군을 추측·삽입하는 것을 방지하기 위해
-        # is_clarification=True일 때 반드시 먼저 시군을 확정하거나 재질문합니다.
+        # [2] 되묻기 답변의 시군 조기 확인
         resolved_sigun_filters = None
-        if is_clarification and use_rag:
-            _pre_filters, _pre_need_ask, _pre_ask_msg = check_sigun(
-                user_message, chat_request.messages
-            )
-            if _pre_need_ask:
-                _ask_count = count_sigun_ask_attempts(chat_request.messages)
-                if _ask_count >= MAX_SIGUN_ASK_ATTEMPTS:
+        early_sigun = run_early_sigun_check(user_message, chat_request.messages, use_rag, is_clarification)
+        if early_sigun is not None:
+            if early_sigun.need_clarify:
+                if count_sigun_ask_attempts(chat_request.messages) >= MAX_SIGUN_ASK_ATTEMPTS:
                     await asyncio.to_thread(_save_chat_history, chat_request, MSG_SIGUN_FAILURE, original_user_message)
                     assistant_content = MSG_SIGUN_FAILURE
-                    response = build_chat_response(response_message=MSG_SIGUN_FAILURE, user_message=user_message, model_name=Config.MODEL_NAME)
-                    async for chunk in _build_streaming_response(response["choices"][0]["message"]["content"], response):
+                    resp = build_chat_response(response_message=MSG_SIGUN_FAILURE, user_message=user_message, model_name=Config.MODEL_NAME)
+                    async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
                         yield chunk
                     return
-                assistant_content = _pre_ask_msg
-                response = build_chat_response(response_message=_pre_ask_msg, user_message=user_message, model_name=Config.MODEL_NAME, is_clarification=True)
+                assistant_content = early_sigun.ask_message
+                resp = build_chat_response(response_message=early_sigun.ask_message, user_message=user_message, model_name=Config.MODEL_NAME, is_clarification=True)
                 yield f"data: {json.dumps({'is_clarification': True}, ensure_ascii=False)}\n\n"
-                async for chunk in _build_streaming_response(response["choices"][0]["message"]["content"], response):
+                async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
                     yield chunk
                 return
-            # 시군 확정 → 이후 check_sigun 재실행 불필요
-            resolved_sigun_filters = _pre_filters if _pre_filters else None
-            logger.info(f"[SigunCheck/stream] 조기 확정(is_clarification): {resolved_sigun_filters}")
-        # ─────────────────────────────────────────────────────────────────────
+            resolved_sigun_filters = early_sigun.filters
+            logger.info("[SigunCheck/stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
+        # [3] 쿼리 재구성
         if is_clarification:
             yield build_status_message(STATUS_QUERY_RECREATION)
         _t = time.monotonic()
-        user_message, skip_clarification_check = await _run_query_recreation(
-            user_message, chat_request, is_clarification
-        )
+        user_message, skip_clarification_check = await _run_query_recreation(user_message, chat_request, is_clarification)
         _timings["t_query_recreation"] = round(time.monotonic() - _t, 3)
         logger.info("[TIMING] 쿼리 재구성: %.3fs", _timings["t_query_recreation"])
 
-        # ── 경상남도 외 지역 체크 ─────────────────────────────────────────────
-        if use_rag:
-            out_of_scope, region_name = check_out_of_scope_region(user_message)
-            if out_of_scope:
-                msg = MSG_OUT_OF_SCOPE_TEMPLATE.format(region=region_name)
-                assistant_content = msg
-                response = build_chat_response(
-                    response_message=msg,
-                    user_message=user_message,
-                    model_name=Config.MODEL_NAME,
-                    conv_id=chat_request.conv_id,
-                )
-                async for chunk in _build_streaming_response(
-                    response["choices"][0]["message"]["content"], response
-                ):
-                    yield chunk
-                return
-        # ────────────────────────────────────────────────────────────────────
+        # [4] 경상남도 외 지역 체크
+        out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
+        if out_of_scope:
+            msg = MSG_OUT_OF_SCOPE_TEMPLATE.format(region=region_name)
+            assistant_content = msg
+            resp = build_chat_response(response_message=msg, user_message=user_message, model_name=Config.MODEL_NAME, conv_id=chat_request.conv_id)
+            async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
+                yield chunk
+            return
 
-        # ── 시군 체크 ─────────────────────────────────────────────────────────
-        # resolved_sigun_filters는 is_clarification=True 조기 확인에서 이미 설정될 수 있음
-        logger.info(f"[SigunCheck/stream] use_rag={use_rag}, is_clarification={is_clarification}, pre_resolved={resolved_sigun_filters is not None}")
-        if use_rag and resolved_sigun_filters is None:
-            _t = time.monotonic()
-            sigun_filters, need_sigun_clarify, sigun_ask_msg = check_sigun(
-                user_message, chat_request.messages
-            )
-            logger.info("[TIMING] 시군 체크: %.3fs", time.monotonic() - _t)  # CSV 미포함(경량)
-            if need_sigun_clarify:
-                sigun_ask_count = count_sigun_ask_attempts(chat_request.messages)
-                if sigun_ask_count >= MAX_SIGUN_ASK_ATTEMPTS:
-                    response = build_chat_response(
-                        response_message=MSG_SIGUN_FAILURE,
-                        user_message=user_message,
-                        model_name=Config.MODEL_NAME,
-                    )
+        # [5] 시군 체크
+        logger.info("[SigunCheck/stream] use_rag=%s, pre_resolved=%s", use_rag, resolved_sigun_filters is not None)
+        sigun = run_sigun_check(user_message, chat_request.messages, use_rag, resolved_sigun_filters)
+        if sigun is not None:
+            if sigun.need_clarify:
+                if count_sigun_ask_attempts(chat_request.messages) >= MAX_SIGUN_ASK_ATTEMPTS:
                     await asyncio.to_thread(_save_chat_history, chat_request, MSG_SIGUN_FAILURE, original_user_message)
                     assistant_content = MSG_SIGUN_FAILURE
-                    async for chunk in _build_streaming_response(
-                        response["choices"][0]["message"]["content"], response
-                    ):
+                    resp = build_chat_response(response_message=MSG_SIGUN_FAILURE, user_message=user_message, model_name=Config.MODEL_NAME)
+                    async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
                         yield chunk
                     return
-                response = build_chat_response(
-                    response_message=sigun_ask_msg,
-                    user_message=user_message,
-                    model_name=Config.MODEL_NAME,
-                    is_clarification=True,
-                )
-                assistant_content = sigun_ask_msg
+                assistant_content = sigun.ask_message
+                resp = build_chat_response(response_message=sigun.ask_message, user_message=user_message, model_name=Config.MODEL_NAME, is_clarification=True)
                 yield f"data: {json.dumps({'is_clarification': True}, ensure_ascii=False)}\n\n"
-                async for chunk in _build_streaming_response(
-                    response["choices"][0]["message"]["content"], response
-                ):
+                async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
                     yield chunk
                 return
-            resolved_sigun_filters = sigun_filters if sigun_filters else None
-            logger.info(f"[SigunCheck/stream] sigun_filters={resolved_sigun_filters}")
-        # ──────────────────────────────────────────────────────────────────────
+            resolved_sigun_filters = sigun.filters
+            logger.info("[SigunCheck/stream] sigun_filters=%s", resolved_sigun_filters)
 
-        # ── [2단계] 통합 전처리 (MORE_INFO면 히스토리 재사용 우선) ──────────────
-        preprocess = None
-        reused_preprocess = None
-        if more_results_detected:
-            reused_preprocess = last_preprocess
-            if reused_preprocess:
-                user_intent = reused_preprocess["intent"]
-                reformed_query = reused_preprocess["reformed_query"]
-                user_message = reformed_query
-                await _update_user_message(chat_request.messages, user_message)
-                expanded_queries = reused_preprocess["expanded_queries"] or [reformed_query]
-                try:
-                    keywords = extract_nouns(reformed_query)
-                except Exception:
-                    keywords = []
-                preprocess = {
-                    "query": user_message,
-                    "intent": user_intent,
-                    "intent_reason": "reused_from_history_on_more_info",
-                    "reformed_query": reformed_query,
-                    "expanded_queries": expanded_queries,
-                    "keywords": keywords,
-                }
-                logger.info(
-                    "[MoreResults] conv_id=%s | unified_preprocess 스킵, 히스토리 재사용 intent=%s | reformed=%s | expanded=%d",
-                    chat_request.conv_id,
-                    user_intent,
-                    shorten_text(reformed_query or "", 80),
-                    len(expanded_queries or []),
-                )
-
-        if preprocess is None:
-            yield build_status_message("질문을 재구성하고 있습니다")
-            _t = time.monotonic()
-            _preprocess_messages = None if skip_clarification_check else chat_request.messages
-            preprocess = await unified_preprocess(user_message, _preprocess_messages, use_rag=use_rag)
-            _timings["t_unified_preprocess"] = round(time.monotonic() - _t, 3)
-            logger.info("[TIMING] 통합 전처리(unified_preprocess): %.3fs", _timings["t_unified_preprocess"])
-
-            user_message = preprocess["query"]
+        # [6] 통합 전처리 (MORE_INFO면 히스토리 재사용 우선)
+        preprocess_data = None
+        if more_results_detected and last_preprocess:
+            rp = last_preprocess
+            user_message = rp["reformed_query"]
             await _update_user_message(chat_request.messages, user_message)
+            try:
+                kw = extract_nouns(user_message)
+            except Exception:
+                kw = []
+            preprocess_data = {
+                "query": user_message, "intent": rp["intent"],
+                "intent_reason": "reused_from_history_on_more_info",
+                "reformed_query": user_message,
+                "expanded_queries": rp.get("expanded_queries") or [user_message],
+                "keywords": kw,
+            }
+            logger.info("[MoreResults] conv_id=%s | 히스토리 재사용 intent=%s | reformed=%s", chat_request.conv_id, rp["intent"], shorten_text(user_message, 80))
 
-            user_intent      = preprocess["intent"]
-            reformed_query   = preprocess["reformed_query"]
-            expanded_queries = preprocess["expanded_queries"]
-            keywords         = preprocess["keywords"]
-            if more_results_detected:
-                logger.info(
-                    "[MoreResults] conv_id=%s | preprocess 결과 intent=%s | reformed=%s | expanded=%d",
-                    chat_request.conv_id,
-                    user_intent,
-                    shorten_text(reformed_query or "", 80),
-                    len(expanded_queries or []),
-                )
+        if preprocess_data is None:
+            yield build_status_message("질문을 재구성하고 있습니다")
+            _preprocess_messages = None if skip_clarification_check else chat_request.messages
+            pp = await run_unified_preprocess(user_message, _preprocess_messages, use_rag)
+            _timings["t_unified_preprocess"] = pp.elapsed
+            user_message = pp.query
+            await _update_user_message(chat_request.messages, user_message)
+            preprocess_data = {
+                "query": pp.query, "intent": pp.intent, "intent_reason": pp.intent_reason,
+                "reformed_query": pp.reformed_query, "expanded_queries": pp.expanded_queries,
+                "keywords": pp.keywords,
+            }
 
-        yield f"data: {json.dumps({'chat-intent': preprocess['intent']})}\n\n"
-        # 클라이언트에 preprocess 전체 결과 전송 (테스트/로깅용)
-        yield f"data: {json.dumps({'preprocess': {'query': preprocess.get('query', ''), 'intent': preprocess.get('intent', ''), 'intent_reason': preprocess.get('intent_reason', ''), 'reformed_query': preprocess.get('reformed_query', ''), 'expanded_queries': preprocess.get('expanded_queries', [])}}, ensure_ascii=False)}\n\n"
+        user_intent      = preprocess_data["intent"]
+        reformed_query   = preprocess_data["reformed_query"]
+        expanded_queries = preprocess_data["expanded_queries"]
+        keywords         = preprocess_data["keywords"]
+
+        yield f"data: {json.dumps({'chat-intent': user_intent})}\n\n"
+        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries}}, ensure_ascii=False)}\n\n"
         _preprocess_to_persist = {
-            "query": preprocess.get("query", ""),
-            "intent": preprocess.get("intent", ""),
-            "intent_reason": preprocess.get("intent_reason", ""),
-            "reformed_query": preprocess.get("reformed_query", ""),
-            "expanded_queries": preprocess.get("expanded_queries", []),
-            # RAG strategy intent와 별도: 이번 응답이 MORE_INFO(이전에 이어 '더 보기') 턴이면 True.
-            # more_results_service 누적 제외(히스토리 walk)에만 쓰임.
+            "query": preprocess_data.get("query", ""), "intent": user_intent,
+            "intent_reason": preprocess_data.get("intent_reason", ""),
+            "reformed_query": reformed_query, "expanded_queries": expanded_queries,
             "more_info": bool(more_results_detected),
         }
 
-        # ── CSV 캡처: UnifiedPreprocess 결과 ─────────────────────────────────
-        _timings["query"]           = preprocess.get("query", "")[:200]
-        _timings["intent"]          = user_intent
-        _timings["intent_reason"]   = preprocess.get("intent_reason", "")[:200]
-        _timings["reformed_query"]  = (reformed_query or "")[:200]
+        # CSV 캡처
+        _timings["query"]            = preprocess_data.get("query", "")[:200]
+        _timings["intent"]           = user_intent
+        _timings["intent_reason"]    = preprocess_data.get("intent_reason", "")[:200]
+        _timings["reformed_query"]   = (reformed_query or "")[:200]
         _timings["expanded_queries"] = " | ".join(expanded_queries or [])
-        # 키워드 검색어: 벡터 검색어에서 kiwi 명사 추출 (pipeline과 동일 로직)
-        _kw_strings = [
-            " ".join(filter_okms_keywords(extract_nouns(eq, use_bigram=False)))
-            for eq in (expanded_queries or [])
-        ]
+        _kw_strings = [" ".join(filter_okms_keywords(extract_nouns(eq, use_bigram=False))) for eq in (expanded_queries or [])]
         for _i, _kw in enumerate(_kw_strings[:5], 1):
             _timings[f"kw_{_i}"] = _kw
-        # ──────────────────────────────────────────────────────────────────────
 
-        # ── 생애주기 체크 (guide_recommend 전용) ─────────────────────────────
+        # [7] 생애주기 체크 (guide_recommend 전용, 로그만)
+        _t_lc = time.monotonic()
+        run_lifecycle_check(user_message, chat_request.messages, use_rag, user_intent)
         if use_rag and user_intent == "guide_recommend":
-            _t = time.monotonic()
-            lifecycle, need_lifecycle_clarify, _ = check_lifecycle(
-                user_message, chat_request.messages
-            )
-            _timings["t_lifecycle_check"] = round(time.monotonic() - _t, 3)
-            logger.info("[TIMING] 생애주기 체크: %.3fs", _timings["t_lifecycle_check"])
-            if need_lifecycle_clarify:
-                logger.info("[LifecycleCheck/stream] 생애주기 미확인 → 되묻기 없이 진행")
-            else:
-                logger.info(f"[LifecycleCheck/stream] 생애주기 확인: '{lifecycle}'")
-        # ──────────────────────────────────────────────────────────────────────
+            _timings["t_lifecycle_check"] = round(time.monotonic() - _t_lc, 3)
 
         logger.info("[Intent Classification] intent=%s", user_intent)
 

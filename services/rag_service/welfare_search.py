@@ -4,7 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from core.config import Config
-from mariner_v2.queryset_welfare import query_welfare_center_documents
+from mariner.queryset_welfare import query_welfare_center_documents
 
 from .db_lookup import _lookup_facility_from_db
 from .facility import _extract_facility_type_from_message, _extract_specific_facility_name

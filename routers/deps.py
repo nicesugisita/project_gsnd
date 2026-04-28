@@ -2,12 +2,10 @@
 Common helper functions shared across routers.
 """
 
-import json
 import logging
-import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional, AsyncGenerator
+from typing import Any, Dict, Optional
 
 import mysql.connector
 
@@ -15,23 +13,23 @@ from fastapi.responses import JSONResponse
 
 from core.config import Config
 from core.models import ChatRequest
-from core.constants import (
-    ROLE_ASSISTANT,
-    STREAM_CHUNK_DELAY,
-    STREAM_FINISH_MARKER,
-)
+from core.constants import ROLE_ASSISTANT
 from services.chat_history_service import get_chat_history_service
-from services.document_service import get_document_service
 from utils import (
     extract_user_message,
     create_error_detail,
 )
+from routers.chat._doc_filter import (  # noqa: F401  (re-export for callers)
+    _enrich_referenced_documents,
+    _filter_referenced_documents_by_response,
+)
+from routers.chat._stream_utils import (  # noqa: F401  (re-export for callers)
+    _build_streaming_response,
+    _stream_delta_content,
+)
 
 logger = logging.getLogger(__name__)
 ANONYMOUS_HISTORY_USER_ID = "__anonymous__"
-INSUFFICIENT_INFO_PATTERNS = (
-    "제공된 정보만으로는 해당 내용을 안내하기 어렵습니다",
-)
 
 
 # ============================================================================
@@ -267,241 +265,3 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
 
 
 
-def _enrich_referenced_documents(docs: Optional[list]) -> list:
-    """Enrich referenced documents with dataset IDs using document names."""
-    if not docs:
-        return []
-
-    names = [d.get("name") for d in docs if isinstance(d, dict) and d.get("name")]
-    if not names:
-        return []
-
-    doc_service = get_document_service(Config)
-    db_docs = doc_service.get_documents_by_names(names)
-    id_by_name = {d.get("name"): d.get("id") for d in db_docs if d.get("name")}
-
-    enriched = []
-    for d in docs:
-        if not isinstance(d, dict):
-            continue
-        name = d.get("name")
-        if not name:
-            continue
-        enriched.append({
-            "name": name,
-            "id": id_by_name.get(name, d.get("id", "")) or "",
-            "chunk_id": d.get("chunk_id", "") or "",
-            "snippet": d.get("snippet", "") or "",
-            "path": d.get("path", "") or "",
-        })
-    return enriched
-
-
-def _normalize_for_match(text: str) -> str:
-    """비교용 정규화: 공백·특수문자 제거, 소문자 변환"""
-    import re
-    return re.sub(r'[\s\-·•()（）]', '', text).lower()
-
-
-def _is_doc_mentioned_in_response(doc_name: str, response: str, norm_response: str) -> bool:
-    """문서명이 응답 텍스트에 언급되었는지 판단 (4단계 전략)"""
-    if not doc_name:
-        return False
-    # 전략 1: 원문 부분 매칭
-    if doc_name in response:
-        return True
-    # 전략 2: 정규화 후 부분 매칭 (4자 이상)
-    norm_name = _normalize_for_match(doc_name)
-    if len(norm_name) >= 4 and norm_name in norm_response:
-        return True
-    # 전략 3: 앞 10자 prefix 매칭
-    if len(doc_name) > 10 and doc_name[:10] in response:
-        return True
-    # 전략 4: 파일명 패턴(YYYY_시군명_서비스명.확장자)에서 서비스명만 추출 후 매칭
-    import re as _re
-    service_part = _re.sub(r'^\d{4}_[^_]+_', '', doc_name)   # "2026_밀양시_" 제거
-    service_part = _re.sub(r'\.\w+$', '', service_part)        # ".hwpx" 등 확장자 제거
-    if service_part and service_part != doc_name and service_part in response:
-        return True
-    return False
-
-
-def _extract_service_aliases(doc: Dict[str, Any]) -> list[str]:
-    """참조 문서에서 서비스명 후보(alias)들을 추출한다."""
-    import re as _re
-
-    aliases: list[str] = []
-    raw_name = str(doc.get("name", "") or "").strip()
-    if raw_name:
-        aliases.append(raw_name)
-
-    # 파일명 패턴(YYYY_시군_서비스명.ext)에서 서비스명 추출
-    if raw_name:
-        service_part = _re.sub(r'^\d{4}_[^_]+_', '', raw_name)
-        service_part = _re.sub(r'\.\w+$', '', service_part)
-        service_part = service_part.strip()
-        if service_part and service_part != raw_name:
-            aliases.append(service_part)
-
-    # snippet에서 "사업명/서비스명" 라벨 값 추출
-    snippet = str(doc.get("snippet", "") or "")
-    for line in snippet.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        for label in ("사업명", "서비스명"):
-            prefix = f"{label} :"
-            if line.startswith(prefix):
-                value = line[len(prefix):].strip()
-                if value:
-                    aliases.append(value)
-            prefix = f"{label}:"
-            if line.startswith(prefix):
-                value = line[len(prefix):].strip()
-                if value:
-                    aliases.append(value)
-
-    # 중복 제거
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for alias in aliases:
-        key = alias.strip()
-        if not key:
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(key)
-    return deduped
-
-
-def _is_any_alias_mentioned(aliases: list[str], response: str, norm_response: str) -> bool:
-    """alias 목록 중 하나라도 응답에 언급되면 True."""
-    for alias in aliases:
-        if _is_doc_mentioned_in_response(alias, response, norm_response):
-            return True
-    return False
-
-
-def _filter_referenced_documents_by_response(response_content: str, docs: Optional[list]) -> list:
-    """최종 답변 텍스트에 언급된 참조 문서만 반환.
-
-    주의:
-    - LLM 호출 없이 문자열 매칭만 사용한다.
-    - 매칭 결과가 0건이면 과도한 누락을 막기 위해 원본 docs를 그대로 반환한다.
-    """
-    if not docs:
-        return []
-
-    response = str(response_content or "")
-    norm_response = _normalize_for_match(response)
-
-    # "정보 없음" 고정 응답 계열은 참조 문서를 노출하지 않는다.
-    if any(pattern in response for pattern in INSUFFICIENT_INFO_PATTERNS):
-        logger.info(
-            "[ReferencedDocsFilter] 정보부족 응답 감지 → referenced_documents 0건 반환 (입력=%d건)",
-            len(docs),
-        )
-        return []
-
-    filtered = []
-    removed_names = []
-    for d in docs:
-        if not isinstance(d, dict):
-            continue
-        aliases = _extract_service_aliases(d)
-        if _is_any_alias_mentioned(aliases, response, norm_response):
-            filtered.append(d)
-        else:
-            removed_names.append(str(d.get("name", "") or "").strip() or "(이름없음)")
-
-    if not filtered:
-        logger.info(
-            "[ReferencedDocsFilter] 매칭 0건: referenced_documents 0건 반환 (입력=%d건)",
-            len(docs),
-        )
-        return []
-
-    logger.info(
-        "[ReferencedDocsFilter] 응답 기반 필터 적용: %d건 → %d건 | 제외=%s",
-        len(docs),
-        len(filtered),
-        removed_names[:10],
-    )
-    return filtered
-
-
-# ============================================================================
-# Streaming helpers
-# ============================================================================
-
-def _build_streaming_chunk(
-    chunk_id: str,
-    created: int,
-    model: str,
-    content: str
-) -> str:
-    """
-    Build a single streaming chunk in SSE format.
-
-    Args:
-        chunk_id: Unique chunk ID
-        created: Creation timestamp
-        model: Model name
-        content: Chunk content
-
-    Returns:
-        Formatted SSE data string
-    """
-    chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"content": content},
-                "finish_reason": None
-            }
-        ]
-    }
-    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-
-async def _build_streaming_response(
-    content: str,
-    response_template: Dict[str, Any]
-) -> AsyncGenerator[str, None]:
-    """
-    Build streaming response by yielding chunks character by character.
-
-    Args:
-        content: Response content to stream
-        response_template: Response template with id, created, model
-
-    Yields:
-        SSE formatted data strings
-    """
-    chunk_id = response_template["id"]
-    created = response_template["created"]
-    model = response_template["model"]
-
-    for char in content:
-        yield _build_streaming_chunk(chunk_id, created, model, char)
-        await asyncio.sleep(STREAM_CHUNK_DELAY)
-
-    yield f"data: {STREAM_FINISH_MARKER}\n\n"
-
-
-async def _stream_delta_content(content: str) -> AsyncGenerator[str, None]:
-    for char in content:
-        chunk_data = {
-            "choices": [{
-                "index": 0,
-                "delta": {"content": char},
-                "finish_reason": None
-            }]
-        }
-        yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-        await asyncio.sleep(STREAM_CHUNK_DELAY)
