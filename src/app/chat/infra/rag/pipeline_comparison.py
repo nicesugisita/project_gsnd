@@ -47,6 +47,7 @@ from app.chat.routing import (
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
+from .common import dedupe_cap_expanded_queries, apply_policy_priority_to_documents
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +90,14 @@ async def process_rag_with_documents_v2(
         # Step 1: 쿼리 확장 (Mariner 검색 전)
         # ====================================================================
         if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/comparison_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
+            expanded_queries = dedupe_cap_expanded_queries(
+                precomputed_expanded_queries, reformed_query=reformed_query
+            )
+            logger.info(
+                "[RAG/comparison_v2] 사전 계산된 확장 쿼리 사용: 원본 %d개 → 캡 후 %d개",
+                len(precomputed_expanded_queries or []),
+                len(expanded_queries),
+            )
         else:
             if status_callback:
                 await status_callback("최적의 답변방식을 찾고 있습니다")
@@ -100,6 +107,8 @@ async def process_rag_with_documents_v2(
             if not expanded_queries:
                 logger.warning("[RAG/comparison_v2] 쿼리 확장 실패 - 원본 질의 사용")
                 expanded_queries = [reformed_query]
+        if not expanded_queries:
+            expanded_queries = [reformed_query]
         logger.info(f"[RAG/comparison_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
         for i, eq in enumerate(expanded_queries, 1):
             logger.info(f"[RAG/comparison_v2] [벡터검색어] #{i}: {eq}")
@@ -339,10 +348,9 @@ async def process_rag_with_documents_v2(
             else:
                 _candidates = await expand_query(reformed_query)
             logger.info("[TIMING][comparison] Step5-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            fallback_expanded_queries = [
-                q for q in (str(x).strip() for x in (_candidates or []))
-                if q and q != reformed_query
-            ]
+            fallback_expanded_queries = dedupe_cap_expanded_queries(
+                _candidates or [], reformed_query=reformed_query
+            )
             if fallback_expanded_queries:
                 _t = time.monotonic()
                 fallback_triples = await asyncio.gather(*[extract_triples(eq) for eq in fallback_expanded_queries])
@@ -436,6 +444,9 @@ async def process_rag_with_documents_v2(
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
+        top_docs = apply_policy_priority_to_documents(
+            message, top_docs, log_prefix="[RAG/comparison_v2]"
+        )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
         logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/comparison_v2] 관련성 필터 후: {len(top_docs)}개")

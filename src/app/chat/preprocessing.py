@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional
 from app.core.config import Config
 
 from app.core.constants import ROLE_USER, ROLE_ASSISTANT
+from app.chat.infra.rag.query_builder import (
+    sanitize_disability_keywords,
+    sanitize_disability_text,
+)
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm import call_llm_api
 from app.shared.utils.prompt_loader import load_unified_preprocessing_prompt
@@ -129,8 +133,23 @@ async def unified_preprocess(
         expanded = parsed.get("expanded_queries") or []
         if not expanded:
             expanded = [reformed]
+        raw_reformed = reformed
+        raw_expanded = list(expanded)
+        reformed = sanitize_disability_text(reformed, user_query)
+        expanded = [sanitize_disability_text(q, user_query) for q in expanded]
+        expanded = [q for q in expanded if q]
+        if not expanded:
+            expanded = [reformed] if reformed else [user_query]
         try:
-            keywords = extract_nouns(reformed)
+            raw_keywords = extract_nouns(reformed)
+            keywords = sanitize_disability_keywords(raw_keywords, user_query)
+            if raw_reformed != reformed or raw_expanded != expanded or raw_keywords != keywords:
+                logger.info(
+                    "[UnifiedPreprocess] 대상집단 가드 적용 | reformed_changed=%s | expanded_changed=%s | keywords_changed=%s",
+                    raw_reformed != reformed,
+                    raw_expanded != expanded,
+                    raw_keywords != keywords,
+                )
         except Exception as e:
             logger.warning("[UnifiedPreprocess] 키워드 추출 실패: %s", e)
             keywords = []

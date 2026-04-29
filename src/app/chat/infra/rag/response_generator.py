@@ -31,6 +31,7 @@ from app.shared.utils.prompt_loader import (
     load_classification_recommended_prompt,
     load_classification_search_prompt,
 )
+from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,7 @@ async def generate_final_response_v2(
             user_message += (
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
+        user_message += soft_priority_instruction_for_prompt(message)
         user_message += " "
 
         final_messages = [{"role": ROLE_USER, "content": user_message}]

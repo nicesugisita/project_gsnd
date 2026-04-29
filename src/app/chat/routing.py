@@ -25,6 +25,7 @@ from app.chat.infra.deepserver.client import (
     deepserver_extract_comparison_triples,
     _ds_post,
 )
+from app.chat.infra.rag.expansion_cap import dedupe_cap_expanded_queries
 from app.shared.utils.prompt_loader import load_query_recreation_prompt
 from app.shared.utils.helpers import shorten_text
 
@@ -193,8 +194,13 @@ async def expand_query(reformed_query: str) -> list:
     """
     try:
         queries = await deepserver_expand_query(reformed_query)
-        logger.info("[Query Expansion] 확장 성공: %d개 질의", len(queries))
-        return queries
+        capped = dedupe_cap_expanded_queries(queries, reformed_query=reformed_query)
+        logger.info(
+            "[Query Expansion] 확장 성공: 원본 %d개 → 상한·중복제거 후 %d개 질의",
+            len(queries or []),
+            len(capped),
+        )
+        return capped
     except Exception as e:
         logger.error("[Query Expansion] 오류: %s", e)
         return []

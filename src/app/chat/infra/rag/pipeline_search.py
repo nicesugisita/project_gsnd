@@ -24,7 +24,11 @@ from app.chat.infra.rag import (
     _get_document_name,
     _build_search_queries,
 )
-from .common import build_referenced_documents
+from .common import (
+    build_referenced_documents,
+    dedupe_cap_expanded_queries,
+    apply_policy_priority_to_documents,
+)
 from .response_generator import generate_final_response_v2
 from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
@@ -72,8 +76,14 @@ async def process_rag_search(
         # Step 1: 쿼리 확장 (Mariner 검색 전)
         # ====================================================================
         if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/search_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
+            expanded_queries = dedupe_cap_expanded_queries(
+                precomputed_expanded_queries, reformed_query=reformed_query
+            )
+            logger.info(
+                "[RAG/search_v2] 사전 계산된 확장 쿼리 사용: 원본 %d개 → 캡 후 %d개",
+                len(precomputed_expanded_queries or []),
+                len(expanded_queries),
+            )
         else:
             if status_callback:
                 await status_callback("최적의 답변방식을 찾고 있습니다")
@@ -83,6 +93,8 @@ async def process_rag_search(
             if not expanded_queries:
                 logger.warning("[RAG/search_v2] 쿼리 확장 실패 - 원본 질의 사용")
                 expanded_queries = [reformed_query]
+        if not expanded_queries:
+            expanded_queries = [reformed_query]
         logger.info(f"[RAG/search_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
         for i, eq in enumerate(expanded_queries, 1):
             logger.info(f"[RAG/search_v2] [벡터검색어] #{i}: {eq}")
@@ -254,10 +266,9 @@ async def process_rag_search(
                 logger.info("[RAG/search_v2] fallback: 사전 계산 확장 쿼리 사용")
             else:
                 _candidates = await expand_query(reformed_query)
-            fallback_expanded = [
-                q for q in (str(x).strip() for x in (_candidates or []))
-                if q and q != reformed_query
-            ]
+            fallback_expanded = dedupe_cap_expanded_queries(
+                _candidates or [], reformed_query=reformed_query
+            )
             logger.info("[TIMING][search] Step4-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             if fallback_expanded:
                 _t = time.monotonic()
@@ -312,6 +323,9 @@ async def process_rag_search(
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
+        top_docs = apply_policy_priority_to_documents(
+            message, top_docs, log_prefix="[RAG/search_v2]"
+        )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=search_sigun_filters)
         logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")

@@ -24,6 +24,8 @@ from .common import (
     build_referenced_documents,
     run_welfare_tel_queries,
     filter_excluded_docs,
+    dedupe_cap_expanded_queries,
+    apply_policy_priority_to_documents,
 )
 
 # 기존 rag_service에서 필요한 함수/상수를 import
@@ -124,8 +126,14 @@ async def process_rag_guide_recommend(
         # Step A-1: 쿼리 확장 (Mariner 검색 전)
         gr_expand_base = reformed_query
         if precomputed_expanded_queries:
-            gr_expanded = precomputed_expanded_queries
-            logger.info("[RAG/guide_recommend_v2] 사전 계산된 확장 쿼리 사용: %d개", len(gr_expanded))
+            gr_expanded = dedupe_cap_expanded_queries(
+                precomputed_expanded_queries, reformed_query=gr_expand_base
+            )
+            logger.info(
+                "[RAG/guide_recommend_v2] 사전 계산된 확장 쿼리 사용: 원본 %d개 → 캡 후 %d개",
+                len(precomputed_expanded_queries or []),
+                len(gr_expanded),
+            )
         else:
             if status_callback:
                 await status_callback("최적의 답변방식을 찾고 있습니다")
@@ -135,6 +143,8 @@ async def process_rag_guide_recommend(
             if not gr_expanded:
                 logger.warning("[RAG/guide_recommend_v2] 쿼리 확장 실패 - 기준 질의 사용")
                 gr_expanded = [gr_expand_base]
+        if not gr_expanded:
+            gr_expanded = [gr_expand_base]
         logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")
         for i, eq in enumerate(gr_expanded, 1):
             logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #{i}: {eq}")
@@ -370,10 +380,9 @@ async def process_rag_guide_recommend(
             else:
                 _candidates = await expand_query(gr_expand_base)
             logger.info("[TIMING][guide_recommend] StepD-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            fallback_expanded = [
-                q for q in (str(x).strip() for x in (_candidates or []))
-                if q and q != gr_expand_base
-            ]
+            fallback_expanded = dedupe_cap_expanded_queries(
+                _candidates or [], reformed_query=gr_expand_base
+            )
             if fallback_expanded:
                 _t = time.monotonic()
                 fallback_tri = [
@@ -462,6 +471,9 @@ async def process_rag_guide_recommend(
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
+        gr_top_docs = apply_policy_priority_to_documents(
+            message, gr_top_docs, log_prefix="[RAG/guide_recommend_v2]"
+        )
         gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
         logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/guide_recommend_v2] 관련성 필터 후: {len(gr_top_docs)}개 문서")

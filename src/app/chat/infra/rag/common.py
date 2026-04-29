@@ -12,6 +12,14 @@ from typing import Dict, Any, List, Optional
 
 from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
 from app.chat.infra.rag import _get_document_name, _get_document_snippet
+from app.chat.infra.rag.expansion_cap import (
+    MAX_EXPANDED_QUERIES_DEFAULT,
+    dedupe_cap_expanded_queries,
+)
+from app.chat.infra.rag.policy_priority import (
+    apply_policy_priority_to_documents,
+    resolve_policy_boost_keywords,
+)
 
 logger = logging.getLogger(__name__)
 
