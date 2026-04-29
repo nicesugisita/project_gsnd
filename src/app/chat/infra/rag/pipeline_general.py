@@ -563,45 +563,6 @@ async def process_rag_general(
             top_docs = filter_excluded_docs(top_docs, excluded_chunk_ids or [], excluded_service_names)
             logger.info(f"[MoreResults][general] 최종 제외 필터 후: {len(top_docs)}개 문서")
 
-
-        # # ====================================================================
-        # # Step 7-C-4: 여전히 0건 → Fallback 재검색 (연도/생애주기 필터 제거)
-        # # ====================================================================
-        # if not top_docs:
-        #     logger.info("[RAG/general_v2] 관련성 필터 0건 → Fallback 재검색 시작")
-        #     _t = time.monotonic()
-        #     fb_futures = [
-        #         loop.run_in_executor(None, _group_a_run_okms_fallback, eq, sq if sq else "")
-        #         for eq, sq in zip_longest(expanded_queries, ga_tri_built, fillvalue="")
-        #     ]
-        #     fb_results = await asyncio.gather(*fb_futures)
-        #     logger.info(
-        #         "[TIMING][general] Step7-C-4 Fallback 재검색: %.3fs", time.monotonic() - _t
-        #     )
-        #     fb_docs: List[Dict[str, Any]] = []
-        #     for pair in fb_results:
-        #         for part in (pair[0], pair[1]):
-        #             if part:
-        #                 fb_docs.extend(part[:_GEN_GA_PER_QUERY])
-        #     if fb_docs:
-        #         fb_pool = sorted(
-        #             _deduplicate_documents(fb_docs),
-        #             key=lambda x: float(x.get("WEIGHT", 0) or 0),
-        #             reverse=True,
-        #         )[:_GEN_GA_TOP_N]
-        #         _t = time.monotonic()
-        #         top_docs = await filter_irrelevant_docs(
-        #             reformed_query, fb_pool, sigun_filters=gen_sigun_filters
-        #         )
-        #         logger.info(
-        #             "[TIMING][general] Step7-C-4 Fallback 관련성 필터: %.3fs", time.monotonic() - _t
-        #         )
-        #         logger.info(f"[RAG/general_v2] Fallback 재검색 결과: {len(top_docs)}건")
-        #
-        # if excluded_chunk_ids or excluded_service_names:
-        #     top_docs = filter_excluded_docs(top_docs, excluded_chunk_ids or [], excluded_service_names)
-        #     logger.info(f"[MoreResults][general] 제외 필터 후: {len(top_docs)}개 문서")
-
         # ====================================================================
         # Step 7-C-2: 0건 → 바로 "답변을 찾을 수 없습니다" 반환
         # ====================================================================

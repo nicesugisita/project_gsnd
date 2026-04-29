@@ -1,6 +1,10 @@
 """
 Mariner 쿼리셋 — GSND_BIZ_DATASET_V4 듀얼 검색 (Group A/B)
 
+Group A(균등 가중치)와 Group B(KO/MI 가중치 분리) 듀얼 검색 함수입니다.
+general, guide_recommend 의도에서 공유합니다.
+
+기존 mariner/queryset.py, services/rag_service.py는 변경하지 않습니다.
 """
 
 import logging

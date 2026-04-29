@@ -1,6 +1,10 @@
 """
 Mariner 쿼리셋 — GSND_DATASET_V8 전용 (Fallback)
 
+필터 없이 검색하는 fallback용 쿼리셋입니다.
+SIGUN 스크립틀릿, COMPLI_DT FilterSet, Python 후처리 필터를 적용하지 않습니다.
+
+기존 mariner/queryset.py, services/rag_service.py는 변경하지 않습니다.
 """
 
 import logging

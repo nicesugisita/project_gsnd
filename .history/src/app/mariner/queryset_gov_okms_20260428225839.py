@@ -1,6 +1,9 @@
 """
 Mariner 쿼리셋 — GOV_OKMS_V1 단일 검색
 
+정부24 공공서비스 컬렉션(GOV_OKMS_V1)을 QuerySet(1)으로 검색합니다.
+TEST_OKMS_V4 듀얼 검색과 달리 단일 쿼리(벡터+키워드 혼합)로 동작합니다.
+SIGUN·YEAR 필터 없음. LIFE_CYCLE 스크립틀릿 선택 적용.
 """
 
 import logging

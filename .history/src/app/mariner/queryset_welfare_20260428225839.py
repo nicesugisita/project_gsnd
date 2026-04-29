@@ -1,6 +1,11 @@
 """
 Mariner 쿼리셋 — GSND_WELFARE_CENTER_V1 전용
 
+복지시설 컬렉션 검색에 사용되는 Mariner 쿼리 함수입니다.
+예제 검색식(MarinerQuerySetExampleCode_WELFARE.py)을 기반으로
+4-field OR 검색식을 적용합니다.
+
+기존 mariner/queryset.py, services/rag_service.py는 변경하지 않습니다.
 """
 
 import logging

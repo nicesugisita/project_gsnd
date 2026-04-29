@@ -1,8 +1,15 @@
-"""GSND 보강 검색 전용 Mariner 검색"""
+"""
+Mariner 쿼리셋 — GSND_DATASET_V8 전용
+
+GSND 보강 검색(general Step 7-B)에 사용되는 Mariner 쿼리 함수입니다.
+
+기존 mariner/queryset.py, services/rag_service.py는 변경하지 않습니다.
+"""
 
 import logging
 import re
 import time
+from datetime import date
 from typing import Dict, Any, List, Optional
 
 import jpype
@@ -16,6 +23,8 @@ from app.core.constants import (
     MARINER_WS_AND,
     MARINER_WS_END,
     MARINER_WS_FILTER,
+    MARINER_WS_NOT,
+    MARINER_WS_EXACT,
     MARINER_WS_BM25, MARINER_WS_VECTOR,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
@@ -23,16 +32,52 @@ from app.core.constants import (
 from app.core.exceptions import RAGServiceError
 from app.mariner.sigun_utils import normalize_sigun
 from app.mariner.jvm_manager import ensure_jvm_thread
-from .schema_helpers import (
-    _uses_okms_document_schema,
-    _uses_gsnd_v7_schema,
-    _uses_welfare_center_schema,
-    _build_okms_document_name,
-    _LIFECYCLE_CONTENT_KEYWORDS,
-)
 
 logger = logging.getLogger(__name__)
 
+
+def _uses_okms_document_schema(collection: Optional[str]) -> bool:
+    return (collection or "").strip().upper() == Config.RAG_OKMS_COLLECTION.upper()
+
+
+def _uses_gsnd_v7_schema(collection: Optional[str]) -> bool:
+    return (collection or "").strip().upper() == Config.RAG_COLLECTION.upper()
+
+
+def _uses_welfare_center_schema(collection: Optional[str]) -> bool:
+    return (collection or "").strip().upper() == Config.RAG_WELFARE_CENTER_COLLECTION.upper()
+
+
+def _build_okms_document_name(doc: Dict[str, Any]) -> str:
+    org_nm = str(doc.get("ORG_NM", "") or "").strip()
+    if org_nm:
+        return org_nm
+    business_name = str(doc.get("BUSINESS_NAME", "") or "").strip()
+    if business_name:
+        return business_name
+    sigun = str(doc.get("SIGUN", "") or "").strip()
+    year = str(doc.get("YEAR", "") or "").strip()
+    parts = []
+    if sigun:
+        parts.append(sigun)
+    if year:
+        parts.append(year)
+    return " / ".join(parts) or str(doc.get("CHUNK_ID", "") or "문서")
+
+
+_LIFECYCLE_CONTENT_KEYWORDS: Dict[str, List[str]] = {
+    "영유아": ["영유아"],
+    "아동": ["아동"],
+    "청소년": ["청소년"],
+    "청년": ["청년"],
+    "중장년": ["중장년"],
+    "노인": ["노인", "노년"],
+}
+
+
+# ============================================================
+# GSND_DATASET_V8 보강 검색
+# ============================================================
 
 def query_GSND_general_documents(
     keyword: str,
@@ -44,6 +89,7 @@ def query_GSND_general_documents(
     lifecycle_filter: Optional[str] = None,
     facility_type_filter: Optional[str] = None,
     search_mode: str = "hybrid",
+    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     general 플로우의 GSND 보강 검색 (Step 7-B)에서 사용하는 Mariner 검색 함수.
@@ -59,6 +105,19 @@ def query_GSND_general_documents(
     if collection is None:
         collection = Config.RAG_COLLECTION
 
+    excluded_chunk_set = {
+        str(chunk_id).strip()
+        for chunk_id in (excluded_chunk_ids or [])
+        if str(chunk_id).strip()
+    }
+    if excluded_chunk_set:
+        excluded_values = sorted(excluded_chunk_set)
+        logger.info(
+            "[MoreResults][Mariner/general/GSND] 제외 입력 수=%d | 샘플=%s",
+            len(excluded_values),
+            excluded_values[:10],
+        )
+
     try:
         timeout = Config.MARINER_TIMEOUT
         threshold = Config.MARINER_THRESHOLD
@@ -72,11 +131,15 @@ def query_GSND_general_documents(
 
         jpkg_query = jpype.JPackage("com.diquest.ir5.common.msg.protocol.query")
         query = jpkg_query.Query("", "")
+        print("----------------------------------------------",keyword)
+        keyword_string = JString(keyword)
+        print("----------------------------------------------",keyword_string)
 
         startnum = 0
         endnum = int(max_top_n) - 1
         query.setResult(startnum, endnum)
         query.setFrom(collection)
+        query.setSearchKeyword(keyword_string)
         query.setSearch(True)
         query.setDebug(True)
         query.setPrintQuery(True)
@@ -108,16 +171,15 @@ def query_GSND_general_documents(
         query.setOrderby(order_set_array)
 
         # WHERE: 4-field OR 검색식
-        keyword_string = JString(keyword)
         where_set_array = [
             jpkg_query.WhereSet(MARINER_WS_OR),                                        # OR (
-            jpkg_query.WhereSet("NAME_KO",        2,  keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet("NAME_KO",        2,  keyword_string, MARINER_WEIGHT_MED),
             jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", MARINER_WS_BM25,  keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet("TEXT_CHUNK_KO", MARINER_WS_BM25,  keyword_string, MARINER_WEIGHT_MED),
             jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
             jpkg_query.WhereSet("NAME_MI",        2,  keyword_string, MARINER_WEIGHT_HIGH),
             jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR, keyword_string, MARINER_WEIGHT_MED),
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR, keyword_string, MARINER_WEIGHT_HIGH),
             jpkg_query.WhereSet(MARINER_WS_END),                                       # )
         ]
 
@@ -138,29 +200,49 @@ def query_GSND_general_documents(
                     jpkg_query.WhereSet("SIGUN", 1, sigun_str, 0),
                 ]
 
-        # TODO: COMPLI_DT 가중치 부스트 및 FilterSet — year_filters 전달 시 적용 예정
-        # 상세 계획: wip/TODO_GSND_COMPLI_DT.md
+        # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        if excluded_chunk_set:
+            excluded_values = sorted(excluded_chunk_set)
+            # 컬렉션 스키마별 식별 필드 결정
+            if _uses_okms_document_schema(collection) or _uses_welfare_center_schema(collection):
+                id_field = "ID"
+            else:
+                id_field = "CHUNK_ID"
 
-        # YEAR FilterSet (연도 필터가 있는 경우)
-        if year_filters:
-            year_ranges = []
-            for y in year_filters:
-                y = str(y).strip()
-                if y:
-                    year_ranges.extend([f"{y}0101", f"{y}1231"])
-            if year_ranges:
-                filter_set_array = [
-                    jpkg_query.FilterSet(
-                        jpype.JByte(3), "COMPLI_DT",
-                        jpype.JArray(jpype.JString)(year_ranges), 0
-                    )
+            _n = len(excluded_values)
+            _sample = excluded_values[:20]
+            logger.info(
+                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs(%d) field=%s: %s%s",
+                _n,
+                id_field,
+                _sample,
+                "..." if _n > 20 else "",
+            )
+            for chunk_id in excluded_values:
+                where_set_array += [
+                    jpkg_query.WhereSet(MARINER_WS_NOT),
+                    jpkg_query.WhereSet(id_field, MARINER_WS_EXACT, chunk_id, 0),
                 ]
 
-        else:
-            filter_set_array = [jpkg_query.FilterSet(jpype.JByte(3), "COMPLI_DT", jpype.JArray(jpype.JString)(["20260101", "20261231"]), 0)]
-        query.setFilter(filter_set_array)
-
         query.setWhere(where_set_array)
+
+        # COMPLI_DT FilterSet (감지된 연도의 최소~최대 범위, 없으면 올해)
+        if year_filters:
+            filter_years = sorted(set(str(y).strip() for y in year_filters if str(y).strip()))
+        else:
+            filter_years = [str(date.today().year)]
+
+        if filter_years:
+            min_year = filter_years[0]
+            max_year = filter_years[-1]
+            filter_set_array = [
+                jpkg_query.FilterSet(
+                    jpype.JByte(3), "COMPLI_DT",
+                    jpype.JArray(jpype.JString)([f"{min_year}0101", f"{max_year}1231"]), 0
+                )
+            ]
+            query.setFilter(filter_set_array)
+            logger.debug(f"[Mariner/general/GSND] COMPLI_DT FilterSet: {min_year}~{max_year}")
 
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)
@@ -189,6 +271,7 @@ def query_GSND_general_documents(
             if str(sigun).strip()
         }
         logger.info(f"[Mariner/general/GSND] raw 결과: {result_size}개 (필터 전), 키워드: {keyword[:50]}, sigun_filters={list(target_siguns) if target_siguns else None}")
+        raw_id_samples: List[str] = []
 
         for i in range(result_size):
             try:
@@ -208,6 +291,8 @@ def query_GSND_general_documents(
 
             doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
             doc["WEIGHT"] = str(weight_val)
+            if doc.get("CHUNK_ID") and len(raw_id_samples) < 10:
+                raw_id_samples.append(str(doc.get("CHUNK_ID")))
 
             if _uses_okms_document_schema(collection):
                 doc["CHUNK_ID"] = doc.get("ID", "")
@@ -264,6 +349,27 @@ def query_GSND_general_documents(
                         continue
 
             doc_list.append(doc)
+
+        if excluded_chunk_set:
+            before_count = len(doc_list)
+            removed_ids: List[str] = []
+            filtered_docs: List[Dict[str, Any]] = []
+            for doc in doc_list:
+                cid = str(doc.get("CHUNK_ID", "")).strip()
+                if cid and cid in excluded_chunk_set:
+                    if len(removed_ids) < 20:
+                        removed_ids.append(cid)
+                    continue
+                filtered_docs.append(doc)
+            doc_list = filtered_docs
+            logger.info(
+                f"[MoreResults][Mariner/general/GSND] CHUNK_ID 1차 제외: {before_count - len(doc_list)}개"
+            )
+            logger.info(
+                "[MoreResults][Mariner/general/GSND] 실제 제외 ID 샘플=%s | raw ID 샘플=%s",
+                removed_ids[:10],
+                raw_id_samples,
+            )
 
         t2 = time.monotonic()
         logger.info(f"[Mariner/general/GSND] 검색 시간: {t2 - t1:.3f}초, 키워드: {keyword[:50]}, 결과: {len(doc_list)}개")

@@ -1,6 +1,9 @@
 """
 Mariner 쿼리셋 — GSND_OUR_REGION_TEL 전용
 
+우리 지역 센터/기관 연락처(센터명, 읍면동, 전화번호, 주소) 검색에 사용됩니다.
+예제 검색식(MarinerQuerySetExampleCode_OUR_REGION_TEL.py)을 기반으로
+CENTER/ADDRESS 2-field OR 검색식과 SIGUN/EUPMYEONDONG 스크립틀릿을 적용합니다.
 """
 
 import logging
