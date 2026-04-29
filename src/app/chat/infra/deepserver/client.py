@@ -216,11 +216,6 @@ async def deepserver_expand_query(question: str) -> List[str]:
     logger.info(f"[deepserver_expand_query] {question}")
     output = await _call_generation(question, _EXPAND_PROMPT_ID, task="")
     try:
-        # TODO 이거 넣을지 말지 고민해야 함 - 체감상 검색 성능 저하 (추가로 해당 작업에서 약 3초 단축 가능)
-        # # 마크다운 코드블록 제거 (```json ... ``` 또는 ``` ... ```)
-        # stripped = output.strip()
-        # if stripped.startswith("```"):
-        #     stripped = stripped.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         parsed = json.loads(output)
         queries = parsed.get("query", []) if isinstance(parsed, dict) else parsed
         return queries if isinstance(queries, list) else []

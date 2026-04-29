@@ -2,10 +2,6 @@
 
 # collection
 from .collection import (
-    INTENT_COLLECTION_MAP,
-    _INTENT_ALIAS_MAP,
-    _normalize_intent,
-    _resolve_collection_for_intent,
     _uses_okms_document_schema,
     _uses_gsnd_v7_schema,
     _uses_welfare_center_schema,

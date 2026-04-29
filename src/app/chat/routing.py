@@ -16,11 +16,10 @@ import re
 from typing import Dict, Any, List
 
 from app.core.config import Config
-from app.core.constants import ROLE_USER
+from app.core.constants import ROLE_USER, ROLE_ASSISTANT
 from app.chat.infra.llm import call_llm_api
 from .more_results import get_base_user_query_from_history
 from app.chat.infra.deepserver.client import (
-    deepserver_reform_query,
     deepserver_expand_query,
     deepserver_extract_comparison_attributes,
     deepserver_extract_comparison_triples,
@@ -28,29 +27,9 @@ from app.chat.infra.deepserver.client import (
 )
 from app.shared.utils.prompt_loader import load_query_recreation_prompt
 from app.shared.utils.helpers import shorten_text
-from app.core.constants import ROLE_ASSISTANT
 
 logger = logging.getLogger(__name__)
 
-
-async def reform_query(user_query: str, chat_messages: Any = None) -> str:
-    """
-    DeepServer를 사용해 사용자 질문을 문서 검색에 적합한 질의로 재구성
-
-    Args:
-        user_query: 원본 사용자 질문
-        chat_messages: 대화 히스토리(선택) - 현재 미사용
-
-    Returns:
-        재구성된 질의 문자열 (실패 시 원본 반환)
-    """
-    try:
-        result = await deepserver_reform_query(user_query)
-        logger.info("[Query Reform] 재구성 결과: %s", shorten_text(result, 200))
-        return result
-    except Exception as e:
-        logger.error("[Query Reform] 오류: %s", e)
-        return user_query
 
 
 async def query_recreation(
@@ -98,11 +77,6 @@ async def query_recreation(
             api_url=Config.LLM_API_URL
         )
 
-        # # 응답 검증
-        # if not response or response.strip() == "":
-        #     logger.info("[Query Recreation] 빈 응답 (조건 불만족)")
-        #     return ""
-        
         final_query = ""
         try:
             parsed = json.loads(response)
@@ -111,11 +85,6 @@ async def query_recreation(
                 final_query = rq.strip()
         except Exception:
             final_query = response.strip()
-        
-        # # 기본 검증: 최소 2개 단어 이상
-        # if len(final_query.split()) < 2:
-        #     logger.info("[Query Recreation] 너무 짧은 응답: %s", final_query)
-        #     return ""
         
         logger.info("[Query Recreation] 완성 질의: %s", shorten_text(final_query, 200))
         return final_query
@@ -222,8 +191,6 @@ async def expand_query(reformed_query: str) -> list:
     Returns:
         확장 질의 리스트 (실패 시 빈 리스트)
     """
-    # if True:
-    #     return []
     try:
         queries = await deepserver_expand_query(reformed_query)
         logger.info("[Query Expansion] 확장 성공: %d개 질의", len(queries))
@@ -309,24 +276,5 @@ async def extract_comparison_triples(query: str) -> List[Dict[str, Any]]:
         return []
 
 
-async def select_collection_category(reformed_query: str) -> str:
-    """
-    재구성된 질의를 기반으로 적절한 컬렉션 카테고리 선택
-
-    현재는 기본 컬렉션만 지원합니다.
-    향후 동적 카테고리 선택 기능 추가 예정입니다.
-    
-    Args:
-        reformed_query: 재구성된 사용자 질문
-    
-    Returns:
-        선택된 컬렉션 카테고리 (기본값: Config.RAG_COLLECTION)
-    """
-    # TODO: 동적 카테고리 선택 구현
-    # - LLM을 사용해 재구성된 질의로부터 카테고리 판단
-    # - GSND_V1_C01~C09 중 하나를 선택
-    # - 유효성 검증 후 반환
-    return Config.RAG_COLLECTION
-    
 
 
