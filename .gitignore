@@ -1,36 +1,64 @@
+# Python cache / build artifacts
 __pycache__/
-jar_lib/
-backend.log
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
 venv/
+.venv/
+gsnd_venv/
+
+# Runtime logs / pid
+*.log
+backend.log
+nohup.out
+.uvicorn.pid
+logs/
+log/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local generated files
+jar_lib/
+uploaded_texts/
 stt_results/
 tts_results/
-venv/
-gsnd_venv/
+wip/
 *.tar.gz
 filter/*.tar.gz
-*.tar.gz
-*.log
-nohup.out
-claude-devcontainer-main/
-.devcontainer/
-.claude/
-.serena/
-.venv/
-.idea/
-.uvicorn.pid
+mariner/filter/
+mariner/archive/*
+src/tests/*.csv
+
+# Local cert/key
 server.crt
 server.key
-logs/**
-log/**
-wip/
+
+# Tooling / IDE
+.idea/
+.devcontainer/
+claude-devcontainer-main/
+.claude/
+.serena/
+
+# Local docs / notes
 CLAUDE.md
 PROJECT.md
 REFERENCE.md
-uv.lock
-stt_results/
-tts_results/
-uploaded_texts/
-mariner/filter/
 docs/
-mariner/archive/*
-tests/
+
+# Lock files (ignored by current project policy)
+uv.lock

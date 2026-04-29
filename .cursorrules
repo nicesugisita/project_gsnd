@@ -1,0 +1,35 @@
+# gsnd-rag-api — 프로젝트 코딩 표준 (.cursorrules)
+
+## 1. 프로젝트
+- **이름**: `gsnd-rag-api` — 경상남도청 RAG·챗봇 **백엔드**(FastAPI) 전용 레포이다.
+- **Python**: `pyproject.toml` 기준 **`>=3.11,<4`**. 가능하면 **3.12 LTS 근처**를 쓰고, 실험 버전에서는 일부 바이너리 의존성(예: 특정 패키지 휠) 이슈를 감안할 것.
+- **실행**: `uv sync`(또는 `uv pip install -e .`) 후 `uv run uvicorn app.application:app` … 루트에 `main.py`가 없으며 패키지는 `src/app` 아래 `app`이다.
+
+## 2. 언어
+- 사용자-facing 설명·PR 리뷰 요약 등은 **한국어**로 한다.
+- **코드 내 주석·모듈/공개 함수 docstring**은 이 레포처럼 **한국어**를 쓰되, 과한 장문 docstring보다 필요한 최소 한 줄 요약을 선호한다. (JavaScript 스타일 JSDoc이 아니라 Python 관례에 맞출 것.)
+
+## 3. 디렉터리·레이어링
+- **패키지 루트**: `src/app` → 모든 import는 `from app....` 형태.
+- **도메인**: `chat`, `rag`, `conversation`, `document`, `tts`, `keyword`, `system` 등 — 각각 `router.py`, `schemas.py`, `service`/`infra` 패턴을 따른다. 새 기능은 해당 도메인 안에 두고, 진짜 공통만 `app/shared`·`app/core`로 올린다.
+- **`app/mariner`**: 검색/인덱싱 JVM·쿼리셋 등 별도 블록 — 기존 패턴과 네이밍을 우선 재사용한다.
+- **HTTP 레이어**: 라우터는 얇게 유지하고, 비즈니스·오케스트레이션은 서비스/도메인 모듈로 둔다.
+
+## 4. 스택·관례
+- **웹**: FastAPI, **설정**: `pydantic-settings`, **모델/검증**: Pydantic v2 (`Field`, `model_config` 등).
+- **외부 호출**: `httpx`(비동기 우선)·기존 클라이언트 래퍼 재사용.
+- **예외**: `app.core.exceptions` 및 도메인 정책에 맞는 처리 — 라우터에서만 삼켜버리기보다 명시적 상태 코드/메시지 일관 유지.
+
+## 5. 타입·품질
+- 타입 어노테이션을 습관화한다. **`typing.Any` 남발은 피하고**, 구체 타입·`TypedDict`/Pydantic 모델·`Protocol`/제네릭으로 표현하고, 필요하면 런타임에서 타입 좁히기를 쓴다.
+- `FastAPI Depends()` 안에서 팩토리 호출되는 패턴은 **Ruff `B008` 예외**(프로젝트 설정 참고)와 맞춘다 — 불필요한 “항상 Depends 밖으로” 리팩터 제안은 하지 않는다.
+
+## 6. 테스트·린트
+- 테스트: **pytest** + **pytest-asyncio** (`tests/`, `pythonpath`는 `pytest` 설정에 따름).
+- 포맷·린트: **Ruff** (`pyproject.toml` — 줄 길이 100, double quote, import 정렬 `app`가 first-party). 변경 후 가능하면 `ruff check`/`ruff format`과 테스트로 확인한다.
+
+## 7. 설정·비밀
+- 민감 값은 `.env` 등 로컬/배포 환경 변수에 두고 **소스·커밋에 넣지 않는다.**
+
+## 8. 변경 범위
+- 요청 범위 밖 불필요한 대규모 리팩터·스타일 전면 통일은 하지 않는다. 동일 디렉터리의 네이밍·임포트 스타일에 맞출 것.
