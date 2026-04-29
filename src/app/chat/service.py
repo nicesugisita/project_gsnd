@@ -18,10 +18,8 @@ from app.chat.more_results import (
 from app.chat.query_reform import reform_query_with_history
 from app.chat.routing import (
     classify_next_intent,
-    reform_query,
     expand_query,
     extract_triples,
-    select_collection_category,
     query_recreation,
 )
 from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
@@ -48,8 +46,8 @@ __all__ = [
     "get_last_preprocess_from_history", "get_base_user_query_from_history",
     "get_excluded_info_from_history",
     "reform_query_with_history",
-    "classify_next_intent", "reform_query", "expand_query",
-    "extract_triples", "select_collection_category", "query_recreation",
+    "classify_next_intent", "expand_query",
+    "extract_triples", "query_recreation",
     "retrieval_sufficiency_judgment",
     "call_llm_api", "convert_korean_to_standard", "ask_judgment", "re_ask",
     "rag_norag_judgment", "clean_query_text", "mandatory_condition_check",

@@ -35,13 +35,11 @@ from app.chat.infra.rag import (
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
     _build_search_queries,
-    _resolve_collection_for_intent,
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
 from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
-    select_collection_category,
     expand_query,
     extract_triples,
 )
@@ -84,14 +82,7 @@ async def process_rag_general(
     try:
         t_total = time.monotonic()
 
-        # Step 1: 컬렉션 선택
-        _t = time.monotonic()
-        base_collection = await select_collection_category(reformed_query)
-        selected_collection = _resolve_collection_for_intent(intent, base_collection)
-        logger.info(f"[RAG/general_v2] 선택된 컬렉션: {selected_collection}")
-        logger.info("[TIMING][general] Step1 컬렉션 선택: %.3fs", time.monotonic() - _t)
-
-        # Step 2: 쿼리 확장 (Mariner 검색 전)
+        # Step 1: 쿼리 확장 (Mariner 검색 전)
         if precomputed_expanded_queries:
             expanded_queries = precomputed_expanded_queries
             logger.info("[RAG/general_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
@@ -429,7 +420,7 @@ async def process_rag_general(
                 def _run_gsnd_query(query):
                     try:
                         docs = query_GSND_general_documents(
-                            query, selected_collection,
+                            query, Config.RAG_COLLECTION,
                             sigun_filters=gen_sigun_filters,
                             year_filters=gsnd_year_filters or None,
                             excluded_chunk_ids=excluded_chunk_ids,
