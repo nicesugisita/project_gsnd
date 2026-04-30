@@ -49,6 +49,9 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
+    resolve_fallback_max_expanded_queries,
+    run_sufficiency_judgment_fast,
+    should_rerun_sufficiency_judgment,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,7 @@ async def process_rag_guide_recommend(
 
     try:
         t_total = time.monotonic()
+        _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
 
@@ -158,7 +162,8 @@ async def process_rag_guide_recommend(
             await status_callback("내용을 정리하고 있습니다")
         _t = time.monotonic()
         if precomputed_keywords:
-            logger.info("[RAG/guide_recommend_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+            logger.info("[RAG/guide_recommend_v2] 사전 계산된 키워드 사용: %d개", len(precomputed_keywords or []))
+            logger.debug("[RAG/guide_recommend_v2] 사전 계산된 키워드 상세: %s", precomputed_keywords)
             gr_triples_list = [filter_okms_keywords(precomputed_keywords)]
             if len(gr_expanded) > 1:
                 gr_triples_list.extend([[] for _ in range(len(gr_expanded) - 1)])
@@ -318,11 +323,13 @@ async def process_rag_guide_recommend(
         # Step D-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await retrieval_sufficiency_judgment(
+        okms_sufficiency = await run_sufficiency_judgment_fast(
+            judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=gr_top_docs,
+            log_prefix="RAG/guide_recommend_v2",
         )
         logger.info("[TIMING][guide_recommend] StepD-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -350,7 +357,7 @@ async def process_rag_guide_recommend(
                 _candidates = await expand_query(gr_expand_base)
             logger.info("[TIMING][guide_recommend] StepD-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             fallback_expanded = dedupe_cap_expanded_queries(
-                _candidates or [], reformed_query=gr_expand_base
+                _candidates or [], max_n=_GR_FALLBACK_MAX_EXPANDED, reformed_query=gr_expand_base
             )
             if fallback_expanded:
                 _t = time.monotonic()
@@ -362,6 +369,7 @@ async def process_rag_guide_recommend(
                     )
                     for eq in fallback_expanded
                 ]
+                _prev_okms_docs = list(gr_top_docs)
                 fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
                     message=message,
                     reformed_query=reformed_query,
@@ -370,6 +378,7 @@ async def process_rag_guide_recommend(
                     per_query_limit=_GR_GA_PER_QUERY,
                     run_group_a=_group_a_run_okms_query,
                     run_gov=_run_gov_okms_query,
+                    max_policy_pairs=1,
                 )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
@@ -379,19 +388,30 @@ async def process_rag_guide_recommend(
                         reverse=True,
                     )[:_GR_FINAL_TOP_N]
                     logger.info("[RAG/guide_recommend_v2] fallback 보강 후 OKMS: %d개", len(gr_top_docs))
-                    _t = time.monotonic()
-                    okms_sufficiency = await retrieval_sufficiency_judgment(
-                        user_question=message,
-                        intent=intent,
-                        collection_name=Config.RAG_OKMS_COLLECTION,
-                        docs=gr_top_docs,
-                    )
-                    logger.info("[TIMING][guide_recommend] StepD-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
-                    logger.info(
-                        "[RAG/guide_recommend_v2] fallback 재판단: sufficient=%s, reason=%s",
-                        okms_sufficiency["sufficient"],
-                        okms_sufficiency["reason"],
-                    )
+                    if should_rerun_sufficiency_judgment(
+                        before_docs=_prev_okms_docs,
+                        after_docs=gr_top_docs,
+                    ) and not (excluded_chunk_ids or excluded_service_names):
+                        _t = time.monotonic()
+                        okms_sufficiency = await run_sufficiency_judgment_fast(
+                            judge_fn=retrieval_sufficiency_judgment,
+                            user_question=message,
+                            intent=intent,
+                            collection_name=Config.RAG_OKMS_COLLECTION,
+                            docs=gr_top_docs,
+                            log_prefix="RAG/guide_recommend_v2",
+                        )
+                        logger.info("[TIMING][guide_recommend] StepD-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
+                        logger.info(
+                            "[RAG/guide_recommend_v2] fallback 재판단: sufficient=%s, reason=%s",
+                            okms_sufficiency["sufficient"],
+                            okms_sufficiency["reason"],
+                        )
+                    else:
+                        if excluded_chunk_ids or excluded_service_names:
+                            logger.info("[RAG/guide_recommend_v2] fallback 재판단 스킵: more_info 모드")
+                        else:
+                            logger.info("[RAG/guide_recommend_v2] fallback 재판단 스킵: 개선 폭 미미")
 
             if okms_sufficiency["sufficient"]:
                 logger.info("[RAG/guide_recommend_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
@@ -407,6 +427,11 @@ async def process_rag_guide_recommend(
                     message, gr_sigun_filters, gr_eupmyeondong_filters,
                     _GR_WELFARE_TEL_PER_QUERY, "RAG/guide_recommend_v2",
                     excluded_chunk_ids=excluded_chunk_ids,
+                    timeout_sec=(
+                        float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
+                        if (excluded_chunk_ids or excluded_service_names)
+                        else None
+                    ),
                 )
                 logger.info("[TIMING][guide_recommend] StepD-W OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
                 logger.info(f"[RAG/guide_recommend_v2] OUR_REGION_TEL 검색 합계: {len(gr_welfare_tel_docs)}개")
@@ -461,6 +486,7 @@ async def process_rag_guide_recommend(
             messages=messages,
             user_region=user_region,
             user_birth_year=str(birth_year) if birth_year else "",
+            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][guide_recommend] 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][guide_recommend] process_rag_guide_recommend 전체: %.3fs", time.monotonic() - t_total)

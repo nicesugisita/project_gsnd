@@ -33,6 +33,8 @@ from .pipeline_utils import (
     build_welfare_search_queries,
     collect_welfare_center_tel_docs,
     log_step_banner,
+    resolve_fallback_max_expanded_queries,
+    run_sufficiency_judgment_fast,
 )
 from .response_generator import generate_final_response_v2
 from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
@@ -76,6 +78,7 @@ async def process_rag_search(
 
     try:
         t_total = time.monotonic()
+        _SEARCH_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
 
         with log_step_banner(logger, "RAG/search_v2 Step1 쿼리 확장"):
             if precomputed_expanded_queries:
@@ -106,7 +109,8 @@ async def process_rag_search(
             if precomputed_keywords:
                 keyword_str = " ".join(precomputed_keywords)
                 search_queries = [keyword_str] if keyword_str.strip() else []
-                logger.info("[RAG/search_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+                logger.info("[RAG/search_v2] 사전 계산된 키워드 사용: %d개", len(precomputed_keywords or []))
+                logger.debug("[RAG/search_v2] 사전 계산된 키워드 상세: %s", precomputed_keywords)
             else:
                 if status_callback:
                     await status_callback("내용을 정리하고 있습니다")
@@ -144,7 +148,9 @@ async def process_rag_search(
                 response = await generate_final_response_v2(
                     _final_user_msg, top_docs, temperature, max_tokens, stream,
                     frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
-                    intent=intent, messages=messages,
+                    intent=intent,
+                    messages=messages,
+                    more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
                 )
                 logger.info("[TIMING][search] process_rag_search 전체: %.3fs", time.monotonic() - t_total)
                 return response, referenced_documents[:Config.RAG_UI_MAX_DOCS]
@@ -216,11 +222,13 @@ async def process_rag_search(
         )[:_SEARCH_TOP_N]
 
         _t = time.monotonic()
-        tel_sufficiency = await retrieval_sufficiency_judgment(
+        tel_sufficiency = await run_sufficiency_judgment_fast(
+            judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_WELFARE_TEL_COLLECTION,
             docs=tel_top_for_judgment,
+            log_prefix="RAG/search_v2",
         )
         logger.info("[TIMING][search] Step4-S OUR_REGION_TEL 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -242,12 +250,13 @@ async def process_rag_search(
             else:
                 _candidates = await expand_query(reformed_query)
             fallback_expanded = dedupe_cap_expanded_queries(
-                _candidates or [], reformed_query=reformed_query
+                _candidates or [], max_n=_SEARCH_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
             )
             fallback_expanded, _ = build_welfare_search_queries(
                 expanded_queries=list(fallback_expanded or []),
                 search_queries=[],
                 user_message=message,
+                max_policy_queries=1,
             )
             logger.info("[TIMING][search] Step4-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             if fallback_expanded:
@@ -317,6 +326,7 @@ async def process_rag_search(
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             messages=messages,
+            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][search] Step8 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.debug("-----------[RAG/search_v2 Step8 최종응답 생성 끝]-----------")

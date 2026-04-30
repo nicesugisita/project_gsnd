@@ -126,6 +126,7 @@ async def generate_final_response_v2(
     messages: list = None,
     user_region: str = "",
     user_birth_year: str = "",
+    more_info_mode: bool = False,
 ) -> Any:
     """
     v2 최종 응답 생성 (모든 의도 공통)
@@ -236,6 +237,15 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
+        if more_info_mode:
+            user_message += (
+                "\n\n[추가 규칙]\n"
+                "- 이번 응답은 사용자의 '더 알려줘' 요청에 대한 추가 탐색 결과입니다.\n"
+                "- retrieved_documents에서 유효한 추가 정보를 찾지 못한 경우, "
+                "'현재 제공된 참고 문서에서는 추가로 확인되는 정보가 없습니다. "
+                "지역(시군)이나 대상 조건(연령/가구유형)을 알려주시면 다시 찾아드릴게요.'만 출력합니다.\n"
+            )
+
         if facility_content:
             user_message += (
                 f"\n        retrieved_facilities:\n        {facility_content}"
@@ -276,6 +286,7 @@ async def generate_final_response_v2(
                     "lifecycle": lifecycle,
                     "user_region": user_region,
                     "user_birth_year": user_birth_year,
+                    "more_info_mode": more_info_mode,
                     "top_docs_count": len(top_docs or []),
                     "welfare_docs_count": len(welfare_docs or []),
                     "extra_system_prompts": combined_prompts,

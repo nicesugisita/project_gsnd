@@ -161,6 +161,8 @@ class Settings(BaseSettings):
 
     # ── JVM / JAR ─────────────────────────────────────────────────────────────
     JAR_LIB_PATH: str = ""
+    JF_ATTACHER_CONF_PATH: str = ""
+    JF_ATTACHER_NATIVE_LIB_PATH: str = ""
     JAVA_MIN_MEMORY: str = "32m"
     JAVA_MAX_MEMORY: str = "512m"
 
@@ -174,6 +176,11 @@ class Settings(BaseSettings):
     DB_CONNECTION_TIMEOUT: int = 5
     DB_POOL_SIZE: int = 5             # 커넥션 풀 크기 (lifespan에서 사용)
     DB_POOL_NAME: str = "gsnd_pool"
+    POLICY_PRIORITY_DB_ENABLED: bool = True
+    POLICY_PRIORITY_TABLE: str = "gsnd_policy_priority"
+    POLICY_PRIORITY_CACHE_TTL_SEC: int = 1800
+    POLICY_PRIORITY_CHANGE_CHECK_SEC: int = 1800
+    MORE_INFO_WELFARE_TEL_TIMEOUT_SEC: int = 5
 
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10
