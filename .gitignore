@@ -32,6 +32,9 @@ nohup.out
 logs/
 log/
 
+# ─── Shell helpers (로컬 실행용 — 공유하려면 !스크립트명.sh 로 예외)
+*.sh
+
 # ─── Secrets & local env (keep examples tracked) ─────────────
 # .env.* 만 쓰면 .env_dev / .env_local 같은 이름은 무시되지 않음 → .env* 로 통일
 .env*
