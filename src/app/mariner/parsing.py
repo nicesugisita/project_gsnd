@@ -9,8 +9,8 @@ def parse_file(file_path: str, timeout: int = 120) -> str:
     # work_home = os.path.join(backend_dir, "filter")
     # jar_path = os.path.join(work_home, "lib", "DQJFAttacher.jar")
     # conf_path = os.path.join(work_home, "conf", "jfattacher.conf")
-    jar_path = os.path.join(Config.JAR_LIB_PATH, "DQJFAttacher.jar")
-    conf_path = os.path.join(Config.JAR_LIB_PATH, "jfattacher.conf")
+    jar_path = os.path.join(Config.JAR_LIB_PATH, "filter","DQJFAttacher.jar")
+    conf_path = os.path.join(Config.JAR_LIB_PATH, "filter", "jfattacher.conf")
     library_path = os.path.join(Config.JAR_LIB_PATH, "filter")
     # library_path = os.path.join(work_home, "lib", "linux_64bit")
 
