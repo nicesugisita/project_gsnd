@@ -2,14 +2,17 @@
 
 import os
 import subprocess
-
+from app.core.config import Config
 
 def parse_file(file_path: str, timeout: int = 120) -> str:
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
-    work_home = os.path.join(backend_dir, "filter")
-    jar_path = os.path.join(work_home, "lib", "DQJFAttacher.jar")
-    conf_path = os.path.join(work_home, "conf", "jfattacher.conf")
-    library_path = os.path.join(work_home, "lib", "linux_64bit")
+    # backend_dir = os.path.dirname(os.path.abspath(__file__))
+    # work_home = os.path.join(backend_dir, "filter")
+    # jar_path = os.path.join(work_home, "lib", "DQJFAttacher.jar")
+    # conf_path = os.path.join(work_home, "conf", "jfattacher.conf")
+    jar_path = os.path.join(Config.JAR_LIB_PATH, "DQJFAttacher.jar")
+    conf_path = os.path.join(Config.JAR_LIB_PATH, "jfattacher.conf")
+    library_path = os.path.join(Config.JAR_LIB_PATH, "filter")
+    # library_path = os.path.join(work_home, "lib", "linux_64bit")
 
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
