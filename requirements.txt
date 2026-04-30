@@ -1,4 +1,4 @@
-# Python >= 3.11
+# Python >= 3.11, < 4 (3.12 권장)
 
 # Web Framework
 fastapi==0.115.2

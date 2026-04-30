@@ -24,6 +24,8 @@ from .common import (
     build_referenced_documents,
     run_welfare_tel_queries,
     filter_excluded_docs,
+    dedupe_cap_expanded_queries,
+    apply_policy_priority_to_documents,
 )
 
 # 기존 rag_service에서 필요한 함수/상수를 import
@@ -35,13 +37,11 @@ from app.chat.infra.rag import (
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
     _build_search_queries,
-    _resolve_collection_for_intent,
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
 from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
-    select_collection_category,
     expand_query,
     extract_triples,
 )
@@ -84,17 +84,16 @@ async def process_rag_general(
     try:
         t_total = time.monotonic()
 
-        # Step 1: 컬렉션 선택
-        _t = time.monotonic()
-        base_collection = await select_collection_category(reformed_query)
-        selected_collection = _resolve_collection_for_intent(intent, base_collection)
-        logger.info(f"[RAG/general_v2] 선택된 컬렉션: {selected_collection}")
-        logger.info("[TIMING][general] Step1 컬렉션 선택: %.3fs", time.monotonic() - _t)
-
-        # Step 2: 쿼리 확장 (Mariner 검색 전)
+        # Step 1: 쿼리 확장 (Mariner 검색 전)
         if precomputed_expanded_queries:
-            expanded_queries = precomputed_expanded_queries
-            logger.info("[RAG/general_v2] 사전 계산된 확장 쿼리 사용: %d개", len(expanded_queries))
+            expanded_queries = dedupe_cap_expanded_queries(
+                precomputed_expanded_queries, reformed_query=reformed_query
+            )
+            logger.info(
+                "[RAG/general_v2] 사전 계산된 확장 쿼리 사용: 원본 %d개 → 캡 후 %d개",
+                len(precomputed_expanded_queries or []),
+                len(expanded_queries),
+            )
         else:
             if status_callback:
                 await status_callback("최적의 답변방식을 찾고 있습니다")
@@ -104,6 +103,8 @@ async def process_rag_general(
             if not expanded_queries:
                 logger.warning("[RAG/general_v2] 쿼리 확장 실패 - 원본 질의 사용")
                 expanded_queries = [reformed_query]
+        if not expanded_queries:
+            expanded_queries = [reformed_query]
         logger.info(f"[RAG/general_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
         for i, eq in enumerate(expanded_queries, 1):
             logger.info(f"[RAG/general_v2] [벡터검색어] #{i}: {eq}")
@@ -364,10 +365,9 @@ async def process_rag_general(
             else:
                 _candidates = await expand_query(reformed_query)
             logger.info("[TIMING][general] Step6-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            fallback_expanded_queries = [
-                q for q in (str(x).strip() for x in (_candidates or []))
-                if q and q != reformed_query
-            ]
+            fallback_expanded_queries = dedupe_cap_expanded_queries(
+                _candidates or [], reformed_query=reformed_query
+            )
             if fallback_expanded_queries:
                 logger.info("[RAG/general_v2] fallback 확장 쿼리 적용: %d개", len(fallback_expanded_queries))
             else:
@@ -429,7 +429,7 @@ async def process_rag_general(
                 def _run_gsnd_query(query):
                     try:
                         docs = query_GSND_general_documents(
-                            query, selected_collection,
+                            query, Config.RAG_COLLECTION,
                             sigun_filters=gen_sigun_filters,
                             year_filters=gsnd_year_filters or None,
                             excluded_chunk_ids=excluded_chunk_ids,
@@ -484,6 +484,9 @@ async def process_rag_general(
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
+        top_docs = apply_policy_priority_to_documents(
+            message, top_docs, log_prefix="[RAG/general_v2]"
+        )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=gen_sigun_filters)
         logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
@@ -499,6 +502,9 @@ async def process_rag_general(
                     f"[RAG/general_v2] 관련성 필터 0건 → GroupA 하위 {len(lower_docs)}건 재시도"
                 )
                 _t = time.monotonic()
+                lower_docs = apply_policy_priority_to_documents(
+                    message, lower_docs, log_prefix="[RAG/general_v2][C3]"
+                )
                 top_docs = await filter_irrelevant_docs(
                     reformed_query, lower_docs, sigun_filters=gen_sigun_filters
                 )
@@ -515,7 +521,10 @@ async def process_rag_general(
         if (not top_docs) or excluded_chunk_ids or excluded_service_names:
             logger.info("[RAG/general_v2] 재검색 시작 (0건 또는 제외문서 기반 추가 탐색)")
             _t = time.monotonic()
-            fallback_seed_queries = fallback_expanded_queries or list(expanded_queries)
+            _raw_seed = fallback_expanded_queries or list(expanded_queries)
+            fallback_seed_queries = dedupe_cap_expanded_queries(
+                _raw_seed, reformed_query=reformed_query
+            ) or [reformed_query]
             fb_futures = [
                 loop.run_in_executor(None, _group_a_run_okms_fallback, eq, sq if sq else "")
                 for eq, sq in zip_longest(fallback_seed_queries, ga_tri_built, fillvalue="")
@@ -548,6 +557,9 @@ async def process_rag_general(
                     logger.info(f"[MoreResults][general] 재검색 후보 제외 후: {len(fb_pool)}개 문서")
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
+                fb_pool = apply_policy_priority_to_documents(
+                    message, fb_pool, log_prefix="[RAG/general_v2][C4]"
+                )
 
                 _t = time.monotonic()
                 top_docs = await filter_irrelevant_docs(

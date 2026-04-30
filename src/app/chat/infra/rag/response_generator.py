@@ -31,6 +31,7 @@ from app.shared.utils.prompt_loader import (
     load_classification_recommended_prompt,
     load_classification_search_prompt,
 )
+from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +240,10 @@ async def generate_final_response_v2(
             user_message += (
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
+        user_message += soft_priority_instruction_for_prompt(message)
         user_message += " "
 
-        # 멀티턴 히스토리가 있으면 앞에 붙이고, 마지막 user 메시지는 RAG 보강 버전으로 교체
-        history = [m for m in (messages or []) if m.get("role") in (ROLE_USER, ROLE_ASSISTANT)]
-        if history and history[-1].get("role") == ROLE_USER:
-            history = history[:-1]
-        final_messages = history + [{"role": ROLE_USER, "content": user_message}]
+        final_messages = [{"role": ROLE_USER, "content": user_message}]
 
         logger.debug("[Final Response v2] system_prompt:\n%s", system_prompt)
         logger.debug("[Final Response v2] messages:\n%s", final_messages)

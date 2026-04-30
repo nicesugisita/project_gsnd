@@ -1,5 +1,6 @@
 """검색 쿼리 생성 유틸리티"""
 
+import re
 from typing import Dict, List
 
 # 다른 복지 카테고리와 혼동을 일으키는 광범위 키워드
@@ -9,6 +10,12 @@ _OVERLY_BROAD_KEYWORDS = {
     "가족지원",
 }
 
+# 하드코딩 목록 대신 어근 기반 패턴 사용:
+# - "장애"가 사용자 질문에 없을 때만
+# - 생성된 검색어/키워드의 "장애*" 토큰을 완화 제거
+# 이렇게 하면 신규 변형어가 생겨도 목록 유지보수 없이 대응 가능.
+_DISABILITY_ROOT_PATTERN = re.compile(r"장애[\w가-힣]*")
+
 
 def filter_okms_keywords(keywords: List[str]) -> List[str]:
     """광범위한 키워드를 제거하여 검색 정밀도를 높임.
@@ -17,6 +24,28 @@ def filter_okms_keywords(keywords: List[str]) -> List[str]:
     """
     filtered = [k for k in keywords if k not in _OVERLY_BROAD_KEYWORDS]
     return filtered if filtered else keywords
+
+def contains_disability_term(text: str) -> bool:
+    """질문 텍스트에 장애 관련 키워드가 포함되어 있는지."""
+    value = str(text or "")
+    return bool(_DISABILITY_ROOT_PATTERN.search(value))
+
+
+def sanitize_disability_keywords(keywords: List[str], user_query: str) -> List[str]:
+    """질문에 장애 키워드가 없으면 장애 관련 키워드를 제거."""
+    if contains_disability_term(user_query):
+        return keywords
+    filtered = [k for k in keywords if not _DISABILITY_ROOT_PATTERN.search(str(k or ""))]
+    return filtered if filtered else keywords
+
+
+def sanitize_disability_text(text: str, user_query: str) -> str:
+    """질문에 장애 키워드가 없으면 검색 문장에서 장애 관련 토큰 제거."""
+    value = str(text or "")
+    if not value or contains_disability_term(user_query):
+        return value
+    value = _DISABILITY_ROOT_PATTERN.sub(" ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _build_search_queries(keyword_groups: List[List[str]]) -> List[str]:

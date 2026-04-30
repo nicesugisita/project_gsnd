@@ -6,7 +6,6 @@ Creates and configures the FastAPI application with logging, CORS, and routes.
 
 import logging
 import os
-from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
@@ -14,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import Config, get_config
 from app import register_routes
+from app.core.lifespan import lifespan
 from app.core.constants import (
     LOG_FORMAT,
     LOG_MAX_BYTES,
@@ -61,51 +61,6 @@ def _setup_logging(config: Config) -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    logger = logging.getLogger(__name__)
-
-    # JVM 싱글톤 초기화 (서버 기동 시 1회)
-    from app.mariner.jvm_manager import init_jvm
-    try:
-        init_jvm()
-    except Exception as e:
-        logger.error(f"JVM 초기화 실패: {e}", exc_info=True)
-
-    # 프롬프트 전체 프리로드 (lru_cache 워밍업)
-    from app.shared.utils.prompt_loader import (
-        load_system_prompt, load_query_reform_prompt, load_query_expansion_prompt,
-        load_triple_extraction_prompt, load_convert_korean_prompt, load_ask_judgment_prompt,
-        load_re_ask_prompt, load_rag_norag_judgment_prompt, load_retrieval_sufficiency_judgment_prompt,
-        load_text_cleaning_prompt, load_voice_cleaning_prompt, load_final_response_prompt,
-        load_general_or_care_prompt, load_query_recreation_prompt, load_suggest_questions_prompt,
-        load_voice_print_before_prompt, load_intent_classification_prompt,
-        load_classification_general_prompt, load_classification_comparison_prompt,
-        load_comparison_extract_prompt, load_comparison_attribute_prompt,
-        load_comparison_triple_prompt, load_classification_recommended_prompt,
-        load_classification_search_prompt, load_region_age_collect_recommended_prompt,
-        load_document_summary_prompt, load_uploaded_qa_prompt,
-    )
-    _prompt_loaders = [
-        load_system_prompt, load_query_reform_prompt, load_query_expansion_prompt,
-        load_triple_extraction_prompt, load_convert_korean_prompt, load_ask_judgment_prompt,
-        load_re_ask_prompt, load_rag_norag_judgment_prompt, load_retrieval_sufficiency_judgment_prompt,
-        load_text_cleaning_prompt, load_voice_cleaning_prompt, load_final_response_prompt,
-        load_general_or_care_prompt, load_query_recreation_prompt, load_suggest_questions_prompt,
-        load_voice_print_before_prompt, load_intent_classification_prompt,
-        load_classification_general_prompt, load_classification_comparison_prompt,
-        load_comparison_extract_prompt, load_comparison_attribute_prompt,
-        load_comparison_triple_prompt, load_classification_recommended_prompt,
-        load_classification_search_prompt, load_region_age_collect_recommended_prompt,
-        load_document_summary_prompt, load_uploaded_qa_prompt,
-    ]
-    for loader in _prompt_loaders:
-        loader()
-    logger.info(f"[Startup] 프롬프트 {len(_prompt_loaders)}개 프리로드 완료")
-
-    yield
-
-
 def create_app(config: Config = None) -> FastAPI:
     """
     FastAPI application factory.
@@ -125,7 +80,7 @@ def create_app(config: Config = None) -> FastAPI:
         title=config.APP_NAME,
         description=config.APP_DESCRIPTION,
         version=config.APP_VERSION,
-        lifespan=_lifespan,
+        lifespan=lifespan,
     )
 
     # Configure CORS middleware
