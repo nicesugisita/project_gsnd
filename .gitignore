@@ -1,64 +1,75 @@
-# Python cache / build artifacts
+# ─── Python ─────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*$py.class
 *.pyo
 *.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# ─── Virtual environments ───────────────────────────────────
+venv/
+.venv/
+gsnd_venv/
+
+# ─── Test / type / lint caches ────────────────────────────────
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
 .coverage.*
 htmlcov/
-build/
-dist/
-*.egg-info/
+coverage.xml
 
-# Virtual environments
-venv/
-.venv/
-gsnd_venv/
-
-# Runtime logs / pid
+# ─── Logs & runtime ───────────────────────────────────────────
 *.log
-backend.log
 nohup.out
 .uvicorn.pid
 logs/
 log/
 
-# Local environment / secrets
-.env
-.env.*
+# ─── Secrets & local env (keep examples tracked) ─────────────
+# .env.* 만 쓰면 .env_dev / .env_local 같은 이름은 무시되지 않음 → .env* 로 통일
+.env*
 !.env.example
 
-# Local generated files
+# ─── Generated / large local payloads (repo-specific) ────────
 jar_lib/
 uploaded_texts/
 stt_results/
 tts_results/
 wip/
 *.tar.gz
-filter/*.tar.gz
 mariner/filter/
-mariner/archive/*
+mariner/archive/
 src/tests/*.csv
 
-# Local cert/key
+# ─── Certificates / keys (local TLS) ─────────────────────────
 server.crt
 server.key
 
-# Tooling / IDE
+# ─── IDE / tooling ────────────────────────────────────────────
 .idea/
 .devcontainer/
 claude-devcontainer-main/
 .claude/
 .serena/
+.history/
 
-# Local docs / notes
+# ─── Local notes (optional; remove negation if you want docs/) ─
 CLAUDE.md
 PROJECT.md
 REFERENCE.md
 docs/
 
-# Lock files (ignored by current project policy)
+# ─── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Dependency lock (project policy: not versioned) ──────────
 uv.lock
