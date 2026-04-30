@@ -2,7 +2,7 @@
 # FastAPI 서버 재기동 스크립트
 
 BASE_DIR="/home/diquest/gsnd_rag_v4"
-APP_DIR="$BASE_DIR/backend_v2"
+APP_DIR="$BASE_DIR/backend_v3"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "===== 서버 종료 ====="

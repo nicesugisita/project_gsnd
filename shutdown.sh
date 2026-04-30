@@ -1,7 +1,7 @@
 #!/bin/bash
 # FastAPI 서버 종료 스크립트
 
-PIDFILE="/home/diquest/gsnd_rag_v4/backend_v2/.uvicorn.pid"
+PIDFILE="/home/diquest/gsnd_rag_v4/backend_v3/.uvicorn.pid"
 
 if [ ! -f "$PIDFILE" ]; then
     echo "PID 파일이 없습니다. 프로세스를 직접 확인합니다..."
