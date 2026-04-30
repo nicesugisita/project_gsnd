@@ -40,8 +40,11 @@ def resolve_policy_boost_keywords(message: str) -> Tuple[FrozenSet[str], Tuple[s
         return frozenset({"low_income"}), ("생계급여", "의료급여", "저소득", "기초생활")
 
     if _elderly_benefits_heuristic(msg):
+        # 기초연금은 국가 기본 소득보장이라 노인 혜택 질의에서 다른 시군 사업.hwpx 들보다
+        # 먼저 설명되는 것이 자연스럽다. apply_policy 에서 별도 1티어로 올린다.
         return frozenset({"elderly_benefits"}), (
             "기초연금",
+            "기초 연금",
             "노인맞춤돌봄",
             "노인 맞춤돌봄",
             "맞춤돌봄",
@@ -49,6 +52,82 @@ def resolve_policy_boost_keywords(message: str) -> Tuple[FrozenSet[str], Tuple[s
         )
 
     return frozenset(), ()
+
+
+def augment_okms_dual_query(
+    user_message: str,
+    vector_q: str,
+    keyword_q: str,
+) -> Tuple[str, str]:
+    """Mariner Group A 검색 직전 (vector, keyword) 보강.
+
+    트리플이 비어 있던 행을 건드리며 keyword 레그만 채우면, 수집 루프의 tri_built
+    인덱스와 맞지 않아 키워드 결과가 버려질 수 있으므로, keyword 보강은 기존
+    트리플 문자열이 있을 때만 한다. 빈 트리플 레그 보강은 `policy_extra_okms_searches`.
+    """
+    tags, kws = resolve_policy_boost_keywords(user_message)
+    vec = (vector_q or "").strip()
+    kw = (keyword_q or "").strip()
+    if not tags:
+        return vec, kw
+
+    low_vec = vec.casefold()
+    if "elderly_benefits" in tags:
+        for needle in ("기초연금", "노인맞춤돌봄"):
+            if needle.casefold() not in low_vec:
+                vec = f"{vec} {needle}".strip()
+                low_vec = vec.casefold()
+    elif "implant" in tags:
+        if "임플란트" not in low_vec:
+            vec = f"{vec} 임플란트".strip()
+            low_vec = vec.casefold()
+    elif "low_income" in tags:
+        for needle in ("생계급여", "의료급여"):
+            if needle.casefold() not in low_vec:
+                vec = f"{vec} {needle}".strip()
+                low_vec = vec.casefold()
+
+    if kw and kws:
+        kw_cf = kw.casefold()
+        extra = [
+            t
+            for t in kws
+            if t.strip() and t.strip().casefold() not in kw_cf
+        ]
+        if extra:
+            kw = f"{kw} {' '.join(extra)}".strip()
+
+    return vec, kw
+
+
+def policy_extra_okms_searches(user_message: str, reformed_query: str) -> List[Tuple[str, str]]:
+    """정책 태그별 OKMS Group A 추가 검색 (vector, keyword) 쌍 — 빈 트리플·약한 검색 보강."""
+    tags, _ = resolve_policy_boost_keywords(user_message)
+    rq = (reformed_query or "").strip()
+    if not tags or not rq:
+        return []
+    if "elderly_benefits" in tags:
+        return [
+            (f"{rq} 기초연금 안내", "기초연금"),
+            (f"{rq} 노인맞춤돌봄", "노인맞춤돌봄"),
+        ]
+    if "implant" in tags:
+        return [(f"{rq} 임플란트 지원", "임플란트")]
+    if "low_income" in tags:
+        return [(f"{rq} 생계급여 의료급여", "생계급여 의료급여")]
+    return []
+
+
+def policy_supplement_welfare_queries(user_message: str) -> List[str]:
+    """search 의도 WELFARE_CENTER/TEL 검색에 추가로 던질 짧은 쿼리."""
+    tags, _ = resolve_policy_boost_keywords(user_message)
+    if "elderly_benefits" in tags:
+        return ["기초연금", "노인맞춤돌봄"]
+    if "implant" in tags:
+        return ["임플란트", "치과"]
+    if "low_income" in tags:
+        return ["생계급여", "의료급여"]
+    return []
 
 
 def _document_policy_match_blob(doc: Dict[str, Any]) -> str:
@@ -89,26 +168,63 @@ def apply_policy_priority_to_documents(
         return docs
 
     kws_cf = tuple(kw.casefold() for kw in boost_keywords if kw.strip())
+    _basic_pen_cf = frozenset({"기초연금".casefold(), "기초 연금".casefold()})
 
     def _hit_count(blob: str) -> int:
         return sum(1 for kw in kws_cf if kw in blob)
 
+    def _elderly_sort_key(blob: str) -> Tuple[int, int]:
+        """(기초연금·기초 연금 포함 여부, 나머지 부스트 키 적중 수)."""
+        has_basic = any(p in blob for p in _basic_pen_cf)
+        sec = sum(
+            1
+            for kw in kws_cf
+            if kw not in _basic_pen_cf and kw in blob
+        )
+        return (1 if has_basic else 0, sec)
+
     blobs = [_document_policy_match_blob(d) for d in docs]
+
+    if "elderly_benefits" in tags:
+        max_basic, max_sec = 0, 0
+        for b in blobs:
+            prim, sec = _elderly_sort_key(b)
+            max_basic = max(max_basic, prim)
+            max_sec = max(max_sec, sec)
+        if max_basic == 0 and max_sec == 0:
+            logger.info("[%s] tags=%s — 매칭 문서 없음, 순서 유지", log_prefix, sorted(tags))
+            return docs
+        scored: List[Tuple[int, int, float, str, Dict[str, Any]]] = []
+        for d, blob in zip(docs, blobs):
+            prim, sec = _elderly_sort_key(blob)
+            w = float(d.get("WEIGHT", 0) or 0)
+            cid = str(d.get("CHUNK_ID", "") or d.get("ID", "") or "")
+            scored.append((prim, sec, w, cid, d))
+        scored.sort(key=lambda t: (-t[0], -t[1], -t[2], t[3]))
+        reordered = [t[4] for t in scored]
+        logger.info(
+            "[%s] tags=%s — 노인혜택: 기초연금 1티어 후 나머지 키 조합 (boost_keys=%s)",
+            log_prefix,
+            sorted(tags),
+            list(boost_keywords),
+        )
+        return reordered
+
     max_hits = max((_hit_count(b) for b in blobs), default=0)
     if max_hits == 0:
         logger.info("[%s] tags=%s — 매칭 문서 없음, 순서 유지", log_prefix, sorted(tags))
         return docs
 
-    scored: List[Tuple[int, float, str, Dict[str, Any]]] = []
+    scored_kw: List[Tuple[int, float, str, Dict[str, Any]]] = []
     for d, blob in zip(docs, blobs):
         hits = _hit_count(blob)
         w = float(d.get("WEIGHT", 0) or 0)
         cid = str(d.get("CHUNK_ID", "") or d.get("ID", "") or "")
-        scored.append((hits, w, cid, d))
+        scored_kw.append((hits, w, cid, d))
 
-    scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    scored_kw.sort(key=lambda t: (-t[0], -t[1], t[2]))
 
-    reordered = [t[3] for t in scored]
+    reordered = [t[3] for t in scored_kw]
     logger.info(
         "[%s] tags=%s max_hits=%d — 정책 우선 재정렬 적용 (boost_keys=%s)",
         log_prefix,

@@ -11,7 +11,6 @@ import logging
 import re
 import asyncio
 import time
-from itertools import zip_longest
 from typing import Dict, Any, List, Optional
 
 
@@ -48,6 +47,12 @@ from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .common import dedupe_cap_expanded_queries, apply_policy_priority_to_documents
+from .pipeline_utils import (
+    collect_okms_groupa_and_gov_docs,
+    collect_okms_groupa_fallback_docs,
+    collect_okms_groupa_and_gov_fallback_docs,
+)
+from .pipeline_utils import collect_okms_groupa_and_gov_docs
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +89,7 @@ async def process_rag_with_documents_v2(
     try:
         t_total = time.monotonic()
         selected_collection = Config.RAG_OKMS_COLLECTION
-        logger.info(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
+        logger.debug(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
         # ====================================================================
         # Step 1: 쿼리 확장 (Mariner 검색 전)
@@ -111,7 +116,7 @@ async def process_rag_with_documents_v2(
             expanded_queries = [reformed_query]
         logger.info(f"[RAG/comparison_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
         for i, eq in enumerate(expanded_queries, 1):
-            logger.info(f"[RAG/comparison_v2] [벡터검색어] #{i}: {eq}")
+            logger.debug(f"[RAG/comparison_v2] [벡터검색어] #{i}: {eq}")
 
         # ====================================================================
         # Step 2: 트리플(키워드) 추출 (확장쿼리별)
@@ -144,7 +149,7 @@ async def process_rag_with_documents_v2(
         # sigun_filters가 외부에서 전달된 경우(히스토리/위치명 기반 확정값) 그대로 사용
         if sigun_filters is not None:
             comp_sigun_filters = sigun_filters
-            logger.info(f"[RAG/comparison_v2] 외부 sigun_filters 사용: {comp_sigun_filters}")
+            logger.debug(f"[RAG/comparison_v2] 외부 sigun_filters 사용: {comp_sigun_filters}")
         else:
             comp_sigun_raws = _extract_sigun_from_message(message)
             _comp_normalized = [normalize_sigun(r) for r in comp_sigun_raws if r != "경남"]
@@ -156,13 +161,13 @@ async def process_rag_with_documents_v2(
             if comp_birth_year
             else _extract_lifecycle_from_message(message)
         )
-        logger.info(f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, lifecycle: '{comp_lifecycle}'")
+        logger.debug(f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, lifecycle: '{comp_lifecycle}'")
 
         comp_year_filters = extract_year_filters(message)
         if comp_year_filters:
-            logger.info(f"[RAG/comparison_v2] 연도 필터: {comp_year_filters}")
+            logger.debug(f"[RAG/comparison_v2] 연도 필터: {comp_year_filters}")
         else:
-            logger.info("[RAG/comparison_v2] 연도 필터 미적용 (기본값: 올해)")
+            logger.debug("[RAG/comparison_v2] 연도 필터 미적용 (기본값: 올해)")
 
         # ====================================================================
         # OKMS 병렬 검색 헬퍼
@@ -209,7 +214,7 @@ async def process_rag_with_documents_v2(
 
         for i, sq in enumerate(tri_built, 1):
             if sq:
-                logger.info(f"[RAG/comparison_v2] [키워드검색어] #{i}: {sq}")
+                logger.debug(f"[RAG/comparison_v2] [키워드검색어] #{i}: {sq}")
 
         # ====================================================================
         # Step 4-A: OKMS Group A + GOV_OKMS 단일 검색 (동시 병렬)
@@ -219,44 +224,19 @@ async def process_rag_with_documents_v2(
         if status_callback:
             await status_callback("질문을 분석하고 있습니다")
 
-        ga_pair_futures = [
-            loop.run_in_executor(None, _group_a_run, eq, sq if sq else "")
-            for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
-        ]
-        gov_okms_futures = [
-            loop.run_in_executor(None, _run_gov_okms_query, s)
-            for s in list(expanded_queries) + [sq for sq in tri_built if sq]
-        ]
-        if status_callback:
-            await status_callback("문서를 검색하고 있습니다")
         _t = time.monotonic()
-        all_results = await asyncio.gather(*ga_pair_futures, *gov_okms_futures)
+        comp_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
+            message=message,
+            reformed_query=reformed_query,
+            expanded_queries=expanded_queries,
+            tri_built=tri_built,
+            per_query_limit=_COMP_GA_PER_QUERY,
+            run_group_a=_group_a_run,
+            run_gov=_run_gov_okms_query,
+            log_prefix="RAG/comparison_v2",
+            status_callback=status_callback,
+        )
         logger.info("[TIMING][comparison] Step4-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
-        ga_pair_results = all_results[:len(ga_pair_futures)]
-        gov_okms_results = all_results[len(ga_pair_futures):]
-
-        ga_vector_results = [pair[1] for pair in ga_pair_results]
-        ga_keyword_results = [pair[0] for pair in ga_pair_results]
-
-        comp_group_a_docs: List[Dict[str, Any]] = []
-        for i, docs in enumerate(ga_vector_results, 1):
-            if docs:
-                comp_group_a_docs.extend(docs[:_COMP_GA_PER_QUERY])
-                logger.info(f"[RAG/comparison_v2] [GroupA] 확장쿼리 #{i}: {min(len(docs), _COMP_GA_PER_QUERY)}개")
-        for i, docs in enumerate(ga_keyword_results, 1):
-            if not tri_built[i - 1]:
-                continue
-            if docs:
-                comp_group_a_docs.extend(docs[:_COMP_GA_PER_QUERY])
-                logger.info(f"[RAG/comparison_v2] [GroupA] 트리플쿼리 #{i}: {min(len(docs), _COMP_GA_PER_QUERY)}개")
-
-        gov_okms_docs: List[Dict[str, Any]] = []
-        for i, docs in enumerate(gov_okms_results, 1):
-            if docs:
-                gov_okms_docs.extend(docs[:_COMP_GA_PER_QUERY])
-                logger.info(f"[RAG/comparison_v2] [GOV_OKMS] #{i}: {min(len(docs), _COMP_GA_PER_QUERY)}개")
-            else:
-                logger.info(f"[RAG/comparison_v2] [GOV_OKMS] #{i}: 0개")
 
         comp_group_a_top = sorted(
             _deduplicate_documents(comp_group_a_docs + gov_okms_docs),
@@ -268,7 +248,7 @@ async def process_rag_with_documents_v2(
             f"(OKMS {len(comp_group_a_docs)}개 + GOV_OKMS {len(gov_okms_docs)}개 수집)"
         )
         for idx, doc in enumerate(comp_group_a_top, 1):
-            logger.info(
+            logger.debug(
                 f"[RAG/comparison_v2] [GroupA] #{idx}"
                 f"  NAME={doc.get('NAME', '')}"
                 f"  WEIGHT={doc.get('WEIGHT', '')}"
@@ -291,20 +271,16 @@ async def process_rag_with_documents_v2(
         if len(okms_final) < _FALLBACK_THRESHOLD:
             logger.info(f"[RAG/comparison_v2] OKMS {len(okms_final)}건 < {_FALLBACK_THRESHOLD}건 → Fallback 시작")
 
-            ga_fb_futures = [
-                loop.run_in_executor(None, _group_a_fallback_run, eq, sq if sq else "")
-                for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
-            ]
             _t = time.monotonic()
-            ga_fb_results = await asyncio.gather(*ga_fb_futures)
+            fb_a_docs = await collect_okms_groupa_fallback_docs(
+                message=message,
+                reformed_query=reformed_query,
+                expanded_queries=expanded_queries,
+                tri_built=tri_built,
+                per_query_limit=_COMP_GA_PER_QUERY,
+                run_group_a_fallback=_group_a_fallback_run,
+            )
             logger.info("[TIMING][comparison] Step5-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
-
-            fb_a_docs: List[Dict[str, Any]] = []
-            for i, pair in enumerate(ga_fb_results, 1):
-                if pair[1]:
-                    fb_a_docs.extend(pair[1][:_COMP_GA_PER_QUERY])
-                if tri_built[i - 1] and pair[0]:
-                    fb_a_docs.extend(pair[0][:_COMP_GA_PER_QUERY])
 
             okms_final = sorted(
                 _deduplicate_documents(okms_final + fb_a_docs),
@@ -358,27 +334,16 @@ async def process_rag_with_documents_v2(
                     " ".join(k.strip() for k in filter_okms_keywords(kws) if k and k.strip())
                     for kws in fallback_triples
                 ]
-                fb_pair_futures = [
-                    loop.run_in_executor(None, _group_a_run, eq, sq if sq else "")
-                    for eq, sq in zip_longest(fallback_expanded_queries, fallback_tri_built, fillvalue="")
-                ]
-                fb_gov_futures = [
-                    loop.run_in_executor(None, _run_gov_okms_query, s)
-                    for s in list(fallback_expanded_queries) + [sq for sq in fallback_tri_built if sq]
-                ]
-                fb_results = await asyncio.gather(*fb_pair_futures, *fb_gov_futures)
+                fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
+                    message=message,
+                    reformed_query=reformed_query,
+                    expanded_queries=fallback_expanded_queries,
+                    tri_built=fallback_tri_built,
+                    per_query_limit=_COMP_GA_PER_QUERY,
+                    run_group_a=_group_a_run,
+                    run_gov=_run_gov_okms_query,
+                )
                 logger.info("[TIMING][comparison] Step5-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
-                fb_pair_results = fb_results[:len(fb_pair_futures)]
-                fb_gov_results = fb_results[len(fb_pair_futures):]
-                fb_docs: List[Dict[str, Any]] = []
-                for pair in fb_pair_results:
-                    if pair[1]:
-                        fb_docs.extend(pair[1][:_COMP_GA_PER_QUERY])
-                    if pair[0]:
-                        fb_docs.extend(pair[0][:_COMP_GA_PER_QUERY])
-                for docs in fb_gov_results:
-                    if docs:
-                        fb_docs.extend(docs[:_COMP_GA_PER_QUERY])
                 if fb_docs:
                     okms_final = sorted(
                         _deduplicate_documents(okms_final + fb_docs),
@@ -436,7 +401,7 @@ async def process_rag_with_documents_v2(
 
         logger.info(f"[RAG/comparison_v2] 최종 선택: {len(top_docs)}개")
         for i, doc in enumerate(top_docs, 1):
-            logger.info(f"[RAG/comparison_v2] #{i} NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
+            logger.debug(f"[RAG/comparison_v2] #{i} NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
 
         # ====================================================================
         # Step 7: LLM 관련성 필터
