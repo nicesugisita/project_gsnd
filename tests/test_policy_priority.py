@@ -3,6 +3,9 @@
 from app.chat.infra.rag.expansion_cap import dedupe_cap_expanded_queries
 from app.chat.infra.rag.policy_priority import (
     apply_policy_priority_to_documents,
+    augment_okms_dual_query,
+    policy_extra_okms_searches,
+    policy_supplement_welfare_queries,
     resolve_policy_boost_keywords,
 )
 
@@ -51,3 +54,54 @@ def test_apply_policy_no_match_preserves_order():
     ]
     out = apply_policy_priority_to_documents("일반 질문", docs, log_prefix="test")
     assert [d["CHUNK_ID"] for d in out] == ["x", "y"]
+
+
+def test_augment_okms_dual_elderly_vector_only():
+    """트리플이 비어도 벡터에 정책 앵커 추가."""
+    msg = "부모님 70대인데 받을 혜택이 있을까요?"
+    vec, kw = augment_okms_dual_query(msg, "진주 거주 복지", "")
+    assert "기초연금" in vec and "노인맞춤돌봄" in vec
+    assert kw == ""
+
+
+def test_augment_okms_dual_appends_kw_when_triple_present():
+    msg = "부모님 70대인데 받을 혜택이 있을까요?"
+    vec, kw = augment_okms_dual_query(msg, "진주", "복지 신청")
+    assert "기초연금" in vec
+    assert "노인맞춤돌봄" in kw or "맞춤돌봄" in kw
+
+
+def test_policy_extra_okms_searches_pairs():
+    msg = "어르신 70 세 혜택"
+    pairs = policy_extra_okms_searches(msg, "진주 거주")
+    assert len(pairs) == 2
+    assert pairs[0][1] == "기초연금"
+    assert "노인맞춤돌봄" in pairs[1][1]
+
+
+def test_policy_supplement_welfare_queries():
+    assert "기초연금" in policy_supplement_welfare_queries(
+        "어르신에게 어떤 지원이 있나요?",
+    )
+
+
+def test_elderly_basic_pension_before_dolbom_despite_weight():
+    """맞춤돌봄 등 여러 부스트어가 걸린 문서라도 기초연금 문서를 앞에 둔다."""
+    msg = "부모님 70대인데 받을 혜택이 있을까요?"
+    docs = [
+        {
+            "CHUNK_ID": "dolbom",
+            "WEIGHT": 100,
+            "NAME": "2026 창원시 노인맞춤돌봄서비스",
+            "CONTENT": "노인맞춤돌봄 맞춤돌봄 돌봄서비스 안내",
+        },
+        {
+            "CHUNK_ID": "basic",
+            "WEIGHT": 1,
+            "NAME": "기초연금",
+            "CONTENT": "기초연금 신청 서류",
+        },
+    ]
+    out = apply_policy_priority_to_documents(msg, docs, log_prefix="test")
+    assert out[0]["CHUNK_ID"] == "basic"
+    assert out[1]["CHUNK_ID"] == "dolbom"

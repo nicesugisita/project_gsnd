@@ -10,7 +10,6 @@ guide_recommend 의도의 검색 및 응답 생성을 별도 파일로 분리한
 import logging
 import asyncio
 import time
-from itertools import zip_longest
 from typing import Dict, Any, List, Optional
 
 from app.core.config import Config
@@ -46,6 +45,11 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
+from .pipeline_utils import (
+    collect_okms_groupa_and_gov_docs,
+    collect_okms_groupa_fallback_docs,
+    collect_okms_groupa_and_gov_fallback_docs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +87,7 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         selected_collection = Config.RAG_OKMS_COLLECTION
-        logger.info(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
+        logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
 
         # ====================================================================
         # guide_recommend + OKMS 컬렉션 전용 플로우
@@ -95,33 +99,33 @@ async def process_rag_guide_recommend(
             gr_sigun_filters = sigun_filters
             # sigun_raws: 정규화된 값에서 시군명 부분만 추출 (LLM 표시용)
             sigun_raws = [s.replace("경상남도 ", "") for s in sigun_filters]
-            logger.info(f"[RAG/guide_recommend_v2] 외부 sigun_filters 사용: {gr_sigun_filters}")
+            logger.debug(f"[RAG/guide_recommend_v2] 외부 sigun_filters 사용: {gr_sigun_filters}")
         else:
             sigun_raws = _extract_sigun_from_message(message) or _extract_sigun_from_message(reformed_query)
-            logger.info(f"[RAG/guide_recommend_v2] 추출된 시군: {sigun_raws}")
+            logger.debug(f"[RAG/guide_recommend_v2] 추출된 시군: {sigun_raws}")
             _gr_normalized = [normalize_sigun(r) for r in sigun_raws if r != "경남"]
             _gr_city_filters = [s for s in _gr_normalized if s.startswith("경상남도 ")]
             gr_sigun_filters = list(dict.fromkeys(_gr_city_filters)) if _gr_city_filters else []
-        logger.info(f"[RAG/guide_recommend_v2] sigun 필터: {gr_sigun_filters}")
+        logger.debug(f"[RAG/guide_recommend_v2] sigun 필터: {gr_sigun_filters}")
 
         birth_year = _extract_birth_year_from_message(message)
 
         if birth_year:
             lifecycle = _birth_year_to_lifecycle(birth_year)
-            logger.info(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
+            logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
         else:
             lifecycle = _extract_lifecycle_from_message(message)
             if lifecycle:
-                logger.info(f"[RAG/guide_recommend_v2] 생애주기 키워드 직접 추출: '{lifecycle}'")
+                logger.debug(f"[RAG/guide_recommend_v2] 생애주기 키워드 직접 추출: '{lifecycle}'")
             else:
-                logger.info(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
+                logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
 
         # 연도 필터: 질의에 연도 없으면 현재 연도 기본 적용
         gr_year_filters = extract_year_filters(message)
         if gr_year_filters:
-            logger.info(f"[RAG/guide_recommend_v2] 연도 필터: {gr_year_filters}")
+            logger.debug(f"[RAG/guide_recommend_v2] 연도 필터: {gr_year_filters}")
         else:
-            logger.info(f"[RAG/guide_recommend_v2] 연도 필터 미적용")
+            logger.debug(f"[RAG/guide_recommend_v2] 연도 필터 미적용")
 
         # Step A-1: 쿼리 확장 (Mariner 검색 전)
         gr_expand_base = reformed_query
@@ -147,7 +151,7 @@ async def process_rag_guide_recommend(
             gr_expanded = [gr_expand_base]
         logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")
         for i, eq in enumerate(gr_expanded, 1):
-            logger.info(f"[RAG/guide_recommend_v2] [벡터검색어] #{i}: {eq}")
+            logger.debug(f"[RAG/guide_recommend_v2] [벡터검색어] #{i}: {eq}")
 
         # Step A-2: 벡터 검색어에서 키워드 추출
         if status_callback:
@@ -175,7 +179,7 @@ async def process_rag_guide_recommend(
             gr_tri_built.append(sq)
         for i, sq in enumerate(gr_tri_built, 1):
             if sq:
-                logger.info(f"[RAG/guide_recommend_v2] [키워드검색어] #{i}: {sq}")
+                logger.debug(f"[RAG/guide_recommend_v2] [키워드검색어] #{i}: {sq}")
 
         # Step B: Group A — 균등 가중치 듀얼 검색 (병렬)
         _GR_GA_PER_QUERY   = 5
@@ -215,50 +219,20 @@ async def process_rag_guide_recommend(
         loop = asyncio.get_event_loop()
 
         # eq(확장쿼리)와 sq(트리플쿼리)를 쌍으로 Group A 검색 + GOV_OKMS 단일 검색 (동시 병렬)
-        ga_pair_futures = [
-            loop.run_in_executor(None, _group_a_run_okms_query, eq, sq if sq else "")
-            for eq, sq in zip_longest(gr_expanded, gr_tri_built, fillvalue="")
-        ]
-        gov_okms_futures = [
-            loop.run_in_executor(None, _run_gov_okms_query, s)
-            for s in list(gr_expanded) + [sq for sq in gr_tri_built if sq]
-        ]
-        if status_callback:
-            await status_callback("문서를 검색하고 있습니다")
         _t = time.monotonic()
-        all_results = await asyncio.gather(*ga_pair_futures, *gov_okms_futures)
+        gr_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
+            message=message,
+            reformed_query=reformed_query,
+            expanded_queries=gr_expanded,
+            tri_built=gr_tri_built,
+            per_query_limit=_GR_GA_PER_QUERY,
+            run_group_a=_group_a_run_okms_query,
+            run_gov=_run_gov_okms_query,
+            log_prefix="RAG/guide_recommend_v2",
+            status_callback=status_callback,
+            log_skip_empty_triple=True,
+        )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
-        ga_pair_results = all_results[:len(ga_pair_futures)]
-        gov_okms_results = all_results[len(ga_pair_futures):]
-
-        # (keyword_docs, vector_docs) 튜플을 분리
-        ga_vector_results = [pair[1] for pair in ga_pair_results]   # vector_docs → 확장쿼리 결과
-        ga_keyword_results = [pair[0] for pair in ga_pair_results]  # keyword_docs → 트리플쿼리 결과
-
-        gr_group_a_docs: List[Dict[str, Any]] = []
-        for i, docs in enumerate(ga_vector_results, 1):
-            if docs:
-                gr_group_a_docs.extend(docs[:_GR_GA_PER_QUERY])
-                logger.info(f"[RAG/guide_recommend_v2] [GroupA] 확장쿼리 #{i}: {min(len(docs), _GR_GA_PER_QUERY)}개 문서")
-            else:
-                logger.info(f"[RAG/guide_recommend_v2] [GroupA] 확장쿼리 #{i}: 0개 문서")
-        for i, docs in enumerate(ga_keyword_results, 1):
-            if not gr_tri_built[i - 1]:
-                logger.info(f"[RAG/guide_recommend_v2] [GroupA] 트리플쿼리 #{i}: 키워드 없음 - 건너뜀")
-                continue
-            if docs:
-                gr_group_a_docs.extend(docs[:_GR_GA_PER_QUERY])
-                logger.info(f"[RAG/guide_recommend_v2] [GroupA] 트리플쿼리 #{i}: {min(len(docs), _GR_GA_PER_QUERY)}개 문서")
-            else:
-                logger.info(f"[RAG/guide_recommend_v2] [GroupA] 트리플쿼리 #{i}: 0개 문서")
-
-        gov_okms_docs: List[Dict[str, Any]] = []
-        for i, docs in enumerate(gov_okms_results, 1):
-            if docs:
-                gov_okms_docs.extend(docs[:_GR_GA_PER_QUERY])
-                logger.info(f"[RAG/guide_recommend_v2] [GOV_OKMS] #{i}: {min(len(docs), _GR_GA_PER_QUERY)}개 문서")
-            else:
-                logger.info(f"[RAG/guide_recommend_v2] [GOV_OKMS] #{i}: 0개 문서")
 
         # TEST_OKMS_V4 독립 정렬 → top 10 (Fallback 입력용)
         gr_group_a_top = sorted(
@@ -268,7 +242,7 @@ async def process_rag_guide_recommend(
         )[:_GR_GA_TOP_N]
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 풀: {len(gr_group_a_top)}개 (수집 {len(gr_group_a_docs)}개)")
         for idx, doc in enumerate(gr_group_a_top, 1):
-            logger.info(
+            logger.debug(
                 f"[RAG/guide_recommend_v2] [OKMS] #{idx}"
                 f"  NAME={doc.get('NAME', '')}"
                 f"  WEIGHT={doc.get('WEIGHT', '')}"
@@ -285,7 +259,7 @@ async def process_rag_guide_recommend(
         )[:_GR_GOV_OKMS_TOP_N]
         logger.info(f"[RAG/guide_recommend_v2] [GOV_OKMS] 쿼터 확정: {len(gov_okms_top_docs)}개 (수집 {len(gov_okms_docs)}개)")
         for idx, doc in enumerate(gov_okms_top_docs, 1):
-            logger.info(
+            logger.debug(
                 f"[RAG/guide_recommend_v2] [GOV_OKMS] #{idx}"
                 f"  NAME={doc.get('NAME', '')}"
                 f"  WEIGHT={doc.get('WEIGHT', '')}"
@@ -297,7 +271,7 @@ async def process_rag_guide_recommend(
         gr_top_docs = gr_group_a_top[:_GR_FINAL_TOP_N]
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 쿼터 확정: {len(gr_top_docs)}개")
         for i, doc in enumerate(gr_top_docs, 1):
-            logger.info(
+            logger.debug(
                 f"[RAG/guide_recommend_v2] [OKMS] #{i} "
                 f"NAME={_get_document_name(doc)}, WEIGHT={doc.get('WEIGHT', '?')}"
             )
@@ -321,21 +295,16 @@ async def process_rag_guide_recommend(
                     logger.warning(f"[RAG/guide_recommend_v2] Group A Fallback 검색 실패: {e}")
                     return [], []
 
-            # Group A Fallback
-            ga_fb_futures = [
-                loop.run_in_executor(None, _group_a_run_okms_fallback, eq, sq if sq else "")
-                for eq, sq in zip_longest(gr_expanded, gr_tri_built, fillvalue="")
-            ]
             _t = time.monotonic()
-            ga_fb_results = await asyncio.gather(*ga_fb_futures)
+            gr_fb_a_docs = await collect_okms_groupa_fallback_docs(
+                message=message,
+                reformed_query=reformed_query,
+                expanded_queries=gr_expanded,
+                tri_built=gr_tri_built,
+                per_query_limit=_GR_GA_PER_QUERY,
+                run_group_a_fallback=_group_a_run_okms_fallback,
+            )
             logger.info("[TIMING][guide_recommend] StepD-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
-
-            gr_fb_a_docs: List[Dict[str, Any]] = []
-            for i, pair in enumerate(ga_fb_results, 1):
-                if pair[1]:
-                    gr_fb_a_docs.extend(pair[1][:_GR_GA_PER_QUERY])
-                if gr_tri_built[i - 1] and pair[0]:
-                    gr_fb_a_docs.extend(pair[0][:_GR_GA_PER_QUERY])
 
             # 기존 결과 + Fallback 결과 합산 → 중복 제거 → top 5
             gr_top_docs = sorted(
@@ -393,27 +362,16 @@ async def process_rag_guide_recommend(
                     )
                     for eq in fallback_expanded
                 ]
-                fb_pair_futures = [
-                    loop.run_in_executor(None, _group_a_run_okms_query, eq, sq if sq else "")
-                    for eq, sq in zip_longest(fallback_expanded, fallback_tri, fillvalue="")
-                ]
-                fb_gov_futures = [
-                    loop.run_in_executor(None, _run_gov_okms_query, s)
-                    for s in list(fallback_expanded) + [sq for sq in fallback_tri if sq]
-                ]
-                fb_results = await asyncio.gather(*fb_pair_futures, *fb_gov_futures)
+                fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
+                    message=message,
+                    reformed_query=reformed_query,
+                    expanded_queries=fallback_expanded,
+                    tri_built=fallback_tri,
+                    per_query_limit=_GR_GA_PER_QUERY,
+                    run_group_a=_group_a_run_okms_query,
+                    run_gov=_run_gov_okms_query,
+                )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
-                fb_pair_results = fb_results[:len(fb_pair_futures)]
-                fb_gov_results = fb_results[len(fb_pair_futures):]
-                fb_docs: List[Dict[str, Any]] = []
-                for pair in fb_pair_results:
-                    if pair[1]:
-                        fb_docs.extend(pair[1][:_GR_GA_PER_QUERY])
-                    if pair[0]:
-                        fb_docs.extend(pair[0][:_GR_GA_PER_QUERY])
-                for docs in fb_gov_results:
-                    if docs:
-                        fb_docs.extend(docs[:_GR_GA_PER_QUERY])
                 if fb_docs:
                     gr_top_docs = sorted(
                         _deduplicate_documents(gr_top_docs + fb_docs),
