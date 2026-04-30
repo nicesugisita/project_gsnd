@@ -110,7 +110,7 @@ async def _resolve_more_results_context(
     next_intent = await classify_next_intent(messages, user_message)
     detected = next_intent.get("intent") == "MORE_INFO"
 
-    logger.info(
+    logger.debug(
         "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
         conv_id,
         next_intent.get("intent"),
@@ -123,29 +123,29 @@ async def _resolve_more_results_context(
     re_query: Optional[str] = None
     if last_preprocess and last_preprocess.get("reformed_query"):
         re_query = str(last_preprocess["reformed_query"]).strip()
-        logger.info("[MoreResults] conv_id=%s | 검색질의 재사용(reformed_query): %s", conv_id, shorten_text(re_query, 80))
+        logger.debug("[MoreResults] conv_id=%s | 검색질의 재사용(reformed_query): %s", conv_id, shorten_text(re_query, 80))
     elif base_user_query:
         re_query = base_user_query
-        logger.info("[MoreResults] conv_id=%s | fallback 원질문 재사용: %s", conv_id, shorten_text(re_query, 80))
+        logger.debug("[MoreResults] conv_id=%s | fallback 원질문 재사용: %s", conv_id, shorten_text(re_query, 80))
     else:
         fallback_rq = str(next_intent.get("re_query", "") or "").strip()
         if fallback_rq:
             re_query = fallback_rq
-            logger.info("[MoreResults] conv_id=%s | fallback re_query 적용: %s", conv_id, shorten_text(re_query, 80))
+            logger.debug("[MoreResults] conv_id=%s | fallback re_query 적용: %s", conv_id, shorten_text(re_query, 80))
 
     excluded_chunk_ids, excluded_service_names = get_excluded_info_from_history(messages)
     logger.info(
         "[MoreResults] conv_id=%s | 제외 대상 집계 chunk_ids=%d | service_names=%d",
         conv_id, len(excluded_chunk_ids), len(excluded_service_names),
     )
-    logger.info(
+    logger.debug(
         "[MoreResults] conv_id=%s | 제외 샘플 chunk_ids=%s | service_names=%s",
         conv_id, excluded_chunk_ids[:10], excluded_service_names[:10],
     )
 
     llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
     final_user_message = llm_rq or (original_user_message or "").strip() or None
-    logger.info(
+    logger.debug(
         "[MoreResults] conv_id=%s | 최종LLM user 문구(next_intent llm_re_query 우선)=%s",
         conv_id, shorten_text(final_user_message or "", 100),
     )
@@ -231,7 +231,7 @@ async def _streaming_chat_flow(
         )
         if more.re_query:
             user_message = more.re_query
-            logger.info(
+            logger.debug(
                 "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
                 chat_request.conv_id, shorten_text(user_message, 100),
             )

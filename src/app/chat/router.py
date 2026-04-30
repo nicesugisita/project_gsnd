@@ -82,7 +82,14 @@ async def chat_completions(request: Request):
         _ensure_runtime_user_id(chat_request)
         log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         first_msg_preview = chat_request.messages[0].get('content', '')[:50] if chat_request.messages else 'None'
-        logger.info(f"[Chat Request] user_id={chat_request.user_id}, conv_id={chat_request.conv_id}, stream={data.get('stream')}, 첫 메시지: {first_msg_preview}")
+        logger.info(
+            "[Chat Request] user_id=%s, conv_id=%s, stream=%s, mode=%s",
+            chat_request.user_id,
+            chat_request.conv_id,
+            data.get("stream"),
+            getattr(chat_request, "mode", ""),
+        )
+        logger.debug("[Chat Request] first_message_preview=%s", first_msg_preview)
         await _merge_and_init_conversation(chat_request)
 
         is_valid, error_response, user_message = _validate_user_message(chat_request.messages)
