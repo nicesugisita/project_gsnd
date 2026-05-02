@@ -11,7 +11,6 @@ from app.core.exceptions import LLMServiceError
 from app.shared.utils.prompt_loader import (
     load_ask_judgment_prompt,
     load_re_ask_prompt,
-    load_suggest_questions_prompt,
     load_document_summary_prompt,
     load_pre_check_prompt,
 )
@@ -258,58 +257,18 @@ async def generate_suggested_questions(
     Returns:
         추천 질문 리스트
     """
+    from app.chat.suggest_questions_service import run_suggest_questions_core
+
     try:
         if max_questions is None:
             max_questions = Config.MAX_SUGGESTED_QUESTIONS
-
-        prompt = load_suggest_questions_prompt()
-        if not prompt:
-            logger.warning("[Suggest Questions] 프롬프트 로드 실패")
-            return []
-
-        call_messages = [
-            {"role": ROLE_USER, "content": user_query},
-            {"role": ROLE_ASSISTANT, "content": assistant_response},
-            {"role": ROLE_USER, "content": "위 대화를 바탕으로 관련성 있는 후속 질문 3개를 추천해주세요."}
-        ]
-
-        response = await call_llm_api(
-            temperature=0,
-            messages=call_messages,
-            extra_system_prompts=[prompt],
-            response_format={"type": "json_object"}
+        return await run_suggest_questions_core(
+            max_questions=max_questions,
+            messages=None,
+            user_query=user_query,
+            assistant_response=assistant_response,
+            http_client=None,
         )
-
-        logger.debug(f"[Suggest Questions] LLM 응답: {response}")
-        result = json.loads(response)
-        logger.debug(f"[Suggest Questions] 파싱된 결과: {result}")
-
-        if isinstance(result, list):
-            questions = result
-        elif isinstance(result, dict):
-            # 다양한 키 이름 대응
-            for key in ("questions", "suggested_questions", "추천_질문", "추천질문", "후속_질문"):
-                if key in result:
-                    questions = result[key]
-                    break
-            else:
-                # dict의 첫 번째 list 값을 사용
-                questions = next(
-                    (v for v in result.values() if isinstance(v, list)), []
-                )
-        else:
-            questions = []
-
-        # 문자열만 필터링
-        questions = [q for q in questions if isinstance(q, str) and q.strip()]
-
-        questions = questions[:max_questions]
-        logger.info(f"[Suggest Questions] 생성된 추천 질문 {len(questions)}개: {questions}")
-        return questions
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"[Suggest Questions] JSON 파싱 실패: {e}")
-        return []
     except LLMServiceError as e:
         logger.warning(f"[Suggest Questions] LLM 오류: {e}")
         return []

@@ -4,7 +4,7 @@
 모든 v2 의도(general, comparison, guide_recommend)에서 공유합니다.
 v1 대비 변경:
 - _format_document_for_prompt_v2: doc["_welfare_tel"] 사전 조회 결과 참조 (v1의 즉시 DB 조회 제거)
-- generate_final_response_v2: intent별 프롬프트 분기 + guide_recommend 메타데이터 전달
+- generate_final_response_v2: intent별 프롬프트 분기 + guide_recommend 메타데이터 전달 + use_llm_recommended_prompt 시 LLM 추천 프롬프트
 
 기존 services/rag_service.py는 변경하지 않습니다.
 """
@@ -29,6 +29,7 @@ from app.shared.utils.prompt_loader import (
     load_classification_general_prompt,
     load_classification_comparison_prompt,
     load_classification_recommended_prompt,
+    load_classification_llm_recommended_prompt,
     load_classification_search_prompt,
 )
 from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_prompt
@@ -127,6 +128,7 @@ async def generate_final_response_v2(
     user_region: str = "",
     user_birth_year: str = "",
     more_info_mode: bool = False,
+    use_llm_recommended_prompt: bool = False,
 ) -> Any:
     """
     v2 최종 응답 생성 (모든 의도 공통)
@@ -134,11 +136,13 @@ async def generate_final_response_v2(
     Args:
         message: 사용자 질문
         top_docs: 최종 선택 문서 목록
-        intent: 의도 ("general", "comparison", "guide_recommend")
+        intent: 의도 ("general", "comparison", "guide_recommend", "search")
         welfare_docs: 복지시설 문서 목록 (optional)
         lifecycle: 생애주기 (guide_recommend용)
         user_region: 사용자 지역 (guide_recommend용, v2 Step 0에서 추출)
         user_birth_year: 사용자 출생연도 (guide_recommend용, v2 Step 0에서 추출)
+        more_info_mode: True면 '더 알려줘'용 [추가 규칙]을 붙이고 DB 정책 우선순위 프롬프트는 생략.
+        use_llm_recommended_prompt: guide_recommend일 때 True면 classification_llm_recommended 프롬프트 사용.
     """
     try:
         # 문서 내용 구성 — 개수 기준으로 전체 포함 (문자 수 제한 제거)
@@ -163,8 +167,12 @@ async def generate_final_response_v2(
             final_prompt = load_classification_comparison_prompt()
             logger.info("[Final Response v2] Comparison 프롬프트 사용")
         elif intent == "guide_recommend":
-            final_prompt = load_classification_recommended_prompt()
-            logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용")
+            if use_llm_recommended_prompt:
+                final_prompt = load_classification_llm_recommended_prompt()
+                logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용")
+            else:
+                final_prompt = load_classification_recommended_prompt()
+                logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용")
         elif intent == "search":
             final_prompt = load_classification_search_prompt()
             logger.info("[Final Response v2] Search 프롬프트 사용")
@@ -237,20 +245,23 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        if more_info_mode:
+        if more_info_mode and intent != "recommended_question":
             user_message += (
                 "\n\n[추가 규칙]\n"
-                "- 이번 응답은 사용자의 '더 알려줘' 요청에 대한 추가 탐색 결과입니다.\n"
-                "- retrieved_documents에서 유효한 추가 정보를 찾지 못한 경우, "
-                "'현재 제공된 참고 문서에서는 추가로 확인되는 정보가 없습니다. "
-                "지역(시군)이나 대상 조건(연령/가구유형)을 알려주시면 다시 찾아드릴게요.'만 출력합니다.\n"
+                "- 이번 응답은 사용자의 '더 알려줘' 요청에 따른 추가 탐색 결과입니다.\n"
+                "- retrieved_documents에 근거할 수 있는 사업·서비스가 있으면, "
+                "시스템 프롬프트의 규칙과 출력 형식을 그대로 따르고 문서만을 근거로 안내합니다.\n"
+                "- 이전 답변과의 중복 여부는 추정하지 말고, 문서에 적힌 내용으로 안내 가능하면 포함합니다.\n"
+                "- 문서를 검토한 뒤 안내할 근거가 없을 때에만 짧은 안내를 덧붙일 수 있으며, "
+                "그 경우에도 답변 전체를 한 줄·한 문장으로만 제한하지 마세요.\n"
             )
 
         if facility_content:
             user_message += (
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
-        user_message += soft_priority_instruction_for_prompt(message)
+        if not more_info_mode:
+            user_message += soft_priority_instruction_for_prompt(message)
         user_message += " "
 
         final_messages = [{"role": ROLE_USER, "content": user_message}]

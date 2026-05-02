@@ -160,6 +160,11 @@ def load_classification_recommended_prompt() -> str:
     return _load_prompt_file('classification_recommended_prompt.txt')
 
 
+def load_classification_llm_recommended_prompt() -> str:
+    """Load LLM-style recommended-question final answer prompt from file."""
+    return _load_prompt_file('classification_llm_recommended_prompt.txt')
+
+
 def load_classification_search_prompt() -> str:
     """Load Classification Search prompt from file."""
     return _load_prompt_file('classification_search_prompt.txt')

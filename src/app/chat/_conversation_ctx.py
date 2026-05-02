@@ -19,6 +19,7 @@ from app.dependencies import (
     _resolve_history_user_id,
     _update_user_message,
     ensure_conversation_exists,
+    merge_assistant_reference_docs,
 )
 from ._stream_utils import _build_streaming_response
 
@@ -137,9 +138,8 @@ def _save_stream_history(
     chat_request: ChatRequest,
     original_user_message: str,
     assistant_content: str,
-    referenced_chunk_ids: list = None,
-    referenced_service_names: list = None,
     preprocess: dict = None,
+    referenced_documents: list = None,
 ) -> None:
     """스트리밍 응답 완료 후 대화 히스토리를 저장합니다."""
     if not (original_user_message or assistant_content.strip()):
@@ -154,12 +154,12 @@ def _save_stream_history(
         ):
             existing_history.append({"role": "user", "content": original_user_message})
         assistant_entry = {"role": ROLE_ASSISTANT, "content": assistant_content}
-        if referenced_chunk_ids:
-            assistant_entry["referenced_chunk_ids"] = referenced_chunk_ids
-        if referenced_service_names:
-            assistant_entry["referenced_service_names"] = referenced_service_names
         if isinstance(preprocess, dict) and preprocess:
-            assistant_entry["preprocess"] = preprocess
+            assistant_entry["preprocess"] = {
+                k: v for k, v in preprocess.items() if k != "intent_reason"
+            }
+        if referenced_documents is not None:
+            merge_assistant_reference_docs(assistant_entry, referenced_documents)
         existing_history.append(assistant_entry)
         history_service.upsert_history(
             user_id=persist_user_id,

@@ -44,6 +44,7 @@ from ._pipeline_steps import (
     run_sigun_check,
     run_unified_preprocess,
     run_lifecycle_check,
+    build_preprocess_skip_unified_recommended_question,
 )
 from ._streaming import _streaming_chat_flow
 
@@ -64,13 +65,13 @@ def _ensure_runtime_user_id(chat_request: ChatRequest) -> None:
     chat_request.user_id = f"nologin{chat_request.conv_id}"
 
 
-@router.post('/v1/chat/completions')
-async def chat_completions(request: Request):
-    """Chat Completions API endpoint."""
+async def _chat_completions_core(request: Request, *, llm_recommended_followup: bool) -> Any:
+    """공통 채팅 처리. llm_recommended_followup=True(/v1/chat/recommended-question)이면 body mode·의도분석 없이 전용 RAG만 수행."""
     log_context_tokens = None
     t_request_start = time.monotonic()
     origin = request.headers.get("origin")
-    logger.info(f"[Chat Completions] origin={origin}")
+    ep = "recommended-question" if llm_recommended_followup else "completions"
+    logger.info("[Chat %s] origin=%s", ep, origin)
     try:
         data: Dict[str, Any] = await request.json()
 
@@ -83,7 +84,8 @@ async def chat_completions(request: Request):
         log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         first_msg_preview = chat_request.messages[0].get('content', '')[:50] if chat_request.messages else 'None'
         logger.info(
-            "[Chat Request] user_id=%s, conv_id=%s, stream=%s, mode=%s",
+            "[Chat Request] endpoint=%s user_id=%s conv_id=%s stream=%s mode=%s",
+            ep,
             chat_request.user_id,
             chat_request.conv_id,
             data.get("stream"),
@@ -106,6 +108,20 @@ async def chat_completions(request: Request):
             if limit_response:
                 return limit_response
 
+        if llm_recommended_followup:
+            if Config.KOREAN_STANDARDIZATION_ENABLED:
+                converted = await convert_korean_to_standard(user_message)
+                if converted and isinstance(converted, str):
+                    await _update_user_message(chat_request.messages, converted)
+            return await _handle_rag_mode(
+                user_message,
+                chat_request,
+                chat_request.conv_id,
+                stream,
+                intent="guide_recommend",
+                llm_recommended_followup=True,
+            )
+
         if chat_request.mode == "guide_recommend":
             if Config.KOREAN_STANDARDIZATION_ENABLED:
                 converted = await convert_korean_to_standard(user_message)
@@ -116,13 +132,21 @@ async def chat_completions(request: Request):
                 chat_request,
                 chat_request.conv_id,
                 stream,
-                intent="guide_recommend"
+                intent="guide_recommend",
+                llm_recommended_followup=False,
             )
 
         if stream:
             return StreamingResponse(
-                _streaming_chat_flow(chat_request, user_message, original_user_message, is_clarification, t_request_start=t_request_start),
-                media_type="text/event-stream"
+                _streaming_chat_flow(
+                    chat_request,
+                    user_message,
+                    original_user_message,
+                    is_clarification,
+                    t_request_start=t_request_start,
+                    llm_recommended_followup=llm_recommended_followup,
+                ),
+                media_type="text/event-stream",
             )
 
         # Non-streaming flow
@@ -164,9 +188,13 @@ async def chat_completions(request: Request):
             resolved_sigun_filters = sigun.filters
             logger.info("[SigunCheck/non-stream] sigun_filters=%s", resolved_sigun_filters)
 
-        # [6] 통합 전처리
-        _preprocess_messages = None if skip_clarification_check else chat_request.messages
-        preprocess = await run_unified_preprocess(user_message, _preprocess_messages, use_rag)
+        # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
+        if llm_recommended_followup:
+            preprocess = build_preprocess_skip_unified_recommended_question(user_message)
+            logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
+        else:
+            _preprocess_messages = None if skip_clarification_check else chat_request.messages
+            preprocess = await run_unified_preprocess(user_message, _preprocess_messages, use_rag)
         user_message = preprocess.query
         await _update_user_message(chat_request.messages, user_message)
 
@@ -186,6 +214,7 @@ async def chat_completions(request: Request):
             reformed_query=preprocess.reformed_query,
             expanded_queries=preprocess.expanded_queries,
             keywords=preprocess.keywords,
+            llm_recommended_followup=llm_recommended_followup,
         )
 
     except Exception as e:
@@ -203,6 +232,18 @@ async def chat_completions(request: Request):
     finally:
         if log_context_tokens is not None:
             reset_log_context(log_context_tokens)
+
+
+@router.post('/v1/chat/completions')
+async def chat_completions(request: Request):
+    """Chat Completions API endpoint."""
+    return await _chat_completions_core(request, llm_recommended_followup=False)
+
+
+@router.post('/v1/chat/recommended-question')
+async def chat_recommended_question(request: Request):
+    """추천 후속 질문 전용: metadata.referenced_documents 기준 Mariner 검색 후 본문과 classification_llm_recommended_prompt로 LLM 응답."""
+    return await _chat_completions_core(request, llm_recommended_followup=True)
 
 
 @router.post('/v1/chat/recommend/collect')
@@ -239,21 +280,42 @@ async def suggest_questions(
     """
     추천 후속 질문 생성.
 
+    - conv_id: DB 히스토리를 불러 마지막 user/assistant와 referenced_documents 발췌를 프롬프트에 넣음 (권장).
+    - conv_id 없음: body의 user_query + assistant_response만 사용 (레거시).
+
     service 의존성은 dependency_overrides로 Mock 교체 가능:
         app.dependency_overrides[get_suggest_questions_service] = lambda: MockService()
     """
     try:
         body = await request.json()
-        user_query = body.get('user_query', '')
-        assistant_response = body.get('assistant_response', '')
-        is_clarification = body.get('is_clarification', False)
+        conv_id = str(body.get("conv_id") or "").strip()
+        user_query = body.get("user_query", "") or ""
+        assistant_response = body.get("assistant_response", "") or ""
+        is_clarification = body.get("is_clarification", False)
 
-        if not user_query or not assistant_response:
+        messages = None
+        if conv_id:
+            from app.conversation.history import get_chat_history_service
+            history_service = get_chat_history_service(Config)
+            messages = history_service.get_history(conv_id) or []
+            if not messages:
+                return JSONResponse(
+                    content={
+                        "detail": [create_error_detail(
+                            loc=["body", "conv_id"],
+                            msg="해당 conv_id의 대화 이력이 없습니다",
+                            type_="value_error",
+                        )]
+                    },
+                    status_code=404,
+                )
+
+        if not conv_id and (not str(user_query).strip() or not str(assistant_response).strip()):
             return JSONResponse(
                 content={
                     "detail": [create_error_detail(
                         loc=["body"],
-                        msg="user_query and assistant_response are required",
+                        msg="conv_id가 있으면 서버가 히스토리를 사용합니다. 없으면 user_query와 assistant_response가 필요합니다",
                         type_="value_error",
                     )]
                 },
@@ -264,9 +326,10 @@ async def suggest_questions(
             return JSONResponse(content={"questions": []}, status_code=200)
 
         questions = await service.generate(
-            user_query=user_query,
-            assistant_response=assistant_response,
             max_questions=5,
+            messages=messages,
+            user_query=str(user_query),
+            assistant_response=str(assistant_response),
         )
         return JSONResponse(content={"questions": questions}, status_code=200)
 

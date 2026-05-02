@@ -56,6 +56,18 @@ def test_apply_policy_no_match_preserves_order():
     assert [d["CHUNK_ID"] for d in out] == ["x", "y"]
 
 
+def test_apply_policy_apply_enabled_false_preserves_order():
+    """MORE_INFO 경로 등: 정책 부스트 재정렬 생략 시 입력 순서 유지."""
+    docs = [
+        {"CHUNK_ID": "1", "WEIGHT": 100, "NAME": "기타", "CONTENT": "일반"},
+        {"CHUNK_ID": "2", "WEIGHT": 1, "NAME": "생계급여", "CONTENT": "생계급여 신청"},
+    ]
+    out = apply_policy_priority_to_documents(
+        "저소득 지원", docs, log_prefix="test", apply_enabled=False
+    )
+    assert [d["CHUNK_ID"] for d in out] == ["1", "2"]
+
+
 def test_augment_okms_dual_elderly_vector_only():
     """트리플이 비어도 벡터에 정책 앵커 추가."""
     msg = "부모님 70대인데 받을 혜택이 있을까요?"

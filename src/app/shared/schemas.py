@@ -102,7 +102,7 @@ class ChatRequest(BaseModel):
     )
     mode: Optional[str] = Field(
         default=None,
-        description="Optional chat mode override (e.g., 'guide_recommend')"
+        description="Optional chat mode (e.g. 'guide_recommend'). /v1/chat/recommended-question 은 mode·의도와 무관하게 전용 경로만 탄다.",
     )
 
     @validator('messages')

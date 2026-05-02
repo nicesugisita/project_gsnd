@@ -14,10 +14,10 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_BM25, MARINER_WS_VECTOR,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_HASANY, OP_VECTOR_SEARCH,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
 )
@@ -118,15 +118,15 @@ def query_GSND_general_documents_fallback(
 
         # WHERE: 4-field OR 검색식 (필터 없음)
         where_set_array = [
-            jpkg_query.WhereSet(MARINER_WS_OR),                                        # OR (
+            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
             jpkg_query.WhereSet("NAME_KO",        2,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", MARINER_WS_BM25,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY,  keyword_string, MARINER_WEIGHT_MED),
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
             jpkg_query.WhereSet("NAME_MI",        2,  keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR, keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(MARINER_WS_END),                                       # )
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),                                       # )
         ]
 
         # Fallback: SIGUN 스크립틀릿, COMPLI_DT FilterSet 미적용

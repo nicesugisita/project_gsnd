@@ -14,12 +14,12 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_NOT,
-    MARINER_WS_EXACT,
-    MARINER_WS_VECTOR,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_NOT,
+    OP_INT_SUMMATION,
+    OP_VECTOR_SEARCH,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
 )
@@ -131,15 +131,17 @@ def query_welfare_center_documents(
 
         # WHERE: 4-field OR 검색식 (op 코드는 예제 MarinerQuerySetExampleCode_WELFARE.py 기준)
         where_set_array = [
-            jpkg_query.WhereSet(MARINER_WS_OR),                                        # OR (
+            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
             jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  keyword_string, MARINER_WEIGHT_HIGH),  # BM25 벡터
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR,  keyword_string, MARINER_WEIGHT_MED),  # 벡터 유사도
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("FACILITY_NAME",   2,  keyword_string, MARINER_WEIGHT_HIGH),  # BM25 벡터
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH,  keyword_string, MARINER_WEIGHT_MED),  # 벡터 유사도
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("FACILITY_NAME",   1,  keyword_string, MARINER_WEIGHT_HIGH),  # BM25 벡터
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
             jpkg_query.WhereSet("SIGUN",           1,  keyword_string, MARINER_WEIGHT_HIGH),  # 키워드
-            jpkg_query.WhereSet(MARINER_WS_END),                                       # )
+            jpkg_query.WhereSet(OP_OR),                                       # )
+            jpkg_query.WhereSet("ADDRESS_JIBUN",   1,  keyword_string, MARINER_WEIGHT_HIGH),  # 키워드
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),           
         ]
 
         # CHUNK_ID(ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -155,8 +157,8 @@ def query_welfare_center_documents(
             )
             for chunk_id in excluded_values:
                 where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_NOT),
-                    jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
+                    jpkg_query.WhereSet(OP_NOT),
+                    jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
         # SIGUN 스크립틀릿: Mariner 레벨 필터 미적용 — Python 후처리로만 필터링

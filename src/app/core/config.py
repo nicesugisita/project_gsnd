@@ -83,6 +83,8 @@ class Settings(BaseSettings):
 
     # ── LLM ───────────────────────────────────────────────────────────────────
     LLM_ENABLED: bool = True
+    # 스트리밍 MORE_INFO 후속 의도 분류 LLM. False면 항상 OTHER(폴백), 호출 생략.
+    NEXT_INTENT_LLM_ENABLED: bool = True
     LLM_API_URL: str = ""
     LLM_API_TIMEOUT: int = 120
     RELEVANCE_LLM_API_URL: str = ""

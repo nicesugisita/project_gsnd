@@ -138,7 +138,6 @@ async def run_welfare_tel_queries(
     eupmyeondong_filters: Optional[List[str]],
     per_query: int,
     log_prefix: str,
-    excluded_chunk_ids: Optional[List[str]] = None,
     timeout_sec: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """사용자 키워드로 GSND_OUR_REGION_TEL 검색을 수행한다.
@@ -164,7 +163,6 @@ async def run_welfare_tel_queries(
                 keyword,
                 sigun_filters=sigun_filters,
                 eupmyeondong_filters=eupmyeondong_filters,
-                excluded_chunk_ids=excluded_chunk_ids,
             )
         except Exception as e:
             logger.warning(f"[{log_prefix}] OUR_REGION_TEL 검색 실패: {e}")

@@ -16,13 +16,13 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_FILTER,
-    MARINER_WS_NOT,
-    MARINER_WS_EXACT,
-    MARINER_WS_BM25, MARINER_WS_VECTOR,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_AND,
+    OP_NOT,
+    OP_INT_SUMMATION,
+    OP_HASANY, OP_VECTOR_SEARCH,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
 )
@@ -169,15 +169,15 @@ def query_GSND_general_documents(
 
         # WHERE: 4-field OR 검색식
         where_set_array = [
-            jpkg_query.WhereSet(MARINER_WS_OR),                                        # OR (
+            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
             jpkg_query.WhereSet("NAME_KO",        2,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", MARINER_WS_BM25,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY,  keyword_string, MARINER_WEIGHT_MED),
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
             jpkg_query.WhereSet("NAME_MI",        2,  keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR, keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(MARINER_WS_END),                                       # )
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),                                       # )
         ]
 
         # SIGUN 스크립틀릿 (op 1)
@@ -193,7 +193,7 @@ def query_GSND_general_documents(
             if short_siguns and not skip_scriptlet:
                 sigun_str = JString(" ".join(short_siguns))
                 where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_FILTER),
+                    jpkg_query.WhereSet(OP_AND),
                     jpkg_query.WhereSet("SIGUN", 1, sigun_str, 0),
                 ]
 
@@ -217,8 +217,8 @@ def query_GSND_general_documents(
             )
             for chunk_id in excluded_values:
                 where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_NOT),
-                    jpkg_query.WhereSet(id_field, MARINER_WS_EXACT, chunk_id, 0),
+                    jpkg_query.WhereSet(OP_NOT),
+                    jpkg_query.WhereSet(id_field, OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
         query.setWhere(where_set_array)

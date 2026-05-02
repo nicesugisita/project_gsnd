@@ -89,7 +89,10 @@ async def process_rag_general(
 
     try:
         t_total = time.monotonic()
-        _GEN_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _GEN_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
 
         # Step 1: 쿼리 확장 (Mariner 검색 전)
         if precomputed_expanded_queries:
@@ -240,6 +243,7 @@ async def process_rag_general(
             log_prefix="RAG/general_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         logger.info("[TIMING][general] Step5-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -284,6 +288,7 @@ async def process_rag_general(
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_run_okms_fallback,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info("[TIMING][general] Step6-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
 
@@ -351,7 +356,6 @@ async def process_rag_general(
             welfare_tel_docs = await run_welfare_tel_queries(
                 message, gen_sigun_filters, gen_eupmyeondong_filters,
                 _WELFARE_TEL_PER_QUERY, "RAG/general_v2",
-                excluded_chunk_ids=excluded_chunk_ids,
                 timeout_sec=(
                     float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
                     if (excluded_chunk_ids or excluded_service_names)
@@ -461,7 +465,10 @@ async def process_rag_general(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message, top_docs, log_prefix="[RAG/general_v2]"
+            message,
+            top_docs,
+            log_prefix="[RAG/general_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=gen_sigun_filters)
         logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -479,7 +486,10 @@ async def process_rag_general(
                 )
                 _t = time.monotonic()
                 lower_docs = apply_policy_priority_to_documents(
-                    message, lower_docs, log_prefix="[RAG/general_v2][C3]"
+                    message,
+                    lower_docs,
+                    log_prefix="[RAG/general_v2][C3]",
+                    apply_enabled=not _skip_policy_boost,
                 )
                 top_docs = await filter_irrelevant_docs(
                     reformed_query, lower_docs, sigun_filters=gen_sigun_filters
@@ -509,6 +519,7 @@ async def process_rag_general(
                 per_query_limit=_GEN_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_run_okms_fallback,
                 max_policy_pairs=1,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info(
                 "[TIMING][general] Step7-C-4 재검색: %.3fs", time.monotonic() - _t
@@ -534,7 +545,10 @@ async def process_rag_general(
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
                 fb_pool = apply_policy_priority_to_documents(
-                    message, fb_pool, log_prefix="[RAG/general_v2][C4]"
+                    message,
+                    fb_pool,
+                    log_prefix="[RAG/general_v2][C4]",
+                    apply_enabled=not _skip_policy_boost,
                 )
 
                 _t = time.monotonic()

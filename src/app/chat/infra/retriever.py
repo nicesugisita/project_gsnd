@@ -78,8 +78,9 @@ class MarinerRetriever:
         """복지 문의처 컬렉션 검색."""
         from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
         try:
+            kw = {k: v for k, v in kwargs.items() if k != "excluded_chunk_ids"}
             return query_welfare_tel_documents(
-                keyword, sigun_filters=sigun_filters, **kwargs
+                keyword, sigun_filters=sigun_filters, **kw
             )
         except Exception:
             logger.exception("[Retriever] search_welfare_tel 실패: keyword=%s", keyword[:50])

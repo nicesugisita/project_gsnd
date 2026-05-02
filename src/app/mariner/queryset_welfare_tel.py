@@ -14,12 +14,12 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_FILTER,
-    MARINER_WS_NOT,
-    MARINER_WS_EXACT,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_AND,
+    OP_HASALL,
+    OP_HASANY,
     MARINER_WEIGHT_HIGH,
 )
 from app.core.exceptions import RAGServiceError
@@ -32,7 +32,6 @@ def query_welfare_tel_documents(
     keyword: str,
     sigun_filters: Optional[List[str]] = None,
     eupmyeondong_filters: Optional[List[str]] = None,
-    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     GSND_OUR_REGION_TEL 컬렉션 전용 Mariner 검색
@@ -61,19 +60,6 @@ def query_welfare_tel_documents(
         return []
 
     collection = Config.RAG_WELFARE_TEL_COLLECTION
-
-    excluded_chunk_set = {
-        str(chunk_id).strip()
-        for chunk_id in (excluded_chunk_ids or [])
-        if str(chunk_id).strip()
-    }
-    if excluded_chunk_set:
-        excluded_values = sorted(excluded_chunk_set)
-        logger.info(
-            "[MoreResults][Mariner/our_region_tel] 제외 입력 수=%d | 샘플=%s",
-            len(excluded_values),
-            excluded_values[:10],
-        )
 
     try:
         timeout = Config.MARINER_TIMEOUT
@@ -123,29 +109,14 @@ def query_welfare_tel_documents(
 
         # WHERE: CENTER OR ADDRESS 2-field 검색식
         where_set_array = [
-            jpkg_query.WhereSet(MARINER_WS_OR),                                        # OR (
-            jpkg_query.WhereSet("CENTER",  70, keyword_string, MARINER_WEIGHT_HIGH),        # CENTER BM25
-            jpkg_query.WhereSet(MARINER_WS_AND),                                        #   OR
-            jpkg_query.WhereSet("ADDRESS", 30, keyword_string, MARINER_WEIGHT_HIGH),        # ADDRESS
-            jpkg_query.WhereSet(MARINER_WS_END),                                       # )
+            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
+            # jpkg_query.WhereSet("SIGUN",  2, keyword_string, MARINER_WEIGHT_HIGH),        # CENTER BM25
+            # jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("CENTER",  OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),        # CENTER BM25
+            jpkg_query.WhereSet(OP_OR),                                        #   OR
+            jpkg_query.WhereSet("ADDRESS", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),        # ADDRESS
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),                                       # )
         ]
-
-        # CHUNK_ID(ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
-        if excluded_chunk_set:
-            excluded_values = sorted(excluded_chunk_set)
-            _n = len(excluded_values)
-            _sample = excluded_values[:20]
-            logger.info(
-                "[MoreResults][Mariner/our_region_tel] 검색단 제외 IDs(%d): %s%s",
-                _n,
-                _sample,
-                "..." if _n > 20 else "",
-            )
-            for chunk_id in excluded_values:
-                where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_NOT),
-                    jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
-                ]
 
         # SIGUN 스크립틀릿 미적용
         # OUR_REGION_TEL은 창원시 구(區) 단위("경상남도 의창구" 등)로 SIGUN을 저장하여
@@ -157,17 +128,17 @@ def query_welfare_tel_documents(
         if eupmyeondong_values:
             if len(eupmyeondong_values) == 1:
                 where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_FILTER),
+                    jpkg_query.WhereSet(OP_AND),
                     jpkg_query.WhereSet("EUPMYEONDONG", 1, eupmyeondong_values[0], 0),
                 ]
             else:
-                where_set_array.append(jpkg_query.WhereSet(MARINER_WS_FILTER))
-                where_set_array.append(jpkg_query.WhereSet(MARINER_WS_OR))   # OR (
+                where_set_array.append(jpkg_query.WhereSet(OP_AND))
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))   # OR (
                 for idx, ev in enumerate(eupmyeondong_values):
                     if idx > 0:
-                        where_set_array.append(jpkg_query.WhereSet(MARINER_WS_AND))   # OR
+                        where_set_array.append(jpkg_query.WhereSet(OP_OR))   # OR
                     where_set_array.append(jpkg_query.WhereSet("EUPMYEONDONG", 1, ev, 0))
-                where_set_array.append(jpkg_query.WhereSet(MARINER_WS_END))  # )
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))  # )
 
         query.setWhere(where_set_array)
 
@@ -189,9 +160,6 @@ def query_welfare_tel_documents(
         doc_list = []
         logger.info(f"[Mariner/our_region_tel] raw 결과: {result_size}개, 키워드: {keyword[:50]}")
 
-        excluded_count = 0
-        raw_id_samples: List[str] = []
-        removed_ids: List[str] = []
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -202,13 +170,6 @@ def query_welfare_tel_documents(
             doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
             doc["WEIGHT"] = str(weight_val)
             doc["CHUNK_ID"] = doc.get("ID", "")
-            if doc["CHUNK_ID"] and len(raw_id_samples) < 10:
-                raw_id_samples.append(doc["CHUNK_ID"])
-            if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
-                excluded_count += 1
-                if len(removed_ids) < 20:
-                    removed_ids.append(doc["CHUNK_ID"])
-                continue
             doc["_source"] = "our_region_tel"
 
             # CHUNK_PATH: 핵심 필드 스니펫
@@ -225,14 +186,6 @@ def query_welfare_tel_documents(
             doc["CHUNK_PATH"] = "\n".join(snippet_parts)
 
             doc_list.append(doc)
-
-        if excluded_chunk_set:
-            logger.info(f"[MoreResults][Mariner/our_region_tel] CHUNK_ID 1차 제외: {excluded_count}개")
-            logger.info(
-                "[MoreResults][Mariner/our_region_tel] 실제 제외 ID 샘플=%s | raw ID 샘플=%s",
-                removed_ids[:10],
-                raw_id_samples,
-            )
 
         t2 = time.monotonic()
         logger.info(

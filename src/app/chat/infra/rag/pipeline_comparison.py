@@ -90,7 +90,10 @@ async def process_rag_with_documents_v2(
 
     try:
         t_total = time.monotonic()
-        _COMP_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _COMP_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
@@ -239,6 +242,7 @@ async def process_rag_with_documents_v2(
             run_gov=_run_gov_okms_query,
             log_prefix="RAG/comparison_v2",
             status_callback=status_callback,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         logger.info("[TIMING][comparison] Step4-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -283,6 +287,7 @@ async def process_rag_with_documents_v2(
                 tri_built=tri_built,
                 per_query_limit=_COMP_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_fallback_run,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info("[TIMING][comparison] Step5-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
 
@@ -350,6 +355,7 @@ async def process_rag_with_documents_v2(
                     run_group_a=_group_a_run,
                     run_gov=_run_gov_okms_query,
                     max_policy_pairs=1,
+                    policy_search_boost_enabled=not _skip_policy_boost,
                 )
                 logger.info("[TIMING][comparison] Step5-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
@@ -399,7 +405,6 @@ async def process_rag_with_documents_v2(
                             message,
                             sigun_filters=comp_sigun_filters,
                             eupmyeondong_filters=comp_eupmyeondong_filters,
-                            excluded_chunk_ids=excluded_chunk_ids,
                         )
                     except Exception as e:
                         logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")
@@ -443,7 +448,10 @@ async def process_rag_with_documents_v2(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message, top_docs, log_prefix="[RAG/comparison_v2]"
+            message,
+            top_docs,
+            log_prefix="[RAG/comparison_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
         logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)

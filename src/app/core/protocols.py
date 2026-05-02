@@ -66,7 +66,9 @@ class SuggestQuestionsServiceProtocol(Protocol):
 
     async def generate(
         self,
-        user_query: str,
-        assistant_response: str,
         max_questions: int = 5,
+        *,
+        messages: list | None = None,
+        user_query: str = "",
+        assistant_response: str = "",
     ) -> list[str]: ...

@@ -22,16 +22,45 @@ MARINER_SELECT_FIELD_NUM = 16        # SelectSet 필드 수
 MARINER_SETPROPS_EXTRA = 100         # setProps 고정 파라미터
 
 # WhereSet 그룹 연산자
-MARINER_WS_OR = 9                    # OR 그룹 시작
-MARINER_WS_AND = 6                   # AND 연결
-MARINER_WS_END = 10                  # 그룹 종료
-MARINER_WS_FILTER = 5                # 필터 조건 시작
-MARINER_WS_NOT = 7                   # NOT 조건
+# MARINER_WS_OR = 9                    # OR 그룹 시작
+# MARINER_WS_AND = 6                   # AND 연결
+# MARINER_WS_END = 10                  # 그룹 종료
+# MARINER_WS_FILTER = 5                # 필터 조건 시작
+# MARINER_WS_NOT = 7                   # NOT 조건
+# # WhereSet 검색 모드
+# MARINER_WS_BM25 = 2                  # BM25 키워드 검색
+# MARINER_WS_VECTOR = 96               # 벡터 유사도 검색
+# MARINER_WS_EXACT = 33                # 스크립틀릿 정확 매칭
 
-# WhereSet 검색 모드
-MARINER_WS_BM25 = 2                  # BM25 키워드 검색
-MARINER_WS_VECTOR = 96               # 벡터 유사도 검색
-MARINER_WS_EXACT = 33                # 스크립틀릿 정확 매칭
+OP_HASALL = 1 # #Keyword로부터 추출된 모든 단어를 포함한 문서를 가져옴
+OP_HASANY = 2 # #Keyword로부터 추출된 단어 중 하나라도 포함된 문서를 
+OP_HASANYONE = 3 # #Keyword로부터 추출된 단어 중 하나라도 포함된 문서를 가져옴 (가중치는 하나의 텀만 적용)
+OP_SEMIHASANY = 4 # 유사문서 검색
+OP_AND = 5 # 두 개의 WhereSet간의 and 연산을 취함
+OP_OR = 6 # 두 개의 WhereSet간의 or연산을 취함
+OP_NOT = 7 # 두 개의 WhereSet간의 not 연산을 취함
+OP_WEIGHTAND = 8 # 검색 결과는 좌측에 필드가 기준이 되고 교집합으로 출현한 문서에 대해서는 가중치를 줌
+OP_BRACE_OPEN = 9 # 괄호 열기 연산 (가중치는 하나의 텀만 적용)
+OP_BRACE_CLOSE = 10 # 괄호 닫기 연산 
+OP_HASALLONE = 11 # Keyword로부터 추출된 모든 단어를 포함한 문서를 가져옴 
+OP_TRUNCATION = 12 # 절단 검색 판별을 위한 Operation (has All)Copyright DiQuest Inc. Mariner5 3
+OP_RIGHT_TRUNCATION = 64 # 우측의 내용을 절단하여 검색
+OP_LEFT_TRUNCATION = 65 # 좌측의 내용을 절단하여 검색
+OP_CENTER_TRUNCATION = 66 # 중간의 내용을 절단하여 검색
+OP_RIGHT_LEFT_TRUNCATION = 67 # 양측의 내용을 절단하여 검색
+EQUIV_SYNONYM = 16 # 특정 필드에 대한 동의어 확장을 지원함
+QUASI_SYNONYM = 32 # 특정 필드에 대한 유의어 확장을 지원함
+NO_HIGHLIGHT = 128 # 특정 필드에서 추출된 텀을 하이라이팅 하지 않음
+OP_PROXIMITY_NEAR = 14 # 특정 필드에 대한 근접 검색(검색어 순서 고려하지 않음) 
+OP_PROXIMITY_WITHIN = 15 # 특정 필드에 대한 근접 검색(검색어 순서 고려)
+OP_VECTOR_SEARCH = 96 # Keyword로부터 벡터검색을 수행함 (벡터필드만 사용)
+
+# Protocol.GroupBySet
+OP_INT_SUMMATION = 33 # 그룹별 Int 값의 합
+
+
+
+
 
 # 검색 필드 가중치
 MARINER_WEIGHT_HIGH: float = 0.7     # 주요 필드 가중치

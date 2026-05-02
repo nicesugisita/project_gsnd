@@ -78,7 +78,10 @@ async def process_rag_search(
 
     try:
         t_total = time.monotonic()
-        _SEARCH_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _SEARCH_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
 
         with log_step_banner(logger, "RAG/search_v2 Step1 쿼리 확장"):
             if precomputed_expanded_queries:
@@ -168,6 +171,7 @@ async def process_rag_search(
                 expanded_queries=expanded_queries,
                 search_queries=search_queries,
                 user_message=message,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             if _welfare_policy_qs:
                 logger.debug("[RAG/search_v2] 정책 보강 검색어: %s", _welfare_policy_qs)
@@ -195,7 +199,6 @@ async def process_rag_search(
                     query,
                     sigun_filters=search_sigun_filters,
                     eupmyeondong_filters=_search_eupmyeondong_filters,
-                    excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/search_v2] OUR_REGION_TEL 검색 실패: {e}")
@@ -257,6 +260,7 @@ async def process_rag_search(
                 search_queries=[],
                 user_message=message,
                 max_policy_queries=1,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info("[TIMING][search] Step4-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             if fallback_expanded:
@@ -300,7 +304,10 @@ async def process_rag_search(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message, top_docs, log_prefix="[RAG/search_v2]"
+            message,
+            top_docs,
+            log_prefix="[RAG/search_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=search_sigun_filters)
         logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
