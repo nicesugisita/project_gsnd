@@ -18,7 +18,6 @@ from app.core.constants import (
     OP_OR,
     OP_BRACE_CLOSE,
     OP_AND,
-    OP_HASALL,
     OP_HASANY,
     MARINER_WEIGHT_HIGH,
 )
@@ -27,25 +26,33 @@ from app.mariner.jvm_manager import ensure_jvm_thread
 
 logger = logging.getLogger(__name__)
 
+# Mariner setResult/VS_RESULT_SIZE 상한: 엔진·컬렉션 실물 개수보다 크면 전부 반환
+_OUR_REGION_TEL_UNBOUND_FETCH = 500_000
+
 
 def query_welfare_tel_documents(
     keyword: str,
     sigun_filters: Optional[List[str]] = None,
     eupmyeondong_filters: Optional[List[str]] = None,
+    max_results: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     GSND_OUR_REGION_TEL 컬렉션 전용 Mariner 검색
 
     예제 검색식(MarinerQuerySetExampleCode_OUR_REGION_TEL.py) 기반:
-    - WHERE: CENTER (op=2 BM25, 0.7) OR ADDRESS (op=1, 0.7)
-    - SIGUN 스크립틀릿: op 1 (전체형 "경상남도 창원시")
+    - WHERE: CENTER OP_HASANY OR ADDRESS OP_HASANY (키워드), 이후 AND로 SIGUN·EUPMYEONDONG 스크립틀릿(op 1) 가능
+    - SIGUN은 키워드 OR절에 넣지 않음(공통 시군명 과매칭 방지). sigun_filters가 있을 때만 AND 부분일치(op 1).
+      창원은 DB에 「경상남도 창원시 의창구·성산구·마산합포구·마산회원구·진해구」 형태로 들어 있으므로,
+      세션 값이 「경상남도 창원시」이면 해당 접두 부분일치로 위 구 행까지 한 번에 한정된다.
     - EUPMYEONDONG 스크립틀릿: op 1 (부분형 "동읍")
     - OrderBy: WEIGHT 수치 내림차순 (JByte(97))
 
     Args:
         keyword: 검색 키워드 (센터명 또는 주소)
-        sigun_filters: SIGUN 필드 필터 목록 (예: ["경상남도 창원시"])
+        sigun_filters: SIGUN 필드 필터 목록 (예: 전체 창원은 「경상남도 창원시」, 진해만은 「경상남도 창원시 진해구」)
         eupmyeondong_filters: EUPMYEONDONG 필드 필터 목록 (예: ["동읍"])
+        max_results: None이면 Config.MARINER_MAX_RESULTS, 양수면 해당 개수, 음수면
+            컬렉션에서 가져올 수 있는 범위까지(내부 상한 `_OUR_REGION_TEL_UNBOUND_FETCH`).
 
     Returns:
         검색된 지역 연락처 문서 목록
@@ -64,7 +71,14 @@ def query_welfare_tel_documents(
     try:
         timeout = Config.MARINER_TIMEOUT
         threshold = Config.MARINER_THRESHOLD
-        max_top_n = Config.MARINER_MAX_RESULTS
+        if max_results is not None:
+            _mr = int(max_results)
+            if _mr < 0:
+                max_top_n = _OUR_REGION_TEL_UNBOUND_FETCH
+            else:
+                max_top_n = max(1, _mr)
+        else:
+            max_top_n = max(1, int(Config.MARINER_MAX_RESULTS))
 
         ensure_jvm_thread()
 
@@ -107,21 +121,37 @@ def query_welfare_tel_documents(
         order_set_array = [jpkg_query.OrderBySet(False, "WEIGHT", jpype.JByte(97))]
         query.setOrderby(order_set_array)
 
-        # WHERE: CENTER OR ADDRESS 2-field 검색식
+        # WHERE: 키워드는 CENTER·ADDRESS에만 (SIGUN BM25 제외)
+        # — SIGUN에 HASANY를 걸면 "경상남도 창원시" 등 공통 토큰으로 타 구·타 센터까지 과다 매칭되기 쉬움.
+        # 지역 한정은 아래 sigun_filters 스크립틀릿 AND + EUPMYEONDONG AND로 수행.
         where_set_array = [
-            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
-            # jpkg_query.WhereSet("SIGUN",  2, keyword_string, MARINER_WEIGHT_HIGH),        # CENTER BM25
-            # jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("CENTER",  OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),        # CENTER BM25
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("ADDRESS", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),        # ADDRESS
-            jpkg_query.WhereSet(OP_BRACE_CLOSE),                                       # )
+            jpkg_query.WhereSet(OP_BRACE_OPEN),
+            jpkg_query.WhereSet("CENTER", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet("ADDRESS", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),
         ]
 
-        # SIGUN 스크립틀릿 미적용
-        # OUR_REGION_TEL은 창원시 구(區) 단위("경상남도 의창구" 등)로 SIGUN을 저장하여
-        # 정규화된 시 단위("경상남도 창원시")와 포맷 불일치가 발생합니다.
-        # EUPMYEONDONG + 키워드 검색으로 지역 필터링이 충분합니다.
+        # SIGUN 스크립틀릿 (op 1 부분형): 세션·전처리 시군구
+        # 창원: DB 값은 「경상남도 창원시 의창구」「… 성산구」「… 마산합포구」「… 마산회원구」「… 진해구」
+        # 필터 「경상남도 창원시」 → 위 전 구 매칭, 「경상남도 창원시 진해구」 → 진해 행만
+        sigun_values = [s.strip() for s in (sigun_filters or []) if s and str(s).strip()]
+
+    
+
+        # if sigun_values:
+        #     where_set_array.append(jpkg_query.WhereSet(OP_AND))
+        #     if len(sigun_values) == 1:
+        #         where_set_array.append(
+        #             jpkg_query.FilterSet("SIGUN", 3, JString(sigun_values[0]), 0),
+        #         )
+        #     else:
+        #         where_set_array.append(jpkg_query.FilterSet(OP_BRACE_OPEN))
+        #         for idx, sv in enumerate(sigun_values):
+        #             if idx > 0:
+        #                 where_set_array.append(jpkg_query.FilterSet(OP_OR))
+        #             where_set_array.append(jpkg_query.FilterSet("SIGUN", 1, JString(sv), 0))
+        #         where_set_array.append(jpkg_query.FilterSet(OP_BRACE_CLOSE))
 
         # EUPMYEONDONG 스크립틀릿 (op 1, 부분형 "동읍")
         eupmyeondong_values = [e for e in (eupmyeondong_filters or []) if e]
@@ -199,22 +229,10 @@ def query_welfare_tel_documents(
                 f"WEIGHT={doc.get('WEIGHT', '?')}"
             )
 
-        # Mariner 결과가 없으면 CSV fallback
-        if not doc_list:
-            logger.info("[Mariner/our_region_tel] 결과 없음 → CSV fallback")
-            from app.mariner.csv_welfare_tel import search_welfare_tel_from_csv
-            doc_list = search_welfare_tel_from_csv(keyword, sigun_filters, eupmyeondong_filters)
-
         return doc_list
 
     except RAGServiceError:
         raise
     except Exception as e:
         logger.error(f"[Mariner/our_region_tel] 예상치 못한 오류: {e}", exc_info=True)
-        logger.info("[Mariner/our_region_tel] Mariner 오류 → CSV fallback 시도")
-        try:
-            from app.mariner.csv_welfare_tel import search_welfare_tel_from_csv
-            return search_welfare_tel_from_csv(keyword, sigun_filters, eupmyeondong_filters)
-        except Exception as csv_e:
-            logger.error(f"[Mariner/our_region_tel] CSV fallback도 실패: {csv_e}")
-            raise RAGServiceError(f"지역 연락처 검색 중 오류: {str(e)}") from e
+        raise RAGServiceError(f"지역 연락처 검색 중 오류: {str(e)}") from e

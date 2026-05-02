@@ -215,6 +215,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             expanded_queries=preprocess.expanded_queries,
             keywords=preprocess.keywords,
             llm_recommended_followup=llm_recommended_followup,
+            search_target=getattr(preprocess, "search_target", None),
         )
 
     except Exception as e:

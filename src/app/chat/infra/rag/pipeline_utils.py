@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import contextmanager
 from itertools import zip_longest
-from typing import Any, Awaitable, Callable, Dict, List, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_USER
 from app.chat.infra.rag.policy_priority import (
@@ -450,35 +450,59 @@ async def collect_welfare_center_tel_docs(
     run_center_query: Callable[[str], List[Dict[str, Any]]],
     run_tel_query: Callable[[str], List[Dict[str, Any]]],
     log_prefix: str = "RAG/search_v2",
+    per_query_limit_tel: Optional[int] = None,
+    center_enabled: bool = True,
+    tel_enabled: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """CENTER + TEL 병렬 검색 결과 수집."""
+    """CENTER + TEL 병렬 검색 결과 수집.
+
+    per_query_limit: 0 미만이면 CENTER는 쿼리별 반환 전량.
+    per_query_limit_tel: None이면 TEL도 per_query_limit과 동일. 0 미만이면 TEL은 쿼리별 전량.
+    center_enabled / tel_enabled: False이면 해당 풀은 검색 생략(빈 리스트).
+    """
+    tel_cap = per_query_limit if per_query_limit_tel is None else per_query_limit_tel
     loop = asyncio.get_event_loop()
-    center_futures = [
-        loop.run_in_executor(None, run_center_query, q)
-        for q in queries
-    ]
-    tel_futures = [
-        loop.run_in_executor(None, run_tel_query, q)
-        for q in queries
-    ]
-    center_results, tel_results = await asyncio.gather(
-        asyncio.gather(*center_futures),
-        asyncio.gather(*tel_futures),
-    )
+    if center_enabled and queries:
+        center_futures = [
+            loop.run_in_executor(None, run_center_query, q)
+            for q in queries
+        ]
+        center_results = list(await asyncio.gather(*center_futures))
+    else:
+        center_results = [[] for _ in queries]
+
+    if tel_enabled and queries:
+        tel_futures = [
+            loop.run_in_executor(None, run_tel_query, q)
+            for q in queries
+        ]
+        tel_results = list(await asyncio.gather(*tel_futures))
+    else:
+        tel_results = [[] for _ in queries]
 
     center_docs: List[Dict[str, Any]] = []
     for i, (q, docs) in enumerate(zip(queries, center_results), 1):
         if docs:
-            center_docs.extend(docs[:per_query_limit])
-            logger.debug("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], min(len(docs), per_query_limit))
+            if per_query_limit < 0:
+                center_docs.extend(docs)
+                n_take = len(docs)
+            else:
+                center_docs.extend(docs[:per_query_limit])
+                n_take = min(len(docs), per_query_limit)
+            logger.debug("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
         else:
             logger.debug("[%s] [CENTER] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
 
     tel_docs: List[Dict[str, Any]] = []
     for i, (q, docs) in enumerate(zip(queries, tel_results), 1):
         if docs:
-            tel_docs.extend(docs[:per_query_limit])
-            logger.debug("[%s] [TEL] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], min(len(docs), per_query_limit))
+            if tel_cap < 0:
+                tel_docs.extend(docs)
+                n_take = len(docs)
+            else:
+                tel_docs.extend(docs[:tel_cap])
+                n_take = min(len(docs), tel_cap)
+            logger.debug("[%s] [TEL] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
         else:
             logger.debug("[%s] [TEL] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
     return center_docs, tel_docs

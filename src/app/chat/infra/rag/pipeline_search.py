@@ -2,30 +2,25 @@
 RAG 서비스 — search 전용 플로우
 
 search 의도(기관/시설 정보 조회)의 검색 및 응답 생성을 담당합니다.
-WELFARE_CENTER + WELFARE_TEL 두 컬렉션을 병렬 검색하여 합산합니다.
-
-기존 services/rag_service.py는 변경하지 않습니다.
+통합 전처리 `search_target`에 따라 Mariner 검색은 OUR_REGION_TEL 또는 WELFARE_CENTER **한 풀만** 실행합니다.
 """
 
 import logging
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
-
-from app.core.config import Config
+from typing import Any, Dict, List, Optional
 
 # Mariner 쿼리셋
-from app.mariner.queryset_welfare import query_welfare_center_documents
+# GSND_WELFARE_CENTER 비활성화 시 아래 import·_run_welfare_center_query 주석 블록을 함께 복구
+# from app.mariner.queryset_welfare import query_welfare_center_documents
 from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
 
-# 기존 rag_service에서 필요한 함수를 import
 from app.chat.infra.rag import (
     _deduplicate_documents,
     _get_document_name,
     _build_search_queries,
 )
 from .common import (
-    build_referenced_documents,
     dedupe_cap_expanded_queries,
     apply_policy_priority_to_documents,
 )
@@ -33,11 +28,8 @@ from .pipeline_utils import (
     build_welfare_search_queries,
     collect_welfare_center_tel_docs,
     log_step_banner,
-    resolve_fallback_max_expanded_queries,
-    run_sufficiency_judgment_fast,
 )
 from .response_generator import generate_final_response_v2
-from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
     expand_query,
     extract_triples,
@@ -45,6 +37,26 @@ from app.chat.routing import (
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
 
 logger = logging.getLogger(__name__)
+
+
+def _search_pool_tag_from_target(precomputed_search_target: Optional[str]) -> str:
+    """전처리 search_target → 검색 블록 키 (welfare_center | our_region_tel)."""
+    hint = str(precomputed_search_target or "").strip().lower().replace("-", "_")
+
+    if hint == "welfare_facility":
+        return "welfare_center"
+    if hint == "admin_local_office":
+        return "our_region_tel"
+    if hint in ("ambiguous", ""):
+        logger.info(
+            "[RAG/search_v2] search_target 미전달·ambiguous → OUR_REGION_TEL 단일 Mariner 검색"
+        )
+        return "our_region_tel"
+    logger.warning(
+        "[RAG/search_v2] 알 수 없는 search_target=%r → OUR_REGION_TEL로 검색",
+        precomputed_search_target,
+    )
+    return "our_region_tel"
 
 
 async def process_rag_search(
@@ -68,20 +80,24 @@ async def process_rag_search(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
 
-    WELFARE_CENTER(시설 정보)와 WELFARE_TEL(문의처 연락처)을
-    병렬 검색하여 합산 후 관련성 필터를 거쳐 응답합니다.
+    `precomputed_search_target`: admin_local_office → OUR_REGION_TEL 만,
+    welfare_facility → WELFARE_CENTER 만 Mariner 검색. ambiguous·미전달은 OUR_REGION_TEL.
     """
 
     try:
         t_total = time.monotonic()
-        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
-        _SEARCH_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
+        search_pool_tag = _search_pool_tag_from_target(precomputed_search_target)
+        logger.info(
+            "[RAG/search_v2] 전처리 search_target=%s → 단일 블록 %s",
+            precomputed_search_target or "(미전달·ambiguous 처리)",
+            search_pool_tag,
         )
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
 
         with log_step_banner(logger, "RAG/search_v2 Step1 쿼리 확장"):
             if precomputed_expanded_queries:
@@ -133,35 +149,8 @@ async def process_rag_search(
         logger.debug(f"[RAG/search_v2] sigun 필터: {search_sigun_filters}")
         logger.debug("-----------[RAG/search_v2 Step3 SIGUN 필터 끝]-----------")
 
-        logger.debug("-----------[RAG/search_v2 Step3-S 시설명 직접조회 시작]-----------")
-        from app.chat.infra.rag.facility import _extract_specific_facility_name
-        from app.chat.infra.rag.welfare_search import _lookup_facility_by_name
-
-        _specific_facility = _extract_specific_facility_name(message)
-        if _specific_facility:
-            logger.info(f"[RAG/search_v2] 시설명 직접 조회: '{_specific_facility}'")
-            name_docs = await asyncio.get_event_loop().run_in_executor(
-                None, _lookup_facility_by_name, _specific_facility
-            )
-            if name_docs:
-                logger.info(f"[RAG/search_v2] 시설명 직접 조회 결과: {len(name_docs)}개 → 바로 응답")
-                top_docs = name_docs[:10]
-                referenced_documents = build_referenced_documents(top_docs)
-                _final_user_msg = (final_user_message or "").strip() or message
-                response = await generate_final_response_v2(
-                    _final_user_msg, top_docs, temperature, max_tokens, stream,
-                    frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
-                    intent=intent,
-                    messages=messages,
-                    more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
-                )
-                logger.info("[TIMING][search] process_rag_search 전체: %.3fs", time.monotonic() - t_total)
-                return response, referenced_documents[:Config.RAG_UI_MAX_DOCS]
-        logger.debug("-----------[RAG/search_v2 Step3-S 시설명 직접조회 끝]-----------")
-
-        with log_step_banner(logger, "RAG/search_v2 Step4 CENTER+TEL 검색"):
-            _SEARCH_PER_QUERY = 5
-            _SEARCH_TOP_N = 10
+        with log_step_banner(logger, "RAG/search_v2 Step4 Mariner 단일 풀 검색"):
+            _SEARCH_PER_QUERY = -1
             if status_callback:
                 await status_callback("시설 및 문의처를 검색하고 있습니다")
 
@@ -176,20 +165,12 @@ async def process_rag_search(
             if _welfare_policy_qs:
                 logger.debug("[RAG/search_v2] 정책 보강 검색어: %s", _welfare_policy_qs)
 
-        # ---- WELFARE_CENTER 검색 헬퍼 ----
-        def _run_welfare_center_query(query: str):
-            try:
-                return query_welfare_center_documents(
-                    query,
-                    sigun_filters=search_sigun_filters,
-                    excluded_chunk_ids=excluded_chunk_ids,
-                )
-            except Exception as e:
-                logger.warning(f"[RAG/search_v2] WELFARE_CENTER 검색 실패: {e}")
-                return []
+        # ---- WELFARE_CENTER(GSND_WELFARE_CENTER) 검색 헬퍼 (임시 비활성화; 복구: 이 블록·상단 import) ----
+        def _run_welfare_center_query(_query: str) -> List[Dict[str, Any]]:
+            return []
 
-        # ---- OUR_REGION_TEL 검색 헬퍼 ----
         from app.chat.sigun import extract_eupmyeondong_from_message
+
         _search_eupmyeondong = extract_eupmyeondong_from_message(message)
         _search_eupmyeondong_filters = [_search_eupmyeondong] if _search_eupmyeondong else []
 
@@ -199,119 +180,74 @@ async def process_rag_search(
                     query,
                     sigun_filters=search_sigun_filters,
                     eupmyeondong_filters=_search_eupmyeondong_filters,
+                    max_results=-1,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/search_v2] OUR_REGION_TEL 검색 실패: {e}")
                 return []
 
+        _tel_only = search_pool_tag == "our_region_tel"
+        _center_only = search_pool_tag == "welfare_center"
+
         _t = time.monotonic()
         center_docs, tel_docs = await collect_welfare_center_tel_docs(
             queries=all_queries,
             per_query_limit=_SEARCH_PER_QUERY,
+            per_query_limit_tel=-1,
             run_center_query=_run_welfare_center_query,
             run_tel_query=_run_welfare_tel_query,
             log_prefix="RAG/search_v2",
+            center_enabled=_center_only,
+            tel_enabled=_tel_only,
         )
-        logger.info("[TIMING][search] Step4 CENTER+TEL 병렬 검색: %.3fs", time.monotonic() - _t)
-        logger.info(
-            f"[RAG/search_v2] 검색 합계: CENTER {len(center_docs)}개 + TEL {len(tel_docs)}개"
-        )
-
-        logger.debug("-----------[RAG/search_v2 Step4-S 적합성 판단 시작]-----------")
-        tel_top_for_judgment = sorted(
-            _deduplicate_documents(tel_docs),
-            key=lambda x: float(x.get("WEIGHT", 0) or 0),
-            reverse=True,
-        )[:_SEARCH_TOP_N]
-
-        _t = time.monotonic()
-        tel_sufficiency = await run_sufficiency_judgment_fast(
-            judge_fn=retrieval_sufficiency_judgment,
-            user_question=message,
-            intent=intent,
-            collection_name=Config.RAG_WELFARE_TEL_COLLECTION,
-            docs=tel_top_for_judgment,
-            log_prefix="RAG/search_v2",
-        )
-        logger.info("[TIMING][search] Step4-S OUR_REGION_TEL 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(
-            f"[RAG/search_v2] OUR_REGION_TEL 적합성: sufficient={tel_sufficiency['sufficient']}, "
-            f"reason={tel_sufficiency['reason']}"
-        )
-
-        if tel_sufficiency["sufficient"] and tel_sufficiency.get("reason") != "judgment_disabled":
-            logger.info("[RAG/search_v2] OUR_REGION_TEL 결과 충분 — WELFARE_CENTER 결과 제외")
+        logger.info("[TIMING][search] Step4 Mariner 단일 풀: %.3fs", time.monotonic() - _t)
+        if _tel_only:
             all_docs = tel_docs
+            logger.info(f"[RAG/search_v2] OUR_REGION_TEL 전용 검색 완료: {len(all_docs)}건")
         else:
-            # 2차 fallback: 확장 쿼리 기반 보강 검색
-            fallback_center_docs: List[Dict[str, Any]] = []
-            fallback_tel_docs: List[Dict[str, Any]] = []
-            _t = time.monotonic()
-            if precomputed_expanded_queries:
-                _candidates = precomputed_expanded_queries
-                logger.info("[RAG/search_v2] fallback: 사전 계산 확장 쿼리 사용")
-            else:
-                _candidates = await expand_query(reformed_query)
-            fallback_expanded = dedupe_cap_expanded_queries(
-                _candidates or [], max_n=_SEARCH_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
-            )
-            fallback_expanded, _ = build_welfare_search_queries(
-                expanded_queries=list(fallback_expanded or []),
-                search_queries=[],
-                user_message=message,
-                max_policy_queries=1,
-                policy_search_boost_enabled=not _skip_policy_boost,
-            )
-            logger.info("[TIMING][search] Step4-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            if fallback_expanded:
-                _t = time.monotonic()
-                fallback_center_docs, fallback_tel_docs = await collect_welfare_center_tel_docs(
-                    queries=fallback_expanded,
-                    per_query_limit=_SEARCH_PER_QUERY,
-                    run_center_query=_run_welfare_center_query,
-                    run_tel_query=_run_welfare_tel_query,
-                    log_prefix="RAG/search_v2/fallback",
-                )
-                logger.info("[TIMING][search] Step4-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
-                logger.info(
-                    "[RAG/search_v2] fallback 보강: CENTER %d개 + TEL %d개",
-                    len(fallback_center_docs),
-                    len(fallback_tel_docs),
-                )
-            center_docs.extend(fallback_center_docs)
-            tel_docs.extend(fallback_tel_docs)
-            if tel_sufficiency.get("reason") == "judgment_disabled":
-                logger.info("[RAG/search_v2] 판단 비활성화 — OUR_REGION_TEL + WELFARE_CENTER 결과 합산")
-            else:
-                logger.info("[RAG/search_v2] OUR_REGION_TEL 결과 부족 — WELFARE_CENTER 결과 포함")
-            all_docs = center_docs + tel_docs
-        logger.debug("-----------[RAG/search_v2 Step4-S 적합성 판단 끝]-----------")
+            all_docs = center_docs
+            logger.info(f"[RAG/search_v2] WELFARE_CENTER 전용 검색 완료: {len(all_docs)}건")
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
         top_docs = sorted(
             _deduplicate_documents(all_docs),
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
-        )[:_SEARCH_TOP_N]
+        )
         logger.info(f"[RAG/search_v2] 최종 선택: {len(top_docs)}개 (총 {len(all_docs)}개 수집)")
         for i, doc in enumerate(top_docs, 1):
             source = doc.get("_source", "center")
-            logger.debug(f"[RAG/search_v2] #{i} [{source}] NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
+            logger.debug(
+                f"[RAG/search_v2] #{i} [{source}] NAME={_get_document_name(doc) or '?'}, "
+                f"WEIGHT={doc.get('WEIGHT', '?')}"
+            )
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 끝]-----------")
 
         logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 시작]-----------")
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
-        _t = time.monotonic()
+        _t_ref = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
             message,
             top_docs,
             log_prefix="[RAG/search_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=search_sigun_filters)
-        logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        if search_pool_tag == "our_region_tel":
+            logger.info(
+                "[RAG/search_v2] 단일 블록 OUR_REGION_TEL — 관련성 LLM 필터 생략 (%d건 유지)",
+                len(top_docs),
+            )
+            logger.info("[TIMING][search] Step6 관련성 필터: 생략 (0s)")
+        else:
+            top_docs = await filter_irrelevant_docs(
+                reformed_query,
+                top_docs,
+                sigun_filters=search_sigun_filters,
+                max_judgment_docs=-1,
+            )
+            logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t_ref)
+            logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
         logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 끝]-----------")
 
         if excluded_chunk_ids or excluded_service_names:
@@ -319,11 +255,7 @@ async def process_rag_search(
             top_docs = filter_excluded_docs(top_docs, excluded_chunk_ids or [], excluded_service_names)
             logger.info(f"[MoreResults][search] 제외 필터 후: {len(top_docs)}개 문서")
 
-        logger.debug("-----------[RAG/search_v2 Step7 참고문서 구성 시작]-----------")
-        referenced_documents = build_referenced_documents(top_docs)
-        logger.debug("-----------[RAG/search_v2 Step7 참고문서 구성 끝]-----------")
-
-        logger.debug("-----------[RAG/search_v2 Step8 최종응답 생성 시작]-----------")
+        logger.debug("-----------[RAG/search_v2 Step7 최종응답 생성 시작]-----------")
         if status_callback:
             await status_callback("최종답변을 생성하고 있습니다")
         _t = time.monotonic()
@@ -335,10 +267,10 @@ async def process_rag_search(
             messages=messages,
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
-        logger.info("[TIMING][search] Step8 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
-        logger.debug("-----------[RAG/search_v2 Step8 최종응답 생성 끝]-----------")
+        logger.info("[TIMING][search] Step7 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
+        logger.debug("-----------[RAG/search_v2 Step7 최종응답 생성 끝]-----------")
         logger.info("[TIMING][search] process_rag_search 전체: %.3fs", time.monotonic() - t_total)
-        return response, referenced_documents
+        return response, []
 
     except Exception as e:
         logger.error(f"[RAG/search_v2] 처리 중 오류: {e}", exc_info=True)

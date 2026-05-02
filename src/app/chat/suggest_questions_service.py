@@ -43,6 +43,31 @@ def _refs_from_assistant_message(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def intent_from_assistant_message(msg: Dict[str, Any]) -> Optional[str]:
+    """히스토리 assistant 메시지에 저장된 의도(intent). preprocess 우선."""
+    pp = msg.get("preprocess")
+    if isinstance(pp, dict):
+        inn = pp.get("intent")
+        if isinstance(inn, str) and inn.strip():
+            return inn.strip().lower()
+    md = msg.get("metadata")
+    if isinstance(md, dict):
+        inn = md.get("intent")
+        if isinstance(inn, str) and inn.strip():
+            return inn.strip().lower()
+    return None
+
+
+def last_assistant_intent_from_messages(messages: List[Dict[str, Any]]) -> Optional[str]:
+    """내용이 있는 마지막 assistant 턴의 intent (동일 규칙 as extract_last_turn_context)."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != ROLE_ASSISTANT or not str(m.get("content") or "").strip():
+            continue
+        return intent_from_assistant_message(m)
+    return None
+
+
 def extract_last_turn_context(messages: List[Dict[str, Any]]) -> tuple[str, str, List[Dict[str, Any]]]:
     """마지막 비어 있지 않은 assistant와 그 직전 user, 해당 assistant의 참조 문서."""
     if not messages:
@@ -126,6 +151,9 @@ async def run_suggest_questions_core(
 
     u, a, refs = ("", "", [])
     if messages:
+        if last_assistant_intent_from_messages(messages) == "search":
+            logger.info("[SuggestQuestions] intent=search → 추천 질문 생성 생략")
+            return []
         u, a, refs = extract_last_turn_context(messages)
         if not a:
             logger.warning("[SuggestQuestions] 히스토리에서 assistant 답변을 찾지 못함")

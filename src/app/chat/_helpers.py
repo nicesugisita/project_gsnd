@@ -187,6 +187,7 @@ async def _handle_rag_mode(
     expanded_queries: list = None,
     keywords: list = None,
     llm_recommended_followup: bool = False,
+    search_target: str | None = None,
 ) -> JSONResponse | StreamingResponse:
     """Handle RAG mode response using query reform and retrieval."""
     from app.shared.utils.status_messages import build_status_message, STATUS_QUERY_REFORM
@@ -264,6 +265,7 @@ async def _handle_rag_mode(
                 sigun_filters=sigun_filters,
                 precomputed_expanded_queries=expanded_queries,
                 precomputed_keywords=keywords,
+                precomputed_search_target=search_target,
             )
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
@@ -369,6 +371,7 @@ async def _handle_rag_mode(
             sigun_filters=sigun_filters,
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
+            precomputed_search_target=search_target,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
         response_message, referenced_documents = await rag_processor(**_rag_kw)

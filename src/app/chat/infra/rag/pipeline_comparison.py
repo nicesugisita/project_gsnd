@@ -80,6 +80,7 @@ async def process_rag_with_documents_v2(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — comparison 전용
@@ -87,6 +88,8 @@ async def process_rag_with_documents_v2(
     general과 동일한 검색 구조 (GSND 제외):
     OKMS Group A/B → Fallback → WELFARE_TEL (BUSINESS_NAME) → 관련성 필터 → 응답
     """
+
+    _ = precomputed_search_target
 
     try:
         t_total = time.monotonic()
@@ -405,6 +408,7 @@ async def process_rag_with_documents_v2(
                             message,
                             sigun_filters=comp_sigun_filters,
                             eupmyeondong_filters=comp_eupmyeondong_filters,
+                            max_results=-1,
                         )
                     except Exception as e:
                         logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")

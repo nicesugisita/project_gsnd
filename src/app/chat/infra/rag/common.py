@@ -163,6 +163,7 @@ async def run_welfare_tel_queries(
                 keyword,
                 sigun_filters=sigun_filters,
                 eupmyeondong_filters=eupmyeondong_filters,
+                max_results=-1,
             )
         except Exception as e:
             logger.warning(f"[{log_prefix}] OUR_REGION_TEL 검색 실패: {e}")

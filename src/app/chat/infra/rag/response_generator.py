@@ -20,7 +20,10 @@ from app.chat.infra.rag import (
     _get_document_name,
     _get_document_snippet,
     _truncate_text_by_tokens,
+)
+from app.chat.infra.rag.document import (
     _format_facility_for_prompt,
+    _format_our_region_tel_for_prompt,
 )
 from app.chat.infra.llm import call_llm_api
 from app.chat.infra.db.welfare_tel import has_unregistered_contact
@@ -52,23 +55,11 @@ def format_document_for_prompt_v2(
     - 미등록 전화번호(-0000)이면서 _welfare_tel이 없는 경우에도 별도 DB 조회하지 않음
       (이미 사전 일괄 조회 완료)
     """
+    if doc.get("_source") == "our_region_tel":
+        return _format_our_region_tel_for_prompt(doc, index)
+
     if any(str(doc.get(key, "") or "").strip() for key in ("FACILITY_NAME", "FACILITY_TYPE", "ADDRESS")):
         return _format_facility_for_prompt(doc, index)
-
-    # OUR_REGION_TEL 문서 포맷 (센터명/읍면동/연락처/주소)
-    if doc.get("_source") == "our_region_tel":
-        lines = [f"[지역 연락처 {index}]"]
-        for field, label in [
-            ("SIGUN",        "지역"),
-            ("CENTER",       "센터명"),
-            ("EUPMYEONDONG", "읍면동"),
-            ("TEL",          "연락처"),
-            ("ADDRESS",      "주소"),
-        ]:
-            val = str(doc.get(field, "") or "").strip()
-            if val:
-                lines.append(f"- {label}: {val}")
-        return "\n".join(lines) + "\n\n"
 
     if not (doc.get("CONTENT") or doc.get("YEAR") or doc.get("SIGUN")):
         name = _get_document_name(doc)

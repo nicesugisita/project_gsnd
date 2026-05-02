@@ -174,6 +174,7 @@ def _build_preprocess_from_history(user_message: str, last_preprocess: dict) -> 
         "reformed_query": user_message,
         "expanded_queries": last_preprocess.get("expanded_queries") or [user_message],
         "keywords": kw,
+        "search_target": last_preprocess.get("search_target"),
     }
 
 
@@ -226,6 +227,7 @@ async def _streaming_chat_flow(
         reformed_query = None
         expanded_queries = None
         keywords = None
+        search_target = None
 
         # ── "더 알려줘" 감지 ──────────────────────────────────────────────────
         more = await _resolve_more_results_context(
@@ -373,12 +375,14 @@ async def _streaming_chat_flow(
                 "query": pp.query, "intent": pp.intent, "intent_reason": pp.intent_reason,
                 "reformed_query": pp.reformed_query, "expanded_queries": pp.expanded_queries,
                 "keywords": pp.keywords,
+                "search_target": pp.search_target,
             }
 
         user_intent      = preprocess_data["intent"]
         reformed_query   = preprocess_data["reformed_query"]
         expanded_queries = preprocess_data["expanded_queries"]
         keywords         = preprocess_data["keywords"]
+        search_target    = preprocess_data.get("search_target")
 
         if llm_recommended_followup and user_intent != "guide_recommend":
             _unified_intent = user_intent
@@ -395,11 +399,12 @@ async def _streaming_chat_flow(
             )
 
         yield f"data: {json.dumps({'chat-intent': user_intent})}\n\n"
-        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries}}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries, 'search_target': search_target}}, ensure_ascii=False)}\n\n"
         _preprocess_to_persist = {
             "query": preprocess_data.get("query", ""), "intent": user_intent,
             "reformed_query": reformed_query, "expanded_queries": expanded_queries,
             "more_info": bool(more.detected),
+            "search_target": search_target,
         }
         _capture_preprocess_timings(_timings, preprocess_data, expanded_queries)
 
@@ -432,6 +437,7 @@ async def _streaming_chat_flow(
             sigun_filters=resolved_sigun_filters,
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
+            precomputed_search_target=search_target,
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,

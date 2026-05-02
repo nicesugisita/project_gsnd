@@ -78,6 +78,7 @@ async def process_rag_guide_recommend(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     recommended_question_prompt: bool = False,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — guide_recommend 전용
@@ -86,6 +87,7 @@ async def process_rag_guide_recommend(
     그 외 의도는 기존 함수로 위임합니다.
     """
     # guide_recommend가 아닌 경우 기존 함수로 위임
+    _ = precomputed_search_target
 
     try:
         t_total = time.monotonic()

@@ -79,6 +79,7 @@ async def process_rag_general(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — general 전용
@@ -86,6 +87,8 @@ async def process_rag_general(
     general 의도일 때만 이 함수의 로직을 실행하며,
     그 외 의도는 기존 함수로 위임합니다.
     """
+
+    _ = precomputed_search_target
 
     try:
         t_total = time.monotonic()
