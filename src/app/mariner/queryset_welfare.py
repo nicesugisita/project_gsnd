@@ -1,11 +1,14 @@
 """
-Mariner 쿼리셋 — GSND_WELFARE_CENTER_V1 전용
+Mariner 쿼리셋 — GSND_WELFARE_CENTER_V1/V2 등 Config 지정 컬렉션 전용
 
+IR5: SIGUN은 AND 스크립틀릿(op1), setSearchKeyword·WhereSet 병행, setFaultless.
+색인(GSND_WELFARE_CENTER_V1 기준): TEXT_CHUNK_MI(Milvus)·TEXT_CHUNK_KO·SIGUN·FACILITY_NAME. 지번/ADDRESS 검색색인 없음 → WHERE는 MI·KO·FACILITY만. SELECT ADDRESS는 스니펫용 유지. 타임아웃 최소 120s.
 """
 
 import logging
+import re
 import time
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import jpype
 from jpype import JString
@@ -17,17 +20,123 @@ from app.core.constants import (
     OP_BRACE_OPEN,
     OP_OR,
     OP_BRACE_CLOSE,
-    OP_NOT,
-    OP_INT_SUMMATION,
+    OP_AND,
+    OP_HASANY,
     OP_VECTOR_SEARCH,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
+    MARINER_WEIGHT_LOW,
 )
 from app.core.exceptions import RAGServiceError
+from app.mariner.queryset_welfare_tel import _expand_sigun_scriptlet_values
 from app.mariner.sigun_utils import normalize_sigun
 from app.mariner.jvm_manager import ensure_jvm_thread
 
 logger = logging.getLogger(__name__)
+
+# 트리플·확장 쿼리가 과도하게 길면 Mariner가 지연되어 -60004(타임아웃) 발생할 수 있음.
+_MAX_WELFARE_KEYWORD_CHARS = 520
+_MAX_WELFARE_KEYWORD_TOKEN_COUNT = 28
+_MAX_SQUEEZED_VARIANT_CHARS = 64
+
+# 클라 기본 타임아웃(60s)·벡터 병행 시 -100(소켓 타임아웃) 방지
+_WELFARE_MARINER_TIMEOUT_MS_MIN = 120_000
+_TAIL_TOKEN_DROP: frozenset[str] = frozenset({
+    "연락처",
+    "전화번호",
+    "번호",
+    "문의",
+    "문의처",
+    "안내",
+})
+
+
+def _dedupe_ordered_tokens(words: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for w in words:
+        if not w or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+    return out
+
+
+def _drop_glued_partial_after_good_prefix(words: List[str]) -> List[str]:
+    """`창원도우누리`가 목록에 있을 때 `창원도우누리노인` 같은 찌꺼기 접미 토큰 제거."""
+
+    keep: List[str] = []
+    word_set = set(words)
+    for t in words:
+        if any(
+            t != u
+            and len(t) > len(u) >= 2
+            and t.startswith(u)
+            and u in word_set
+            and len(t) <= len(u) + 16
+            for u in words
+        ):
+            continue
+        keep.append(t)
+    return keep
+
+
+def _drop_tokens_subsumed_by_longer(words: List[str]) -> List[str]:
+    """`통합`, `재가` ⊂ `노인통합재가센터`처럼 짧은 분절 토큰 제거."""
+
+    def subsumed(short: str, longtok: str) -> bool:
+        if short == longtok or len(short) < 2:
+            return False
+        return short in longtok and len(longtok) >= max(7, len(short) + 2)
+
+    return [t for t in words if not any(subsumed(t, u) for u in words if u != t)]
+
+
+def _keywords_for_welfare_center(keyword: str) -> str:
+    """
+    파이프라인에서 들어오는 과장문(중복 어절)·붙여쓴 시설명을 IR5 친화 길이로 압축한다.
+    띄어쓴 본문 + (짧을 때만) 공백 제거 변형을 공백으로 병합.
+    """
+    k = " ".join((keyword or "").split()).strip()
+    if not k:
+        return ""
+    k = re.sub(r"도우\s+누리", "도우누리", k)
+    toks = k.split()
+    while toks and toks[-1] in _TAIL_TOKEN_DROP:
+        toks.pop()
+    toks = _dedupe_ordered_tokens(toks)
+    toks = _drop_glued_partial_after_good_prefix(toks)
+    toks = _drop_tokens_subsumed_by_longer(toks)
+    clipped: List[str] = []
+    for t in toks:
+        next_join = (" ".join(clipped + [t])).strip()
+        if len(next_join) > _MAX_WELFARE_KEYWORD_CHARS or len(clipped) >= _MAX_WELFARE_KEYWORD_TOKEN_COUNT:
+            break
+        clipped.append(t)
+
+    base = " ".join(clipped).strip() or k[: _MAX_WELFARE_KEYWORD_CHARS]
+
+    squeezed = "".join(base.split())
+    extras: List[str] = []
+    token_n = len(base.split())
+    if (
+        " " in base
+        and squeezed != base
+        and len(squeezed) <= _MAX_SQUEEZED_VARIANT_CHARS
+        and token_n <= 6
+        and len(base) + 1 + len(squeezed) <= _MAX_WELFARE_KEYWORD_CHARS + 40
+    ):
+        extras.append(squeezed)
+
+    merged_parts = list(dict.fromkeys([base] + extras))
+    out = " ".join(p for p in merged_parts if p).strip()
+    if len((keyword or "").strip()) > len(out) + 80:
+        logger.info(
+            "[query_welfare_center] 키워드 압축: 원본 %d자 → %d자",
+            len(keyword.strip()),
+            len(out),
+        )
+    return out
 
 
 # ============================================================
@@ -38,15 +147,14 @@ def query_welfare_center_documents(
     keyword: str,
     sigun_filters: Optional[List[str]] = None,
     facility_type_filter: Optional[str] = None,
-    excluded_chunk_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    GSND_WELFARE_CENTER_V1 컬렉션 전용 Mariner 검색
+    Config.RAG_WELFARE_CENTER_COLLECTION 전용 Mariner 검색
 
-    예제 검색식(MarinerQuerySetExampleCode_WELFARE.py) 기반:
-    - WHERE: 4-field OR (TEXT_CHUNK_KO, TEXT_CHUNK_MI, FACILITY_NAME, SIGUN)
-    - SIGUN 스크립틀릿: op 1
-    - OrderBy: WEIGHT 수치 내림차순 (JByte(97))
+    예제 검색식 패턴 기반 WhereSet + IR5 정비:
+    - WHERE: TEXT_CHUNK_KO(OP_HASANY) OR TEXT_CHUNK_MI(OP_VECTOR_SEARCH) OR FACILITY_NAME(HASANY·op1); AND SIGUN 스크립틀릿(op 1).
+      창원 등은 queryset_welfare_tel과 동일한 시→구 OR 확장(JSON 겸용).
+    - setSearchKeyword + setFaultless(True), 결과 개수(top_n)는 Config 기반.
 
     Args:
         keyword: 검색 키워드
@@ -67,50 +175,40 @@ def query_welfare_center_documents(
 
     collection = Config.RAG_WELFARE_CENTER_COLLECTION
 
-    excluded_chunk_set = {
-        str(chunk_id).strip()
-        for chunk_id in (excluded_chunk_ids or [])
-        if str(chunk_id).strip()
-    }
-    if excluded_chunk_set:
-        excluded_values = sorted(excluded_chunk_set)
-        logger.info(
-            "[MoreResults][Mariner/welfare] 제외 입력 수=%d | 샘플=%s",
-            len(excluded_values),
-            excluded_values[:10],
-        )
-
     try:
-        # Mariner 설정 — 예제 코드 기준값 사용 (threshold=0.2, top_n=20, vs_size=50)
-        timeout = Config.MARINER_TIMEOUT
-        threshold = 0.2
-        top_n = 20
-        vs_result_size = 50
+        timeout = max(int(Config.MARINER_TIMEOUT), _WELFARE_MARINER_TIMEOUT_MS_MIN)
+        top_n = max(1, int(Config.MARINER_MAX_RESULTS))
+        threshold = float(Config.MARINER_THRESHOLD)
+        vs_result_size = min(200, max(50, top_n * 4))
 
-        # JAR 파일 로드
         ensure_jvm_thread()
 
-        # Mariner 쿼리 구성
         jpkg_cmd = jpype.JPackage("com.diquest.ir5.client.command")
         command = jpkg_cmd.CommandSearchRequest(Config.MARINER_IP, int(Config.MARINER_PORT))
         command.setProps(Config.MARINER_IP, int(Config.MARINER_PORT), timeout, MARINER_SETPROPS_EXTRA, MARINER_SETPROPS_EXTRA)
 
         jpkg_query = jpype.JPackage("com.diquest.ir5.common.msg.protocol.query")
         query = jpkg_query.Query("", "")
-        keyword_string = JString(keyword)
-        logger.info(f"[query_welfare keywords] keywords = {keyword}")
+        merged_kw = _keywords_for_welfare_center(keyword)
+        keyword_string = JString(merged_kw)
+        logger.info(
+            "[query_welfare_center] keyword=%r merged=%r sigun_filters=%s",
+            keyword,
+            merged_kw,
+            sigun_filters,
+        )
 
-        # 결과 범위 설정
         startnum = 0
         endnum = int(top_n) - 1
         query.setResult(startnum, endnum)
         query.setFrom(collection)
+        query.setSearchKeyword(keyword_string)
         query.setSearch(True)
-        query.setDebug(True)
-        query.setPrintQuery(True)
-        query.setLoggable(True)
+        query.setDebug(False)
+        query.setPrintQuery(False)
+        query.setLoggable(False)
+        query.setFaultless(True)
 
-        # 검색 파라미터
         query.setValue("VS_THRESHOLD", str(threshold))
         query.setValue("VS_RESULT_SIZE", str(vs_result_size))
 
@@ -129,54 +227,64 @@ def query_welfare_center_documents(
         field_indexes = {field_name: idx for idx, field_name in enumerate(select_field_names)}
         query.setSelect(select_set_array)
 
-        # WHERE: 4-field OR 검색식 (op 코드는 예제 MarinerQuerySetExampleCode_WELFARE.py 기준)
+        # V1 색인: TEXT_CHUNK_MI(Milvus)·TEXT_CHUNK_KO·FACILITY_NAME(어절). 지번/ADDRESS 검색색인 없음.
         where_set_array = [
-            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
-            jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  keyword_string, MARINER_WEIGHT_HIGH),  # BM25 벡터
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH,  keyword_string, MARINER_WEIGHT_MED),  # 벡터 유사도
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("FACILITY_NAME",   1,  keyword_string, MARINER_WEIGHT_HIGH),  # BM25 벡터
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("SIGUN",           1,  keyword_string, MARINER_WEIGHT_HIGH),  # 키워드
-            jpkg_query.WhereSet(OP_OR),                                       # )
-            jpkg_query.WhereSet("ADDRESS_JIBUN",   1,  keyword_string, MARINER_WEIGHT_HIGH),  # 키워드
-            jpkg_query.WhereSet(OP_BRACE_CLOSE),           
+            jpkg_query.WhereSet(OP_BRACE_OPEN),
+            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_MED),
+            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet("FACILITY_NAME", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
+            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet("FACILITY_NAME", 1, keyword_string, MARINER_WEIGHT_MED),
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),
         ]
 
-        # CHUNK_ID(ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
-        if excluded_chunk_set:
-            excluded_values = sorted(excluded_chunk_set)
-            _n = len(excluded_values)
-            _sample = excluded_values[:20]
-            logger.info(
-                "[MoreResults][Mariner/welfare] 검색단 제외 IDs(%d): %s%s",
-                _n,
-                _sample,
-                "..." if _n > 20 else "",
-            )
-            for chunk_id in excluded_values:
-                where_set_array += [
-                    jpkg_query.WhereSet(OP_NOT),
-                    jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
-                ]
+        sigun_scriptlet_values: List[str] = []
+        skip_sigun = False
+        for s in sigun_filters or []:
+            t = str(s).strip()
+            if not t:
+                continue
+            if t == "경상남도":
+                skip_sigun = True
+                break
+            sigun_scriptlet_values.append(t)
 
-        # SIGUN 스크립틀릿: Mariner 레벨 필터 미적용 — Python 후처리로만 필터링
-        # WELFARE_CENTER SIGUN 필드 포맷 미확인 (단축형/전체형 불명), 스크립틀릿 비적용
-        # OUR_REGION_TEL도 동일한 이유로 SIGUN 스크립틀릿 미사용
+        if sigun_scriptlet_values and not skip_sigun:
+            sigun_expanded = _expand_sigun_scriptlet_values(sigun_scriptlet_values)
+            where_set_array.append(jpkg_query.WhereSet(OP_AND))
+            if len(sigun_expanded) == 1:
+                where_set_array.append(
+                    jpkg_query.WhereSet("SIGUN", 1, JString(sigun_expanded[0]), 0),
+                )
+            else:
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))
+                for idx, sv in enumerate(sigun_expanded):
+                    if idx > 0:
+                        where_set_array.append(jpkg_query.WhereSet(OP_OR))
+                    where_set_array.append(jpkg_query.WhereSet("SIGUN", 1, JString(sv), 0))
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
         query.setWhere(where_set_array)
 
-        # 쿼리셋 구성 및 실행 — setOrderby는 예제 코드 순서대로 addQuery 이후에 호출
-        queryset = jpkg_query.QuerySet(1)
-        queryset.addQuery(query)
         order_set_array = [jpkg_query.OrderBySet(False, "WEIGHT", jpype.JByte(97))]
         query.setOrderby(order_set_array)
+
+        queryset = jpkg_query.QuerySet(1)
+        queryset.addQuery(query)
         ret = command.request(queryset)
 
         if ret < 0:
-            logger.error(f"[Mariner/welfare] 요청 오류: {ret}")
-            raise RAGServiceError(f"Mariner API 반환 코드: {ret}")
+            err_detail = ""
+            try:
+                em = command.getErrorMessage()
+                if em is not None:
+                    err_detail = f" | ErrorMessage={em}"
+            except Exception:
+                pass
+            logger.error("[Mariner/welfare] 요청 오류: %s%s", ret, err_detail)
+            raise RAGServiceError(f"Mariner API 반환 코드: {ret}{err_detail}")
 
         resultSet = command.getResultSet()
         if resultSet is None:
@@ -194,9 +302,6 @@ def query_welfare_center_documents(
         }
         logger.info(f"[Mariner/welfare] raw 결과: {result_size}개 (필터 전), 키워드: {keyword[:50]}, sigun_filters={list(target_siguns) if target_siguns else None}")
 
-        excluded_count = 0
-        raw_id_samples: List[str] = []
-        removed_ids: List[str] = []
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
@@ -212,14 +317,8 @@ def query_welfare_center_documents(
 
             # WELFARE_CENTER 필드 매핑
             doc["CHUNK_ID"] = doc.get("ID", "")
-            if doc["CHUNK_ID"] and len(raw_id_samples) < 10:
-                raw_id_samples.append(doc["CHUNK_ID"])
-            if excluded_chunk_set and doc["CHUNK_ID"] in excluded_chunk_set:
-                excluded_count += 1
-                if len(removed_ids) < 20:
-                    removed_ids.append(doc["CHUNK_ID"])
-                continue
             doc["NAME"] = str(doc.get("FACILITY_NAME", "") or "").strip()
+            doc["_source"] = "welfare_center"
 
             # CHUNK_PATH: 참조문서 스니펫에 표시될 모든 시설 정보
             _snippet_parts = []
@@ -239,13 +338,22 @@ def query_welfare_center_documents(
             if target_siguns:
                 doc_sigun = str(doc.get("SIGUN", "") or "").strip()
                 doc_address = str(doc.get("ADDRESS", "") or "").strip()
+                doc_facility = str(doc.get("FACILITY_NAME", "") or "").strip()
                 sigun_matched = False
                 for ts in target_siguns:
                     if ts == "경상남도":
                         sigun_matched = True
                         break
                     short = ts.split(" ", 1)[1] if " " in ts else ts
+                    city_core = short.replace("시", "").replace("군", "").strip()
                     if doc_sigun == ts or doc_sigun == short or short in doc_address:
+                        sigun_matched = True
+                        break
+                    if (
+                        len(city_core) >= 2
+                        and city_core in doc_facility
+                        and ts.startswith("경상남도 ")
+                    ):
                         sigun_matched = True
                         break
                 if not sigun_matched:
@@ -259,24 +367,10 @@ def query_welfare_center_documents(
 
             doc_list.append(doc)
 
-        if excluded_chunk_set:
-            logger.info(f"[MoreResults][Mariner/welfare] CHUNK_ID 1차 제외: {excluded_count}개")
-            logger.info(
-                "[MoreResults][Mariner/welfare] 실제 제외 ID 샘플=%s | raw ID 샘플=%s",
-                removed_ids[:10],
-                raw_id_samples,
-            )
-
         t2 = time.monotonic()
         logger.info(f"[Mariner/welfare] 검색 시간: {t2 - t1:.3f}초, 키워드: {keyword[:50]}, 결과: {len(doc_list)}개")
         for i, doc in enumerate(doc_list, 1):
             logger.debug(f"[Mariner/welfare] #{i} ID={doc.get('CHUNK_ID', '?')}, NAME={doc.get('NAME', '?')}, WEIGHT={doc.get('WEIGHT', '?')}")
-
-        # Mariner 결과가 없으면 CSV fallback
-        if not doc_list:
-            logger.info("[Mariner/welfare] 결과 없음 → CSV fallback")
-            from app.mariner.csv_welfare_center import search_welfare_center_from_csv
-            doc_list = search_welfare_center_from_csv(keyword, sigun_filters, facility_type_filter)
 
         return doc_list
 
@@ -284,10 +378,4 @@ def query_welfare_center_documents(
         raise
     except Exception as e:
         logger.error(f"[Mariner/welfare] 예상치 못한 오류: {e}", exc_info=True)
-        logger.info("[Mariner/welfare] Mariner 오류 → CSV fallback 시도")
-        try:
-            from app.mariner.csv_welfare_center import search_welfare_center_from_csv
-            return search_welfare_center_from_csv(keyword, sigun_filters, facility_type_filter)
-        except Exception as csv_e:
-            logger.error(f"[Mariner/welfare] CSV fallback도 실패: {csv_e}")
-            raise RAGServiceError(f"복지시설 검색 중 오류: {str(e)}") from e
+        raise RAGServiceError(f"복지시설 검색 중 오류: {str(e)}") from e

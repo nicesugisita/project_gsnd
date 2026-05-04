@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     RAG_GOV_OKMS_COLLECTION: str = ""
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
+    # OUR_REGION_TEL: 생략 동명 보강 JSON. 예: {"회원동":["회원1동","회원2동"],"양덕동":["양덕1동"]}
+    # 코드 기본값과 병합되며, 동일 키는 env가 덮어쓴다.
+    RAG_WELFARE_TEL_DONG_ABBREV_JSON: str = ""
+    # OUR_REGION_TEL: 자동 ○동→○1동… 보강 시 베이스(앞 글자 덩어리) 제외. JSON 배열 예: ["중앙","사림"]
+    RAG_WELFARE_TEL_DONG_EXPAND_EXCLUDE_BASES_JSON: str = ""
+    # OUR_REGION_TEL: SIGUN 필터가 시 단위만 올 때 구 접미 OR 확장. 예: {"경상남도 창원시":["의창구","성산구"]}
+    # 코드 기본값(창원 5구)과 병합; 동일 키는 env가 덮어쓴다. 다른 시·군은 여기에 키를 추가한다.
+    RAG_WELFARE_TEL_SIGUN_OR_SUFFIXES_JSON: str = ""
     RETRIEVAL_JUDGMENT_ENABLED: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────

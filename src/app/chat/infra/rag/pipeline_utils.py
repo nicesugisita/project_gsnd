@@ -463,11 +463,10 @@ async def collect_welfare_center_tel_docs(
     tel_cap = per_query_limit if per_query_limit_tel is None else per_query_limit_tel
     loop = asyncio.get_event_loop()
     if center_enabled and queries:
-        center_futures = [
-            loop.run_in_executor(None, run_center_query, q)
-            for q in queries
+        # WELFARE_CENTER는 벡터·다필드 OR가 무거워 동시 다발 요청 시 Mariner 타임아웃(-60004)이 잦음 → 순차 실행
+        center_results = [
+            await loop.run_in_executor(None, run_center_query, q) for q in queries
         ]
-        center_results = list(await asyncio.gather(*center_futures))
     else:
         center_results = [[] for _ in queries]
 
@@ -481,17 +480,23 @@ async def collect_welfare_center_tel_docs(
         tel_results = [[] for _ in queries]
 
     center_docs: List[Dict[str, Any]] = []
-    for i, (q, docs) in enumerate(zip(queries, center_results), 1):
-        if docs:
-            if per_query_limit < 0:
-                center_docs.extend(docs)
-                n_take = len(docs)
+    if center_enabled:
+        for i, (q, docs) in enumerate(zip(queries, center_results), 1):
+            if docs:
+                if per_query_limit < 0:
+                    center_docs.extend(docs)
+                    n_take = len(docs)
+                else:
+                    center_docs.extend(docs[:per_query_limit])
+                    n_take = min(len(docs), per_query_limit)
+                logger.debug("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
             else:
-                center_docs.extend(docs[:per_query_limit])
-                n_take = min(len(docs), per_query_limit)
-            logger.debug("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
-        else:
-            logger.debug("[%s] [CENTER] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
+                logger.debug("[%s] [CENTER] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
+    else:
+        logger.debug(
+            "[%s] [CENTER] 검색 생략(단일 풀 모드: OUR_REGION_TEL 등에서 CENTER 풀 비활성)",
+            log_prefix,
+        )
 
     tel_docs: List[Dict[str, Any]] = []
     for i, (q, docs) in enumerate(zip(queries, tel_results), 1):

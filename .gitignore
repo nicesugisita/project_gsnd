@@ -76,3 +76,6 @@ Desktop.ini
 
 # ─── Dependency lock (project policy: not versioned) ──────────
 uv.lock
+
+.cursorrules
+.cursorrules.md

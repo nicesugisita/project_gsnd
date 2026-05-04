@@ -28,6 +28,17 @@ _SIGUN_NORMALIZE_MAP = {
 }
 
 
+def is_gyeongnam_sigun_short_token(name: str) -> bool:
+    """
+    사용자가 「○○시」「○○군」을 생략한 첫 단어(예: 양산, 김해, 거제).
+    동사무소·주민센터 앞 토큰이 이 목록과 같으면 읍면동 보강(○1동…) 대상이 아님.
+    """
+    if not name or not isinstance(name, str):
+        return False
+    key = name.strip()
+    return key in _SIGUN_NORMALIZE_MAP
+
+
 def normalize_sigun(sigun: str) -> str:
     """부분 시군 이름을 'DB 저장 형태(경상남도 OO시/군)'로 정규화"""
     if not sigun:

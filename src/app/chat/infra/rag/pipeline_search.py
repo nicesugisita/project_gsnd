@@ -11,8 +11,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 # Mariner 쿼리셋
-# GSND_WELFARE_CENTER 비활성화 시 아래 import·_run_welfare_center_query 주석 블록을 함께 복구
-# from app.mariner.queryset_welfare import query_welfare_center_documents
+from app.mariner.queryset_welfare import query_welfare_center_documents
 from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
 
 from app.chat.infra.rag import (
@@ -165,9 +164,15 @@ async def process_rag_search(
             if _welfare_policy_qs:
                 logger.debug("[RAG/search_v2] 정책 보강 검색어: %s", _welfare_policy_qs)
 
-        # ---- WELFARE_CENTER(GSND_WELFARE_CENTER) 검색 헬퍼 (임시 비활성화; 복구: 이 블록·상단 import) ----
         def _run_welfare_center_query(_query: str) -> List[Dict[str, Any]]:
-            return []
+            try:
+                return query_welfare_center_documents(
+                    _query,
+                    sigun_filters=search_sigun_filters,
+                )
+            except Exception as e:
+                logger.warning("[RAG/search_v2] WELFARE_CENTER 검색 실패: %s", e)
+                return []
 
         from app.chat.sigun import extract_eupmyeondong_from_message
 
