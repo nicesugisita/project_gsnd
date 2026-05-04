@@ -259,7 +259,12 @@ async def ask_uploaded_document(
         messages=existing_history
     )
 
-    _save_chat_history(chat_request, answer_text, user_message=question.strip())
+    _save_chat_history(
+        chat_request,
+        answer_text,
+        user_message=question.strip(),
+        referenced_documents=referenced_documents,
+    )
 
     return JSONResponse(
         content={

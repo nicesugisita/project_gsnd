@@ -40,6 +40,7 @@ from .prompt_loader import (
     load_classification_general_prompt,
     load_classification_comparison_prompt,
     load_classification_recommended_prompt,
+    load_classification_llm_recommended_prompt,
     load_classification_search_prompt,
     load_region_age_collect_recommended_prompt,
     load_uploaded_qa_prompt
@@ -71,6 +72,7 @@ __all__ = [
     'load_classification_general_prompt',
     'load_classification_comparison_prompt',
     'load_classification_recommended_prompt',
+    'load_classification_llm_recommended_prompt',
     'load_classification_search_prompt',
     'load_region_age_collect_recommended_prompt',
     'load_uploaded_qa_prompt',

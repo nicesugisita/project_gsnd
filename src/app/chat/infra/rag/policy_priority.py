@@ -460,14 +460,18 @@ def apply_policy_priority_to_documents(
     docs: List[Dict[str, Any]],
     *,
     log_prefix: str = "PolicyBoost",
+    apply_enabled: bool = True,
 ) -> List[Dict[str, Any]]:
     """검색 후 문서 목록에 질문군별 soft-priority를 적용해 재정렬한다.
 
     - 문서 본문/제목에 정책 키워드가 포함된 후보를 앞으로 올린다.
     - 어느 문서에도 키워드가 없으면 원 순서를 유지한다(불필요한 순서 뒤집음 방지).
     - 동점 시 CHUNK_ID/ID 문자열로 안정 정렬.
+    - apply_enabled=False: MORE_INFO 등 검색 순서 유지가 필요할 때 재정렬 생략.
     """
     if not docs:
+        return docs
+    if not apply_enabled:
         return docs
 
     tags, boost_keywords = resolve_policy_boost_keywords(user_message)

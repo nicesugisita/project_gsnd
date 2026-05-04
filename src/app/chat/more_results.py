@@ -153,5 +153,6 @@ def get_last_preprocess_from_history(messages: list) -> Optional[Dict[str, Any]]
             "intent": intent,
             "reformed_query": reformed_query,
             "expanded_queries": [str(q).strip() for q in expanded_queries if str(q).strip()],
+            "search_target": preprocess.get("search_target"),
         }
     return None

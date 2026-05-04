@@ -6,6 +6,7 @@
 
 주요 기능:
 - 대화 히스토리 전체에서 시군 추출 (히스토리 기반 기억)
+- user에 지명이 없으면 직전 assistant·참조 문서명에서 시군 보강
 - 읍/면/동/리명 → 시군 매핑 (location_dict 활용)
 - 조사/경계 기반 정확한 위치명 매칭 (오탐 방지)
 - 모호한 위치명(여러 시군 해당) 감지 및 되묻기
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 import json
 
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JSON_PATH = os.path.join(_project_root, "location_dict.json")
+_JSON_PATH = os.path.join(_project_root, "shared", "data", "location_dict.json")
 
 try:
     with open(_JSON_PATH, encoding="utf-8") as _f:
@@ -152,6 +153,103 @@ def extract_sigun_from_history(messages: List[Dict]) -> List[str]:
     return list(dict.fromkeys(s for s in normalized if s.startswith("경상남도 ")))
 
 
+def _assistant_referenced_documents(msg: Dict) -> List[Dict]:
+    docs: List[Dict] = []
+    meta = msg.get("metadata")
+    if isinstance(meta, dict):
+        rd = meta.get("referenced_documents")
+        if isinstance(rd, list):
+            docs = [x for x in rd if isinstance(x, dict)]
+    if not docs:
+        rd = msg.get("referenced_documents")
+        if isinstance(rd, list):
+            docs = [x for x in rd if isinstance(x, dict)]
+    return docs
+
+
+def extract_sigun_from_referenced_documents_list(docs: List[Dict]) -> List[str]:
+    """
+    ``referenced_documents`` 메타 배열만으로 시군 1곳 추출.
+
+    추천 후속(/recommended-question)·Mariner 검색 보강용. 문서 순서대로 첫 일치만.
+    """
+    return list(_first_sigun_from_referenced_documents(docs or []))
+
+
+def _first_sigun_from_referenced_documents(docs: List[Dict]) -> List[str]:
+    """참조 문서 순서대로 name·path·snippet에서 첫 경남 시군 1곳."""
+    from app.mariner.sigun_utils import _SIGUN_NORMALIZE_MAP
+
+    keys_sorted = sorted(_SIGUN_NORMALIZE_MAP.keys(), key=len, reverse=True)
+    for d in docs or []:
+        if not isinstance(d, dict):
+            continue
+        block = " ".join(str(d.get(k, "") or "") for k in ("name", "path", "snippet", "chunk_id", "id"))
+        if not block.strip():
+            continue
+        for key in keys_sorted:
+            if key in block:
+                full = normalize_sigun(key)
+                if full.startswith("경상남도 "):
+                    return [full]
+    return []
+
+
+def _find_last_assistant_before_last_user(messages: List[Dict]) -> Optional[Dict]:
+    if not messages:
+        return None
+    last_user_idx: Optional[int] = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+    if last_user_idx is None:
+        return None
+    for j in range(last_user_idx - 1, -1, -1):
+        if messages[j].get("role") == ROLE_ASSISTANT:
+            return messages[j]
+    return None
+
+
+def extract_sigun_from_last_assistant_context(messages: List[Dict]) -> List[str]:
+    """
+    직전 assistant 본문 및 참조 문서에서 시군을 추출합니다.
+
+    참조 목록에 여러 시군이 섞여 있으면 문서 순서상 첫 매칭만 사용합니다.
+    본문에서만 복수 시군이 나오면 첫 확정 시군만 반환합니다.
+    """
+    from app.chat.infra.rag import _extract_sigun_from_message
+
+    asst = _find_last_assistant_before_last_user(messages or [])
+    if not asst:
+        return []
+    docs = _assistant_referenced_documents(asst)
+    sig = _first_sigun_from_referenced_documents(docs)
+    if sig:
+        logger.info("[SigunService] 직전 assistant 참조 문서에서 시군 추출: %s", sig)
+        return sig
+    parts = [str(asst.get("content") or "").strip()]
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        for k in ("name", "path"):
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+    blob = " ".join(parts)
+    if not blob.strip():
+        return []
+    raws = _extract_sigun_from_message(blob)
+    normalized = [normalize_sigun(r) for r in raws if r and r != "경남"]
+    out = list(dict.fromkeys(s for s in normalized if s.startswith("경상남도 ")))
+    if len(out) > 1:
+        out = out[:1]
+        logger.info("[SigunService] assistant 본문·문서명에서 시군 복수 → 첫 항만 사용: %s", out)
+    if out:
+        logger.info("[SigunService] 직전 assistant 본문/문서명에서 시군 추출: %s", out)
+    return out
+
+
 def check_out_of_scope_region(user_message: str) -> Tuple[bool, str]:
     """
     경상남도 외 지역명이 포함된 경우를 감지합니다.
@@ -261,7 +359,11 @@ def check_sigun(
     시군 추출 및 되묻기 여부를 판단합니다.
 
     판단 순서:
-    1. 전체 히스토리(user 메시지)에서 시군 직접 추출 → 있으면 확정
+    1. 전체 히스토리(user 메시지)에서 시군 직접 추출
+       - 이번 턴 문장에 시군이 있으면 그것만 사용(지역 전환)
+       - 히스토리에 복수인데 이번 턴에 지명이 없으면 직전 assistant·참조로 단일 유지(오탐·맥락 이탈 완화)
+       - 그 외 히스토리 결과가 있으면 확정
+    1b. 없으면 직전 assistant 본문·참조 문서명 등에서 시군 보강 → 있으면 확정
     2. 현재 메시지에서 읍/면/동/리명 매칭
        - 단일 시군 → 자동 확정
        - 여러 시군 → 되묻기 필요
@@ -278,11 +380,46 @@ def check_sigun(
         - clarify_message: 되묻기 메시지 (need_clarify=True 일 때만 유효)
     """
     logger.info(f"[check_sigun] 호출됨 | query={user_message[:40]!r} | messages 수={len(messages)}")
-    # 1. 전체 히스토리에서 시군 추출
-    sigun_filters = extract_sigun_from_history(messages)
-    logger.info(f"[check_sigun] 히스토리 추출 결과: {sigun_filters}")
+    # 1. 전체 히스토리에서 시군 추출 + 이번 턴·맥락 정리
+    from app.chat.infra.rag import _extract_sigun_from_message
+
+    hist = extract_sigun_from_history(messages)
+    logger.info(f"[check_sigun] 히스토리 추출 결과: {hist}")
+    curr_raws = _extract_sigun_from_message(user_message or "")
+    curr_norm = list(
+        dict.fromkeys(
+            normalize_sigun(r)
+            for r in curr_raws
+            if r and r != "경남"
+        )
+    )
+    curr_norm = [s for s in curr_norm if s.startswith("경상남도 ")]
+
+    if curr_norm:
+        sigun_filters = curr_norm
+        logger.info("[SigunService] 이번 턴 사용자 문장에서 시군 확정: %s", sigun_filters)
+    elif len(hist) > 1:
+        asst_sig = extract_sigun_from_last_assistant_context(messages or [])
+        if len(asst_sig) == 1:
+            sigun_filters = asst_sig
+            logger.info(
+                "[SigunService] 히스토리 복수 시군·이번 턴 무지명 → 직전 assistant·참조로 단일 유지: %s",
+                sigun_filters,
+            )
+        else:
+            sigun_filters = list(hist)
+            logger.info("[SigunService] 히스토리 복수 시군 유지(assistant 단일 불가): %s", sigun_filters)
+    else:
+        sigun_filters = list(hist)
+
     if sigun_filters:
-        logger.info(f"[SigunService] 히스토리에서 시군 확인: {sigun_filters}")
+        logger.info(f"[SigunService] 히스토리/맥락에서 시군 확인: {sigun_filters}")
+        return sigun_filters, False, ""
+
+    sigun_filters = extract_sigun_from_last_assistant_context(messages or [])
+    logger.info(f"[check_sigun] 직전 assistant 보강 결과: {sigun_filters}")
+    if sigun_filters:
+        logger.info(f"[SigunService] 직전 assistant/참조에서 시군 확인: {sigun_filters}")
         return sigun_filters, False, ""
 
     # 2. 현재 메시지에서 읍/면/동/리명 매칭

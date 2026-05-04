@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 
 VALID_INTENTS = ("general", "comparison", "guide_recommend", "search")
 
+SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
+
+
+def _raw_search_target_from_parsed(parsed: Dict[str, Any]) -> Any:
+    """LLM JSON에서 search_target 읽기(스네이크/카멜·빈값·문자열 null 허용)."""
+    order = ("search_target", "searchTarget")
+    for key in order:
+        v = parsed.get(key)
+        if v is None:
+            continue
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if low in ("null", "none"):
+                continue
+            return stripped
+        return v
+    return None
+
+
 _FALLBACK = {
     "intent": "general",
     "intent_reason": "",
@@ -61,6 +83,19 @@ def _build_multiturn_input(user_query: str, messages: list) -> str:
     return f"[이전 대화]\n{chr(10).join(lines)}\n\n[현재 질문]\n{user_query}"
 
 
+def _normalize_search_target(intent: str, raw: Any) -> Optional[str]:
+    """통합 전처리 JSON의 search_target 정규화. search가 아니면 항상 None."""
+    if intent != "search":
+        return None
+    if raw is None:
+        return "ambiguous"
+    s = str(raw).strip().lower().replace("-", "_")
+    if s in SEARCH_TARGETS:
+        return s
+    logger.warning("[UnifiedPreprocess] 알 수 없는 search_target=%r → ambiguous", raw)
+    return "ambiguous"
+
+
 async def unified_preprocess(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
@@ -76,6 +111,7 @@ async def unified_preprocess(
         reformed_query  : str
         expanded_queries: list[str]  (use_rag=False이면 [])
         keywords        : list[str]  (use_rag=False이면 [])
+        search_target   : str | None (intent=search일 때만 admin_local_office | welfare_facility | ambiguous)
     """
     prompt_template = load_unified_preprocessing_prompt()
     if not prompt_template:
@@ -154,6 +190,8 @@ async def unified_preprocess(
             logger.warning("[UnifiedPreprocess] 키워드 추출 실패: %s", e)
             keywords = []
 
+    search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
+
     result = {
         "query":            query,
         "intent":           intent,
@@ -161,11 +199,12 @@ async def unified_preprocess(
         "reformed_query":   reformed,
         "expanded_queries": expanded,
         "keywords":         keywords,
+        "search_target":    search_target,
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | use_rag(input)=%s",
-        query[:50], intent, use_rag,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, use_rag,
     )
     return result
 
@@ -178,4 +217,5 @@ def _make_fallback(user_query: str) -> Dict[str, Any]:
         "reformed_query":   user_query,
         "expanded_queries": [user_query],
         "keywords":         [],
+        "search_target":    None,
     }

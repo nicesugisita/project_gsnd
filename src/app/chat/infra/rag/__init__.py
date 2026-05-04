@@ -14,16 +14,7 @@ from .document import (
     _get_document_snippet,
     _format_document_for_prompt,
     _format_facility_for_prompt,
-)
-
-# facility
-from .facility import (
-    _FACILITY_NAME_PATTERN,
-    _FACILITY_KEYWORD_MAP,
-    _load_facility_keyword_map,
-    _get_facility_keyword_map,
-    _extract_facility_type_from_message,
-    _extract_specific_facility_name,
+    _format_our_region_tel_for_prompt,
 )
 
 # extraction
@@ -44,21 +35,6 @@ from .query_builder import (
     _build_search_queries,
     _build_comparison_search_queries,
     filter_okms_keywords,
-)
-
-# db_lookup
-from app.chat.infra.db.welfare import (
-    _lookup_welfare_tel,
-    _lookup_facility_from_db,
-)
-
-# welfare_search
-from .welfare_search import (
-    _LIFECYCLE_EXCLUDED_FACILITY_TYPES,
-    _lookup_facility_by_name,
-    _search_welfare_center_documents,
-    _build_welfare_referenced_documents,
-    _rerank_comparison_docs,
 )
 
 # token

@@ -315,6 +315,71 @@ async def _update_user_message(messages: list, new_message: str) -> None:
             break
 
 
+def merge_assistant_reference_docs(msg: dict, referenced_documents: list) -> None:
+    """RAG/API 참조를 assistant에 반영. DB 저장 시 snippet·path는 비워 messages_json 크기를 줄인다."""
+    if not isinstance(msg, dict):
+        return
+    if not referenced_documents:
+        msg.pop("referenced_chunk_ids", None)
+        msg.pop("referenced_service_names", None)
+        md = msg.get("metadata")
+        if isinstance(md, dict):
+            md = dict(md)
+            md.pop("referenced_documents", None)
+            if md:
+                msg["metadata"] = md
+            else:
+                msg.pop("metadata", None)
+        else:
+            msg.pop("metadata", None)
+        return
+
+    chunk_ids: list[str] = []
+    service_names: list[str] = []
+    meta_docs: list[dict[str, Any]] = []
+    for d in referenced_documents:
+        if not isinstance(d, dict):
+            continue
+        cid = str(d.get("chunk_id") or d.get("id") or "").strip()
+        name = str(d.get("name") or "").strip()
+        meta_docs.append({
+            "chunk_id": cid,
+            "id": str(d.get("id") or cid),
+            "name": name,
+            "snippet": "",
+            "path": "",
+        })
+        if cid:
+            chunk_ids.append(cid)
+        if name:
+            service_names.append(name)
+
+    prev_md = msg.get("metadata")
+    md = dict(prev_md) if isinstance(prev_md, dict) else {}
+    md["referenced_documents"] = meta_docs
+    msg["metadata"] = md
+    msg["referenced_chunk_ids"] = chunk_ids
+    msg["referenced_service_names"] = service_names
+
+
+def _apply_assistant_enrichments(msg: dict, kwargs: dict) -> None:
+    if "preprocess" in kwargs:
+        p = kwargs["preprocess"]
+        if isinstance(p, dict) and p:
+            prev = msg.get("preprocess")
+            base = dict(prev) if isinstance(prev, dict) else {}
+            base.update(p)
+            base.pop("intent_reason", None)
+            msg["preprocess"] = base
+        elif p is None or p == {}:
+            msg.pop("preprocess", None)
+    if "referenced_documents" in kwargs:
+        rd = kwargs["referenced_documents"]
+        if rd is None:
+            rd = []
+        merge_assistant_reference_docs(msg, rd if isinstance(rd, list) else [])
+
+
 def _save_chat_history(chat_request: ChatRequest, assistant_message: str, processed_user_message: str = None, **kwargs) -> Optional[str]:
     """
     Save chat history. Auto-generates conv_id if missing.
@@ -323,12 +388,15 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
         chat_request: Chat request object
         assistant_message: Assistant response message
         processed_user_message: Processed user message after cleaning and standardization (for title generation)
+        kwargs: user_message, preprocess(dict), referenced_documents(list) — DB 복원·MORE_INFO 제외용 메타
 
     Returns:
         conv_id (newly created or existing)
     """
 
     user_message = kwargs.get('user_message') or processed_user_message
+    enrich_kw = {k: kwargs[k] for k in ("preprocess", "referenced_documents") if k in kwargs}
+    has_enrichments = bool(enrich_kw)
 
     user_id = chat_request.user_id
     conv_id = chat_request.conv_id
@@ -345,7 +413,8 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
 
     # 마지막 user/assistant 쌍이 중복이 아닐 때만 assistant 응답 추가
     already_saved = (
-        len(messages) >= 2
+        not has_enrichments
+        and len(messages) >= 2
         and messages[-2].get("role") == "user"
         and messages[-1].get("role") == ROLE_ASSISTANT
         and messages[-2].get("content") == user_message
@@ -353,10 +422,15 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
     )
     if not already_saved:
         if messages and messages[-1].get("role") == ROLE_ASSISTANT:
-            # 마지막이 이미 assistant이면 내용 덮어쓰기
             messages[-1]["content"] = assistant_message
+            _apply_assistant_enrichments(messages[-1], enrich_kw)
         else:
-            messages.append({"role": ROLE_ASSISTANT, "content": assistant_message})
+            entry = {"role": ROLE_ASSISTANT, "content": assistant_message}
+            _apply_assistant_enrichments(entry, enrich_kw)
+            messages.append(entry)
+    elif has_enrichments and messages and messages[-1].get("role") == ROLE_ASSISTANT:
+        messages[-1]["content"] = assistant_message
+        _apply_assistant_enrichments(messages[-1], enrich_kw)
 
 
     logger.info(f"[_save_chat_history] user_id={user_id}, conv_id={conv_id}")

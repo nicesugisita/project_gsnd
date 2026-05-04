@@ -53,7 +53,6 @@ from .pipeline_utils import (
     run_sufficiency_judgment_fast,
     should_rerun_sufficiency_judgment,
 )
-
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +77,8 @@ async def process_rag_guide_recommend(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    recommended_question_prompt: bool = False,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — guide_recommend 전용
@@ -86,10 +87,14 @@ async def process_rag_guide_recommend(
     그 외 의도는 기존 함수로 위임합니다.
     """
     # guide_recommend가 아닌 경우 기존 함수로 위임
+    _ = precomputed_search_target
 
     try:
         t_total = time.monotonic()
-        _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(message)
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
 
@@ -236,6 +241,7 @@ async def process_rag_guide_recommend(
             log_prefix="RAG/guide_recommend_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -379,6 +385,7 @@ async def process_rag_guide_recommend(
                     run_group_a=_group_a_run_okms_query,
                     run_gov=_run_gov_okms_query,
                     max_policy_pairs=1,
+                    policy_search_boost_enabled=not _skip_policy_boost,
                 )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
@@ -426,7 +433,6 @@ async def process_rag_guide_recommend(
                 gr_welfare_tel_docs = await run_welfare_tel_queries(
                     message, gr_sigun_filters, gr_eupmyeondong_filters,
                     _GR_WELFARE_TEL_PER_QUERY, "RAG/guide_recommend_v2",
-                    excluded_chunk_ids=excluded_chunk_ids,
                     timeout_sec=(
                         float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
                         if (excluded_chunk_ids or excluded_service_names)
@@ -455,7 +461,10 @@ async def process_rag_guide_recommend(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         gr_top_docs = apply_policy_priority_to_documents(
-            message, gr_top_docs, log_prefix="[RAG/guide_recommend_v2]"
+            message,
+            gr_top_docs,
+            log_prefix="[RAG/guide_recommend_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
         logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -487,6 +496,7 @@ async def process_rag_guide_recommend(
             user_region=user_region,
             user_birth_year=str(birth_year) if birth_year else "",
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
+            use_llm_recommended_prompt=recommended_question_prompt,
         )
         logger.info("[TIMING][guide_recommend] 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][guide_recommend] process_rag_guide_recommend 전체: %.3fs", time.monotonic() - t_total)
