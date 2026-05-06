@@ -67,9 +67,14 @@ class ConversationService:
             logger.error(f"Database connection error: {e}")
             raise
 
-    def create_conversation(self, user_id: str, title: str = Config.DEFAULT_CONVERSATION_TITLE) -> str:
-        """Create a new conversation session."""
+    def create_conversation(
+        self, user_id: Optional[str], title: str = Config.DEFAULT_CONVERSATION_TITLE
+    ) -> str:
+        """Create a new conversation session. user_id가 비어 있으면 /chat/completions 비로그인과 동일하게 conv_id를 소유자로 사용."""
         conv_id = str(uuid.uuid4())
+        uid = (user_id or "").strip() if isinstance(user_id, str) else ""
+        if not uid:
+            uid = conv_id
         conn = None
         try:
             conn = self._get_connection()
@@ -80,10 +85,10 @@ class ConversationService:
                 VALUES (%s, %s, %s, %s, %s)
             """
             now = datetime.now()
-            cursor.execute(query, (conv_id, user_id, title, now, now))
+            cursor.execute(query, (conv_id, uid, title, now, now))
             cursor.close()
             
-            logger.info(f"Created conversation: {conv_id} for user: {user_id}")
+            logger.info(f"Created conversation: {conv_id} for user: {uid}")
             return conv_id
         except MySQLError as e:
             logger.error(f"Error creating conversation: {e}")

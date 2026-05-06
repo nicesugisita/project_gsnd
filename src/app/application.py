@@ -6,6 +6,7 @@ Creates and configures the FastAPI application with logging, CORS, and routes.
 
 import logging
 import os
+import pathlib
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
@@ -29,12 +30,14 @@ def _setup_logging(config: Config) -> None:
     Args:
         config: Application configuration object
     """
-    log_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "logs"
-    )
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "app.log")
+
+    # Windows에서는 여러 uvicorn 프로세스(또는 여러 인스턴스)가 동일 파일로 Rotating 시
+    # rename(app.log -> app.log.1)이 WinError 32로 실패할 수 있다.
+    # 프로세스별 로그 파일로 분리하여 파일 잠금/rollover 충돌을 방지한다.
+    pid = os.getpid()
+    log_file = os.path.join(log_dir, f"app.{pid}.log")
 
     logging.basicConfig(
         level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
@@ -45,7 +48,8 @@ def _setup_logging(config: Config) -> None:
                 log_file,
                 maxBytes=LOG_MAX_BYTES,
                 backupCount=LOG_BACKUP_COUNT,
-                encoding=LOG_ENCODING
+                encoding=LOG_ENCODING,
+                delay=True,
             )
         ],
         force=True,

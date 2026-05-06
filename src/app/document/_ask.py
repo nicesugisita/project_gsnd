@@ -19,7 +19,7 @@ from app.conversation.history import get_chat_history_service
 from app.document.uploaded import get_uploaded_document_service
 from app.document.transfer import load_uploaded_text_content
 from app.shared.utils import create_error_detail, load_uploaded_qa_prompt
-from app.dependencies import _save_chat_history
+from app.dependencies import _resolve_chat_history_user_id, _save_chat_history
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +247,10 @@ async def ask_uploaded_document(
 
     # DB에서 기존 전체 history 불러오기 (누적 저장)
     history_service = get_chat_history_service(Config)
-    existing_history = history_service.get_history(conv_id) if conv_id else []
+    history_scope = _resolve_chat_history_user_id(user_id, conv_id)
+    existing_history = (
+        history_service.get_history(conv_id, history_scope) if conv_id else []
+    )
     # 새 user/assistant 메시지 append
     existing_history.append({"role": "user", "content": question.strip()})
     existing_history.append({"role": ROLE_ASSISTANT, "content": answer_text})
