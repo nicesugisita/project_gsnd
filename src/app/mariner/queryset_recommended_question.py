@@ -42,6 +42,18 @@ from app.mariner.queryset_gov_okms import (
 logger = logging.getLogger(__name__)
 
 _LOG = "recommended_question_name"
+_TARGET_DOC_YEAR = "2026"
+
+
+def _is_target_year_doc(doc: Dict[str, Any]) -> bool:
+    """추천 후속 질문 전용: 2026년 문서만 허용."""
+    if not isinstance(doc, dict):
+        return False
+    for key in ("YEAR", "APPLICATION_PERIOD", "NAME", "BUSINESS_NAME", "SERVICE_NAME"):
+        value = str(doc.get(key, "") or "").strip()
+        if _TARGET_DOC_YEAR in value:
+            return True
+    return False
 
 
 def _biz_okms_collection() -> str:
@@ -139,7 +151,7 @@ def query_okms_documents_by_display_name(
             jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY, ks, MARINER_WEIGHT_HIGH),
             jpkg_query.WhereSet(OP_OR),
             jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY, ks, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),
         ]
 
         if sigun_scriptlet_values:
@@ -172,16 +184,11 @@ def query_okms_documents_by_display_name(
 
         query.setWhere(where_set_array)
 
-        if year_filters:
-            filter_years = sorted(set(str(y).strip() for y in year_filters if str(y).strip()))
-            if filter_years:
-                min_year, max_year = filter_years[0], filter_years[-1]
-                query.setFilter([
-                    jpkg_query.FilterSet(
-                        jpype.JByte(3), "YEAR",
-                        jpype.JArray(jpype.JString)([f"{min_year}0101", f"{max_year}1231"]), 0,
-                    ),
-                ])
+        # recommended-question 전용 정책: YEAR 색인 WhereSet으로 2026년 문서만 검색
+        where_set_array += [
+            jpkg_query.WhereSet(OP_AND),
+            jpkg_query.WhereSet("YEAR", OP_HASANY, JString(_TARGET_DOC_YEAR), MARINER_WEIGHT_HIGH),
+        ]
 
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)
@@ -217,6 +224,8 @@ def query_okms_documents_by_display_name(
             doc["CHUNK_ID"] = doc.get("ID", "")
             doc["NAME"] = _build_okms_document_name(doc)
             doc["CHUNK_PATH"] = str(doc.get("CONTENT", "") or "")
+            if not _is_target_year_doc(doc):
+                continue
 
             docs.append(doc)
 
@@ -373,6 +382,8 @@ def query_gov_okms_documents_by_display_name(
             doc["CHUNK_PATH"] = _combined
             doc.setdefault("SIGUN", sigun_scriptlet_values[0] if sigun_scriptlet_values else "")
             doc.setdefault("YEAR", "")
+            if not _is_target_year_doc(doc):
+                continue
             docs.append(doc)
 
         logger.info(

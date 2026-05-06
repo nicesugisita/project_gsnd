@@ -51,6 +51,27 @@ from ._stream_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _build_assistant_preprocess_payload(
+    *,
+    user_message: str,
+    intent: str,
+    reformed_query: str | None,
+    expanded_queries: list | None,
+    search_target: str | None,
+    more_info: bool = False,
+) -> dict:
+    """히스토리 저장용 assistant preprocess 메타를 구성."""
+    final_reformed = (reformed_query or user_message or "").strip()
+    return {
+        "query": user_message,
+        "intent": intent or "general",
+        "reformed_query": final_reformed,
+        "expanded_queries": expanded_queries or ([final_reformed] if final_reformed else []),
+        "more_info": bool(more_info),
+        "search_target": search_target,
+    }
+
+
 def _get_rag_processor(intent: str, *, recommended_question_route: bool = False):
     """일반 completions는 intent로, /v1/chat/recommended-question 은 recommended_question_route 로만 분기한다."""
     if recommended_question_route:
@@ -306,12 +327,21 @@ async def _handle_rag_mode(
                     # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
                     yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
+                    preprocess_payload = _build_assistant_preprocess_payload(
+                        user_message=user_message,
+                        intent=intent,
+                        reformed_query=reformed_query,
+                        expanded_queries=expanded_queries,
+                        search_target=search_target,
+                        more_info=False,
+                    )
                     await asyncio.to_thread(
                         partial(
                             _save_chat_history,
                             chat_request,
                             assistant_content,
                             user_message,
+                            preprocess=preprocess_payload,
                             referenced_documents=referenced_documents,
                         )
                     )
@@ -327,12 +357,21 @@ async def _handle_rag_mode(
                                 logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
                                 yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                             if intent == "guide_recommend" and assistant_content:
+                                preprocess_payload = _build_assistant_preprocess_payload(
+                                    user_message=user_message,
+                                    intent=intent,
+                                    reformed_query=reformed_query,
+                                    expanded_queries=expanded_queries,
+                                    search_target=search_target,
+                                    more_info=False,
+                                )
                                 await asyncio.to_thread(
                                     partial(
                                         _save_chat_history,
                                         chat_request,
                                         assistant_content,
                                         user_message,
+                                        preprocess=preprocess_payload,
                                         referenced_documents=referenced_documents,
                                     )
                                 )
@@ -380,12 +419,21 @@ async def _handle_rag_mode(
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
         referenced_documents = _filter_referenced_documents_by_response(response_message, referenced_documents)
 
+        preprocess_payload = _build_assistant_preprocess_payload(
+            user_message=user_message,
+            intent=intent,
+            reformed_query=reformed_query,
+            expanded_queries=expanded_queries,
+            search_target=search_target,
+            more_info=False,
+        )
         conv_id = await asyncio.to_thread(
             partial(
                 _save_chat_history,
                 chat_request,
                 response_message,
                 user_message,
+                preprocess=preprocess_payload,
                 referenced_documents=referenced_documents,
             )
         )
