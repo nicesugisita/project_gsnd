@@ -4,7 +4,7 @@ Conversation management endpoints.
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.core.config import Config
@@ -12,7 +12,7 @@ from app.conversation.history import get_chat_history_service
 from app.conversation.crud import get_conversation_service
 from app.conversation.feedback import get_message_feedback_service
 from app.shared.utils import create_error_detail
-from app.dependencies import _resolve_history_user_id
+from app.dependencies import _resolve_chat_history_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +44,18 @@ async def get_conversations(user_id: str):
 
 @router.post('/v1/chat/conversations')
 async def create_conversation(request: Request):
-    """Create a new conversation."""
+    """Create a new conversation. 비로그인은 user_id 생략 가능(서버가 nologin{{conv_id}}로 저장)."""
     data = await request.json()
-    user_id = data.get("user_id")
+    raw_uid = data.get("user_id")
+    optional_uid = (
+        raw_uid.strip()
+        if isinstance(raw_uid, str) and raw_uid.strip()
+        else None
+    )
     title = data.get("title", Config.DEFAULT_CONVERSATION_TITLE)
 
-    if not user_id:
-        return JSONResponse(
-            content={
-                "detail": [create_error_detail(
-                    loc=["body"],
-                    msg="user_id is required",
-                    type_="value_error",
-                )]
-            },
-            status_code=400,
-        )
-
     conv_service = get_conversation_service(Config)
-    conv_id = conv_service.create_conversation(user_id=user_id, title=title)
+    conv_id = conv_service.create_conversation(user_id=optional_uid, title=title)
 
     # 새 대화 생성 시 인사말을 첫 번째 assistant 메시지로 저장
     greeting_message = {
@@ -70,7 +63,8 @@ async def create_conversation(request: Request):
         "content": Config.GREETING_MESSAGE,
     }
     history_service = get_chat_history_service(Config)
-    history_service.upsert_history(user_id=user_id, conv_id=conv_id, messages=[greeting_message])
+    persist = _resolve_chat_history_user_id(optional_uid, conv_id)
+    history_service.upsert_history(user_id=persist, conv_id=conv_id, messages=[greeting_message])
 
     return JSONResponse(
         content={"conv_id": conv_id, "title": title},
@@ -79,11 +73,21 @@ async def create_conversation(request: Request):
 
 
 @router.get('/v1/chat/conversations/{conv_id}/messages')
-async def get_conversation_messages(conv_id: str):
-    """Get messages in a specific conversation."""
+async def get_conversation_messages(
+    conv_id: str,
+    user_id: str | None = Query(
+        None,
+        description="있으면 해당 user_id 행만 조회. 생략 시 서버가 nologin{conv_id} 등을 우선한다.",
+    ),
+):
+    """대화 메시지 조회. user_id 생략 시에도 채팅 비로그인과 동일 규칙으로 조회된다."""
 
     history_service = get_chat_history_service(Config)
-    messages = history_service.get_history(conv_id=conv_id)
+    uid = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+    if uid:
+        messages = history_service.get_history(conv_id=conv_id, user_id=uid)
+    else:
+        messages = history_service.get_history(conv_id=conv_id)
 
     # 조항 : assistant 메시지에 action 가이드를 추가하여 클라이언트가 버튼을 띄우게 함
     for msg in messages:
@@ -152,7 +156,7 @@ async def save_message_feedback(request: Request):
 
     raw_user_id = data.get("user_id")
     user_id = raw_user_id.strip() if isinstance(raw_user_id, str) and raw_user_id.strip() else None
-    persist_user_id = _resolve_history_user_id(user_id)
+    persist_user_id = _resolve_chat_history_user_id(user_id, conv_id)
     conv_id = (data.get("conv_id") or "").strip()
     action = (data.get("action") or "").strip().lower()
     message_index = data.get("message_index")
@@ -191,7 +195,7 @@ async def save_message_feedback(request: Request):
 
     history_service = get_chat_history_service(Config)
     # 기존 히스토리를 가져와서 message_index에 해당하는 assistant 메시지에 feedback 반영 후 전체 히스토리 업데이트
-    messages = history_service.get_history(conv_id=conv_id)
+    messages = history_service.get_history(conv_id=conv_id, user_id=persist_user_id)
 
     # 사용자가 찍은 인덱스를 찾아서 수정
     if 0 <= message_index < len(messages):
@@ -227,7 +231,13 @@ async def save_message_feedback(request: Request):
 
 
 @router.get('/v1/chat/history')
-async def chat_history(conv_id: str):
+async def chat_history(
+    conv_id: str,
+    user_id: str | None = Query(
+        None,
+        description="있으면 해당 소유 행만 조회(게스트: nologin{conv_id}).",
+    ),
+):
     """
     Get chat history for a conversation (deprecated - use /conversations/{conv_id}/messages).
     """
@@ -244,7 +254,11 @@ async def chat_history(conv_id: str):
         )
 
     history_service = get_chat_history_service(Config)
-    messages = history_service.get_history(conv_id=conv_id)
+    uid = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+    if uid:
+        messages = history_service.get_history(conv_id=conv_id, user_id=uid)
+    else:
+        messages = history_service.get_history(conv_id=conv_id)
     return JSONResponse(
         content={
             "conv_id": conv_id,

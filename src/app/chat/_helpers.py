@@ -100,7 +100,8 @@ async def _run_query_recreation(
     되묻기 응답인 경우 원질문 + 되묻기 + 답변을 조합해 완성 질의를 생성합니다.
 
     Returns:
-        (user_message, skip_clarification_check)
+        (user_message, skip_clarification_check).
+        skip_clarification_check는 과거 통합 전처리에 메시지를 생략할 때 썼으며, 현재는 호환용으로만 유지한다.
     """
     # 짧은 후속 질문 감지: 20자 이하이고 이전 대화가 4턴 이상이면 맥락 재구성
     _prior_turns = [m for m in chat_request.messages[:-1] if m.get("role") in (ROLE_USER, ROLE_ASSISTANT)]

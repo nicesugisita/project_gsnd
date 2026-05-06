@@ -9,17 +9,17 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import Config
 
-from app.core.constants import ROLE_ASSISTANT
 from app.shared.schemas import ChatRequest
 from app.chat.service import clean_query_text, convert_korean_to_standard
 from app.conversation.history import get_chat_history_service
 from app.chat.user_session import get_user_session_service
 from app.shared.utils import build_chat_response
 from app.dependencies import (
-    _resolve_history_user_id,
+    _resolve_chat_history_user_id,
+    _save_chat_history,
     _update_user_message,
+    chat_user_id_requires_nologin_canonical,
     ensure_conversation_exists,
-    merge_assistant_reference_docs,
 )
 from ._stream_utils import _build_streaming_response
 
@@ -44,7 +44,30 @@ def _get_conv_lock(conv_id: str) -> asyncio.Lock:
 def _do_merge(chat_request: ChatRequest) -> None:
     """히스토리 병합 및 conv_id 초기화 실제 로직 (락 내부에서 실행)."""
     history_service = get_chat_history_service(Config)
-    db_history = history_service.get_history(chat_request.conv_id) or []
+
+    # conv_id 우선 고정 후 조회해야 비로그인도 로그인과 같이 행 단일성이 보장된다.
+    if not chat_request.conv_id:
+        chat_request.conv_id = str(uuid.uuid4())
+
+    cid = str(chat_request.conv_id).strip()
+    canon = cid
+    guest = chat_user_id_requires_nologin_canonical(chat_request.user_id)
+
+    # 비로그인: 세션은 conv_id만 있으면 됨 → 히스토리 행 항상 (user_id=cid, conv_id=cid) 한 줄
+    if guest:
+        chat_request.user_id = canon
+        history_scope = canon
+    else:
+        uid = chat_request.user_id.strip() if isinstance(chat_request.user_id, str) else ""
+        if uid.startswith("nologin"):
+            chat_request.user_id = canon
+            history_scope = canon
+        elif uid:
+            history_scope = uid
+        else:
+            history_scope = _resolve_chat_history_user_id(chat_request.user_id, cid)
+
+    db_history = history_service.get_history(cid, history_scope) or []
     front_messages = chat_request.messages or []
 
     def msg_key(m):
@@ -64,9 +87,8 @@ def _do_merge(chat_request: ChatRequest) -> None:
     chat_request.messages = db_history + new_messages
     logger.info(f"[MULTI TURN MERGED] {chat_request.messages}")
 
-    if not chat_request.conv_id:
-        chat_request.conv_id = str(uuid.uuid4())
-    ensure_conversation_exists(chat_request.conv_id, chat_request.user_id, chat_request.messages)
+    persist_for_conv = _resolve_chat_history_user_id(chat_request.user_id, cid)
+    ensure_conversation_exists(cid, persist_for_conv, chat_request.messages)
 
 
 async def _merge_and_init_conversation(chat_request: ChatRequest) -> None:
@@ -141,37 +163,31 @@ def _save_stream_history(
     preprocess: dict = None,
     referenced_documents: list = None,
 ) -> None:
-    """스트리밍 응답 완료 후 대화 히스토리를 저장합니다."""
+    """스트리밍 응답 완료 후 대화 히스토리를 저장합니다.
+
+    merge 단계에서 채운 ``chat_request.messages``(전체 스레드)를 기준으로 저장한다.
+    예전 구현은 DB ``get_history`` 결과만 이어 붙여 overwrite 했기 때문에, 조회가 빈 배열이면
+    첫 턴이 사라지고 ``더 알려줘``(MORE_INFO) 직전 assistant/preprocess를 복구하지 못했다.
+    """
     if not (original_user_message or assistant_content.strip()):
         return
     try:
-        persist_user_id = _resolve_history_user_id(chat_request.user_id)
-        history_service = get_chat_history_service(Config)
-        existing_history = history_service.get_history(chat_request.conv_id) or []
-        if not existing_history or not (
-            existing_history[-1].get("role") == "user"
-            and existing_history[-1].get("content") == original_user_message
-        ):
-            existing_history.append({"role": "user", "content": original_user_message})
-        assistant_entry = {"role": ROLE_ASSISTANT, "content": assistant_content}
+        extra: dict = {}
         if isinstance(preprocess, dict) and preprocess:
-            assistant_entry["preprocess"] = {
-                k: v for k, v in preprocess.items() if k != "intent_reason"
-            }
+            extra["preprocess"] = preprocess
         if referenced_documents is not None:
-            merge_assistant_reference_docs(assistant_entry, referenced_documents)
-        existing_history.append(assistant_entry)
-        history_service.upsert_history(
-            user_id=persist_user_id,
-            conv_id=chat_request.conv_id,
-            messages=existing_history,
-            overwrite=True,
+            extra["referenced_documents"] = referenced_documents
+        _save_chat_history(
+            chat_request,
+            assistant_content,
+            processed_user_message=original_user_message,
+            user_message=original_user_message,
+            **extra,
         )
-        ensure_conversation_exists(
-            chat_request.conv_id,
+        logger.info(
+            "[History Saved/stream] user_id=%s, conv_id=%s",
             chat_request.user_id,
-            existing_history,
+            chat_request.conv_id,
         )
-        logger.info(f"[History Saved] user_id={chat_request.user_id}, conv_id={chat_request.conv_id}")
     except Exception as save_err:
         logger.error(f"히스토리 저장 실패: {save_err}", exc_info=True)

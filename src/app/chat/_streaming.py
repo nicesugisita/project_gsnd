@@ -214,6 +214,7 @@ async def _streaming_chat_flow(
     _timings["clarification_question"] = ""
     _preprocess_to_persist: dict = {}
     _persist_referenced_documents: Optional[list] = None
+    _history_saved = False
 
     try:
         logger.info(
@@ -314,7 +315,7 @@ async def _streaming_chat_flow(
         if is_clarification:
             yield build_status_message(STATUS_QUERY_RECREATION)
         _t = time.monotonic()
-        user_message, skip_clarification_check = await _run_query_recreation(user_message, chat_request, is_clarification)
+        user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
         _timings["t_query_recreation"] = round(time.monotonic() - _t, 3)
         logger.info("[TIMING] 쿼리 재구성: %.3fs", _timings["t_query_recreation"])
 
@@ -366,8 +367,9 @@ async def _streaming_chat_flow(
                 logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (stream)")
             else:
                 yield build_status_message("질문을 재구성하고 있습니다")
-                _preprocess_messages = None if skip_clarification_check else chat_request.messages
-                pp = await run_unified_preprocess(user_message, _preprocess_messages, use_rag)
+                pp = await run_unified_preprocess(
+                    user_message, chat_request.messages, use_rag
+                )
             _timings["t_unified_preprocess"] = pp.elapsed
             user_message = pp.query
             await _update_user_message(chat_request.messages, user_message)
@@ -519,6 +521,19 @@ async def _streaming_chat_flow(
         if referenced_documents:
             yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
 
+        # NOTE:
+        # 클라이언트가 [DONE] 직후 연결을 닫으면 finally 블록의 await 저장이 취소될 수 있다.
+        # 따라서 [DONE] 전 선저장을 시도하고, finally는 보조 저장으로만 동작한다.
+        await asyncio.to_thread(
+            _save_stream_history,
+            chat_request,
+            original_user_message,
+            assistant_content,
+            _preprocess_to_persist or None,
+            _persist_referenced_documents,
+        )
+        _history_saved = True
+
         yield "data: [DONE]\n\n"
 
     finally:
@@ -535,12 +550,13 @@ async def _streaming_chat_flow(
             await asyncio.to_thread(_write_timing_csv, _timings)
         except Exception as e:
             logger.warning("[TIMING CSV] 기록 실패 (파일 잠금?): %s", e)
-        await asyncio.to_thread(
-            _save_stream_history,
-            chat_request,
-            original_user_message,
-            assistant_content,
-            _preprocess_to_persist or None,
-            _persist_referenced_documents,
-        )
+        if not _history_saved:
+            await asyncio.to_thread(
+                _save_stream_history,
+                chat_request,
+                original_user_message,
+                assistant_content,
+                _preprocess_to_persist or None,
+                _persist_referenced_documents,
+            )
         reset_log_context(_log_context_tokens)

@@ -106,10 +106,17 @@ def get_excluded_info_from_history(messages: list) -> Tuple[List[str], List[str]
 
 
 def get_base_user_query_from_history(messages: list) -> str:
-    """연속 MORE_INFO 구간의 기준이 되는 최근 '원질문' user 본문."""
+    """연속 MORE_INFO 구간의 기준이 되는 최근 '원질문' user 본문.
+
+    NOTE:
+    일부 경로에서 assistant preprocess.more_info 메타가 누락되면 latest_minfo가 None이 되어
+    기준 질문을 찾지 못하고 빈 문자열이 반환될 수 있다. 그 경우 최근 user 발화와
+    그 이전 user 발화를 구조적으로 구분해 기준 질문을 보강한다.
+    """
     first_in_reverse = True
     saw_assistant = False
     latest_minfo: Optional[bool] = None
+    user_candidates: List[str] = []
     for msg in reversed(messages or []):
         role = msg.get("role")
         if role == ROLE_ASSISTANT:
@@ -122,6 +129,7 @@ def get_base_user_query_from_history(messages: list) -> str:
         content = str(msg.get("content", "") or "").strip()
         if not content:
             continue
+        user_candidates.append(content)
         if first_in_reverse:
             first_in_reverse = False
             continue
@@ -129,6 +137,14 @@ def get_base_user_query_from_history(messages: list) -> str:
             continue
         if latest_minfo is False:
             return content
+    # fallback: more_info 메타가 누락된 경우
+    # - user_candidates[0]: 가장 최근 user(대개 "더 알려줘")
+    # - user_candidates[1]: 그 이전 user(원질문 후보)
+    # 하드코딩 키워드 없이 대화 구조만으로 원질문을 우선 복원한다.
+    if len(user_candidates) >= 2:
+        return user_candidates[1]
+    if user_candidates:
+        return user_candidates[0]
     return ""
 
 

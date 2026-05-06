@@ -123,44 +123,127 @@ class ChatHistoryService:
             if conn:
                 conn.close()
 
-    def get_history(self, conv_id: str) -> List[Dict[str, Any]]:
-        """Get chat history for a conversation."""
+    def _postprocess_loaded_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for msg in messages:
+            if msg.get("role") == ROLE_ASSISTANT:
+                if "action" not in msg:
+                    msg["action"] = {
+                        "type": Config.ASSISTANT_ACTION_FEEDBACK,
+                        "options": Config.ASSISTANT_ACTION_FEEDBACK_OPTIONS,
+                    }
+        return messages
+
+    def get_history(
+        self, conv_id: str, user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get chat history for a conversation.
+
+        user_id:
+            None — 비로그인 canonical(conv_id) 행 및 익명 테이블을 먼저 시도한 뒤, 없으면 메인·익명 UNION의 updated_at 최신 1행.
+            그 외 — 해당 user_id(또는 익명 마커)만 조회한다.
+        """
+        if not conv_id:
+            return []
+
         conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+            row = None
 
-            query = f"""
-                SELECT messages_json FROM (
-                    SELECT messages_json, updated_at FROM {HISTORY_TABLE}
-                    WHERE conv_id = %s
-                    UNION ALL
-                    SELECT messages_json, updated_at FROM {ANONYMOUS_HISTORY_TABLE}
-                    WHERE conv_id = %s
-                ) AS all_histories
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """
-            cursor.execute(query, (conv_id, conv_id))
+            if user_id is None:
+                # 프론트가 user_id/query를 안 보내도 채팅(비로그인)과 같은 conv_id 소유 행을 우선 사용한다.
+                guest_scoped = conv_id
+                cursor.execute(
+                    f"""
+                    SELECT messages_json FROM {HISTORY_TABLE}
+                    WHERE conv_id = %s AND user_id = %s
+                    """,
+                    (conv_id, guest_scoped),
+                )
+                row = cursor.fetchone()
+                # 하위호환: 과거 nologin{conv_id} 데이터 fallback
+                if not row or not row[0]:
+                    old_guest_scoped = f"nologin{conv_id}"
+                    cursor.execute(
+                        f"""
+                        SELECT messages_json FROM {HISTORY_TABLE}
+                        WHERE conv_id = %s AND user_id = %s
+                        """,
+                        (conv_id, old_guest_scoped),
+                    )
+                    row = cursor.fetchone()
+                if not row or not row[0]:
+                    cursor.execute(
+                        f"SELECT messages_json FROM {ANONYMOUS_HISTORY_TABLE} WHERE conv_id = %s",
+                        (conv_id,),
+                    )
+                    row = cursor.fetchone()
+                if row and row[0]:
+                    messages = json.loads(row[0])
+                    cursor.close()
+                    return self._postprocess_loaded_messages(messages)
 
-            row = cursor.fetchone()
+                query = f"""
+                    SELECT messages_json FROM (
+                        SELECT messages_json, updated_at FROM {HISTORY_TABLE}
+                        WHERE conv_id = %s
+                        UNION ALL
+                        SELECT messages_json, updated_at FROM {ANONYMOUS_HISTORY_TABLE}
+                        WHERE conv_id = %s
+                    ) AS all_histories
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """
+                cursor.execute(query, (conv_id, conv_id))
+                row = cursor.fetchone()
+            else:
+                scope = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+                if not scope:
+                    cursor.close()
+                    return []
+
+                guest_scoped = conv_id
+                if scope == ANONYMOUS_USER_MARKER:
+                    cursor.execute(
+                        f"SELECT messages_json FROM {ANONYMOUS_HISTORY_TABLE} WHERE conv_id = %s",
+                        (conv_id,),
+                    )
+                    row = cursor.fetchone()
+                else:
+                    cursor.execute(
+                        f"""
+                        SELECT messages_json FROM {HISTORY_TABLE}
+                        WHERE conv_id = %s AND user_id = %s
+                        """,
+                        (conv_id, scope),
+                    )
+                    row = cursor.fetchone()
+                    if (not row or not row[0]) and scope == guest_scoped:
+                        # 하위호환: 과거 nologin{conv_id} 데이터 fallback
+                        old_guest_scoped = f"nologin{conv_id}"
+                        cursor.execute(
+                            f"""
+                            SELECT messages_json FROM {HISTORY_TABLE}
+                            WHERE conv_id = %s AND user_id = %s
+                            """,
+                            (conv_id, old_guest_scoped),
+                        )
+                        row = cursor.fetchone()
+                    if (not row or not row[0]) and scope == guest_scoped:
+                        cursor.execute(
+                            f"SELECT messages_json FROM {ANONYMOUS_HISTORY_TABLE} WHERE conv_id = %s",
+                            (conv_id,),
+                        )
+                        row = cursor.fetchone()
+
             cursor.close()
+
             if not row or not row[0]:
                 return []
-            
-            # 1. JSON 문자열을 파이썬 리스트로 변환
-            messages = json.loads(row[0])
 
-            # 2. 메시지 리스트를 순회하며 assistant 에게 action 추가 
-            for msg in messages:
-                if msg.get("role") == ROLE_ASSISTANT:
-                    # 기존에 action 이 없을 경우에만 기본값 세팅 (혹은 덮어쓰기)
-                    if "action" not in msg :
-                        msg["action"] = {
-                            "type": Config.ASSISTANT_ACTION_FEEDBACK,
-                            "options": Config.ASSISTANT_ACTION_FEEDBACK_OPTIONS
-                        }
-            return messages
+            messages = json.loads(row[0])
+            return self._postprocess_loaded_messages(messages)
 
         except MySQLError as e:
             logger.error(f"Error fetching chat history: {e}")

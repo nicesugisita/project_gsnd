@@ -1,0 +1,18 @@
+24402: 2026-05-06 15:11:36,814 [INFO] app.chat.router [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [Chat Request] endpoint=completions user_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af stream=True mode=None
+24403: 2026-05-06 15:11:36,815 [DEBUG] app.chat.router [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [Chat Request] first_message_preview=진주 70대 노인 받을 수 있는 복지 알려줘
+24407: 2026-05-06 15:11:36,889 [INFO] app.chat._conversation_ctx [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [MULTI TURN MERGED] [{'role': 'user', 'content': '진주 70대 노인 받을 수 있는 복지 알려줘'}]
+24416: 2026-05-06 15:11:37,171 [DEBUG] app.chat.routing [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [NextIntent] 이전 assistant 없음 → MORE_INFO 불가, LLM 생략
+24417: 2026-05-06 15:11:37,171 [DEBUG] app.chat._streaming [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [MoreResults] conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af | 보조분류 next_intent=OTHER | re_query=진주 70대 노인 받을 수 있는 복지 알려줘
+24457: 2026-05-06 15:11:38,164 [INFO] app.chat._streaming [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [SigunCheck/stream] use_rag=True, pre_resolved=False
+24458: 2026-05-06 15:11:38,164 [INFO] app.chat.sigun [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [check_sigun] 호출됨 | query='진주 70대 노인 받을 수 있는 복지 알려줘' | messages 수=1
+24459: 2026-05-06 15:11:38,165 [INFO] app.chat.sigun [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [check_sigun] 히스토리 추출 결과: ['경상남도 진주시']
+24462: 2026-05-06 15:11:38,167 [INFO] app.chat._streaming [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [SigunCheck/stream] sigun_filters=['경상남도 진주시']
+24790: 2026-05-06 15:12:23,373 [INFO] app.chat.router [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [Chat Request] endpoint=completions user_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af stream=True mode=None
+24791: 2026-05-06 15:12:23,374 [DEBUG] app.chat.router [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [Chat Request] first_message_preview=더 알려줘
+24795: 2026-05-06 15:12:23,474 [INFO] app.chat._conversation_ctx [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [MULTI TURN MERGED] [{'role': 'user', 'content': '더 알려줘'}]
+24803: 2026-05-06 15:12:23,692 [DEBUG] app.chat.routing [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [NextIntent] 이전 assistant 없음 → MORE_INFO 불가, LLM 생략
+24804: 2026-05-06 15:12:23,692 [DEBUG] app.chat._streaming [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [MoreResults] conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af | 보조분류 next_intent=OTHER | re_query=더 알려줘
+24844: 2026-05-06 15:12:24,678 [INFO] app.chat._streaming [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [SigunCheck/stream] use_rag=True, pre_resolved=False
+24845: 2026-05-06 15:12:24,678 [INFO] app.chat.sigun [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [check_sigun] 호출됨 | query='더 알려줘' | messages 수=1
+24846: 2026-05-06 15:12:24,679 [INFO] app.chat.sigun [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [check_sigun] 히스토리 추출 결과: []
+24847: 2026-05-06 15:12:24,679 [INFO] app.chat.sigun [conv_id=1569ef57-61d4-409e-9b79-7c3a2b6db3af] - [check_sigun] 직전 assistant 보강 결과: []
