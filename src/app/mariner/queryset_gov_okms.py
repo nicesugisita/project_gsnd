@@ -12,12 +12,12 @@ from jpype import JString
 
 from app.core.config import Config
 from app.core.constants import (
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_FILTER,
-    MARINER_WS_NOT,
-    MARINER_WS_EXACT,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_AND,
+    OP_NOT,
+    OP_INT_SUMMATION,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
@@ -146,20 +146,20 @@ def query_gov_okms_documents(
 
         # WHERE: 4-field OR (sample code 기준)
         where_set_array = [
-            jpkg_query.WhereSet(MARINER_WS_OR),                              # OR (
+            jpkg_query.WhereSet(OP_BRACE_OPEN),                              # OR (
             jpkg_query.WhereSet("SERVICE_NAME_KO", 2,  ks, 0.7),            #   서비스명 키워드
-            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
+            jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  ks, 0.3),            #   텍스트 키워드
-            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
+            jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks, 0.3),                 #   서비스명 벡터
-            jpkg_query.WhereSet(MARINER_WS_AND),                             #   OR
+            jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_MI",   96, ks, 0.3),            #   텍스트 벡터
-            jpkg_query.WhereSet(MARINER_WS_END),                             # )
+            jpkg_query.WhereSet(OP_BRACE_CLOSE),                             # )
         ]
 
         if mapped_lifecycle:
             where_set_array += [
-                jpkg_query.WhereSet(MARINER_WS_FILTER),
+                jpkg_query.WhereSet(OP_AND),
                 jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
             ]
 
@@ -176,8 +176,8 @@ def query_gov_okms_documents(
             )
             for chunk_id in excluded_values:
                 where_set_array += [
-                    jpkg_query.WhereSet(MARINER_WS_NOT),
-                    jpkg_query.WhereSet("SERVICE_ID", MARINER_WS_EXACT, chunk_id, 0),
+                    jpkg_query.WhereSet(OP_NOT),
+                    jpkg_query.WhereSet("SERVICE_ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
         query.setWhere(where_set_array)

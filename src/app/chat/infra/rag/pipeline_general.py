@@ -48,7 +48,12 @@ from app.chat.routing import (
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
-from .pipeline_utils import collect_okms_groupa_and_gov_docs, collect_okms_groupa_fallback_docs
+from .pipeline_utils import (
+    collect_okms_groupa_and_gov_docs,
+    collect_okms_groupa_fallback_docs,
+    resolve_fallback_max_expanded_queries,
+    run_sufficiency_judgment_fast,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,7 @@ async def process_rag_general(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — general 전용
@@ -82,8 +88,14 @@ async def process_rag_general(
     그 외 의도는 기존 함수로 위임합니다.
     """
 
+    _ = precomputed_search_target
+
     try:
         t_total = time.monotonic()
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _GEN_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
 
         # Step 1: 쿼리 확장 (Mariner 검색 전)
         if precomputed_expanded_queries:
@@ -118,7 +130,8 @@ async def process_rag_general(
             triples_list = [filter_okms_keywords(precomputed_keywords)]
             if len(expanded_queries) > 1:
                 triples_list.extend([[] for _ in range(len(expanded_queries) - 1)])
-            logger.info("[RAG/general_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+            logger.info("[RAG/general_v2] 사전 계산된 키워드 사용: %d개", len(precomputed_keywords or []))
+            logger.debug("[RAG/general_v2] 사전 계산된 키워드 상세: %s", precomputed_keywords)
         else:
             triples_list = await asyncio.gather(*[extract_triples(eq) for eq in expanded_queries])
             triples_list = [filter_okms_keywords(kws) for kws in triples_list]
@@ -233,6 +246,7 @@ async def process_rag_general(
             log_prefix="RAG/general_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         logger.info("[TIMING][general] Step5-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -277,6 +291,7 @@ async def process_rag_general(
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_run_okms_fallback,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info("[TIMING][general] Step6-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
 
@@ -292,11 +307,13 @@ async def process_rag_general(
         # Step 6-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await retrieval_sufficiency_judgment(
+        okms_sufficiency = await run_sufficiency_judgment_fast(
+            judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=okms_final,
+            log_prefix="RAG/general_v2",
         )
         logger.info("[TIMING][general] Step6-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -326,7 +343,7 @@ async def process_rag_general(
                 _candidates = await expand_query(reformed_query)
             logger.info("[TIMING][general] Step6-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             fallback_expanded_queries = dedupe_cap_expanded_queries(
-                _candidates or [], reformed_query=reformed_query
+                _candidates or [], max_n=_GEN_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
             )
             if fallback_expanded_queries:
                 logger.info("[RAG/general_v2] fallback 확장 쿼리 적용: %d개", len(fallback_expanded_queries))
@@ -342,7 +359,11 @@ async def process_rag_general(
             welfare_tel_docs = await run_welfare_tel_queries(
                 message, gen_sigun_filters, gen_eupmyeondong_filters,
                 _WELFARE_TEL_PER_QUERY, "RAG/general_v2",
-                excluded_chunk_ids=excluded_chunk_ids,
+                timeout_sec=(
+                    float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
+                    if (excluded_chunk_ids or excluded_service_names)
+                    else None
+                ),
             )
             logger.info("[TIMING][general] Step7 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
             logger.info(f"[RAG/general_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
@@ -356,11 +377,13 @@ async def process_rag_general(
                 reverse=True,
             )
             _t = time.monotonic()
-            welfare_sufficiency = await retrieval_sufficiency_judgment(
+            welfare_sufficiency = await run_sufficiency_judgment_fast(
+                judge_fn=retrieval_sufficiency_judgment,
                 user_question=message,
                 intent=intent,
                 collection_name=Config.RAG_WELFARE_TEL_COLLECTION,
                 docs=welfare_combined,
+                log_prefix="RAG/general_v2",
             )
             logger.info("[TIMING][general] Step7-S OUR_REGION_TEL 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
             logger.info(
@@ -445,7 +468,10 @@ async def process_rag_general(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message, top_docs, log_prefix="[RAG/general_v2]"
+            message,
+            top_docs,
+            log_prefix="[RAG/general_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=gen_sigun_filters)
         logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -463,7 +489,10 @@ async def process_rag_general(
                 )
                 _t = time.monotonic()
                 lower_docs = apply_policy_priority_to_documents(
-                    message, lower_docs, log_prefix="[RAG/general_v2][C3]"
+                    message,
+                    lower_docs,
+                    log_prefix="[RAG/general_v2][C3]",
+                    apply_enabled=not _skip_policy_boost,
                 )
                 top_docs = await filter_irrelevant_docs(
                     reformed_query, lower_docs, sigun_filters=gen_sigun_filters
@@ -492,6 +521,8 @@ async def process_rag_general(
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_run_okms_fallback,
+                max_policy_pairs=1,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info(
                 "[TIMING][general] Step7-C-4 재검색: %.3fs", time.monotonic() - _t
@@ -517,7 +548,10 @@ async def process_rag_general(
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
                 fb_pool = apply_policy_priority_to_documents(
-                    message, fb_pool, log_prefix="[RAG/general_v2][C4]"
+                    message,
+                    fb_pool,
+                    log_prefix="[RAG/general_v2][C4]",
+                    apply_enabled=not _skip_policy_boost,
                 )
 
                 _t = time.monotonic()
@@ -563,6 +597,7 @@ async def process_rag_general(
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
+            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][general] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][general] process_rag_general 전체: %.3fs", time.monotonic() - t_total)

@@ -76,21 +76,36 @@ def _format_document_for_prompt(doc: Dict[str, Any], index: int, max_doc_chars: 
 
 
 def _format_facility_for_prompt(doc: Dict[str, Any], index: int) -> str:
-    """복지시설 문서를 프롬프트 블록으로 포맷팅"""
+    """복지 시설 문서 포맷 — classification_search_prompt §5-1·§8 [시설 정보] 형식"""
     name = str(doc.get("FACILITY_NAME", "") or "").strip() or "정보 없음"
     facility_type = str(doc.get("FACILITY_TYPE", "") or "").strip() or "정보 없음"
     address = str(doc.get("ADDRESS", "") or "").strip() or "정보 없음"
-    tel = str(doc.get("TEL", "") or "").strip()
-    homepage = str(doc.get("HOMEPAGE", "") or "").strip()
+    tel = str(doc.get("TEL", "") or "").strip() or "정보 없음"
+    homepage = str(doc.get("HOMEPAGE", "") or "").strip() or "정보 없음"
 
-    lines = [
-        f"[시설 {index}]",
-        f"- 시설명: {name}",
-        f"- 시설유형: {facility_type}",
-        f"- 주소: {address}",
-    ]
-    if tel:
-        lines.append(f"- 전화: {tel}")
-    if homepage:
-        lines.append(f"- 홈페이지: {homepage}")
-    return "\n".join(lines) + "\n\n"
+    return (
+        f"[시설 정보]\n"
+        f"{index}. {name}\n"
+        f"- 시설유형: {facility_type}\n"
+        f"- 주소: {address}\n"
+        f"- 연락처: {tel}\n"
+        f"- 홈페이지: {homepage}\n\n"
+    )
+
+
+def _format_our_region_tel_for_prompt(doc: Dict[str, Any], index: int) -> str:
+    """OUR_REGION_TEL 포맷 — classification_search_prompt §5-2·§8 [행복복지센터 연락처 정보] 형식"""
+    sigun = str(doc.get("SIGUN", "") or "").strip() or "정보 없음"
+    center = str(doc.get("CENTER", "") or "").strip() or "정보 없음"
+    eup = str(doc.get("EUPMYEONDONG", "") or "").strip() or "정보 없음"
+    addr = str(doc.get("ADDRESS", "") or "").strip() or "정보 없음"
+    tel = str(doc.get("TEL", "") or "").strip() or "정보 없음"
+
+    return (
+        f"[행복복지센터 연락처 정보]\n"
+        f"{index}. {center}\n"
+        f"- 시군: {sigun}\n"
+        f"- 읍면동: {eup}\n"
+        f"- 주소: {addr}\n"
+        f"- 전화: {tel}\n\n"
+    )

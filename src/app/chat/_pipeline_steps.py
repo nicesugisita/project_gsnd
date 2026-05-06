@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from app.chat.service import unified_preprocess
+from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm.judgment import pre_check
 from app.chat.lifecycle import check_lifecycle
 from app.chat.sigun import check_sigun, check_out_of_scope_region
@@ -40,6 +41,7 @@ class PreprocessResult:
     expanded_queries: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     elapsed: float = 0.0
+    search_target: Optional[str] = None
 
 
 async def run_pre_check(
@@ -98,6 +100,26 @@ def run_sigun_check(
     return SigunCheckResult(filters=filters or None, need_clarify=need_ask, ask_message=ask_msg)
 
 
+def build_preprocess_skip_unified_recommended_question(user_message: str) -> PreprocessResult:
+    """추천 질문 후속: 통합 전처리 LLM 없이 guide_recommend RAG에 필요한 최소 필드만 구성."""
+    try:
+        kw = extract_nouns(user_message)
+    except Exception:
+        kw = []
+    q = (user_message or "").strip()
+    expanded = [q] if q else []
+    return PreprocessResult(
+        query=q,
+        intent="guide_recommend",
+        intent_reason="recommended_question_skip_unified",
+        reformed_query=q,
+        expanded_queries=expanded,
+        keywords=list(kw) if kw else [],
+        elapsed=0.0,
+        search_target=None,
+    )
+
+
 async def run_unified_preprocess(
     user_message: str,
     messages: Optional[list],
@@ -116,6 +138,7 @@ async def run_unified_preprocess(
         expanded_queries=result.get("expanded_queries") or [],
         keywords=result.get("keywords") or [],
         elapsed=elapsed,
+        search_target=result.get("search_target"),
     )
 
 

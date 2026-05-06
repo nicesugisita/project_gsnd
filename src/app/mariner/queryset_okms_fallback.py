@@ -14,13 +14,13 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_OR,
-    MARINER_WS_AND,
-    MARINER_WS_END,
-    MARINER_WS_FILTER,
-    MARINER_WS_NOT,
-    MARINER_WS_BM25,
-    MARINER_WS_EXACT,
+    OP_BRACE_OPEN,
+    OP_OR,
+    OP_BRACE_CLOSE,
+    OP_AND,
+    OP_NOT,
+    OP_HASANY,
+    OP_INT_SUMMATION,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
     MARINER_WEIGHT_LOW,
@@ -191,34 +191,34 @@ def _query_dual_documents(
                 logger.warning(f"[Mariner/GroupA/FB] keyword가 비어 있어 검색을 건너뜁니다.")
             else:
                 where_set_array = [
-                    jpkg_query.WhereSet(MARINER_WS_OR),                                              # OR (
-                    jpkg_query.WhereSet("BUSINESS_NAME_KO", MARINER_WS_BM25,  ks, ws["biz_ko"]),      #   사업명 키워드
-                    jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
+                    jpkg_query.WhereSet(OP_BRACE_OPEN),                                              # OR (
+                    jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY,  ks, ws["biz_ko"]),      #   사업명 키워드
+                    jpkg_query.WhereSet(OP_OR),                                              #   OR
                     jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,  ks, ws["txt_ko"]),      #   텍스트 키워드
-                    jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
-                    jpkg_query.WhereSet("BUSINESS_NAME_MI", MARINER_WS_BM25,  ks, ws["biz_mi"]),      #   사업명 벡터
-                    jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
+                    jpkg_query.WhereSet(OP_OR),                                              #   OR
+                    jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY,  ks, ws["biz_mi"]),      #   사업명 벡터
+                    jpkg_query.WhereSet(OP_OR),                                              #   OR
                     jpkg_query.WhereSet("TEXT_CHUNK_MI",    96, ks, ws["txt_mi"]),      #   텍스트 벡터
-                    jpkg_query.WhereSet(MARINER_WS_AND),                                              #   OR
+                    jpkg_query.WhereSet(OP_OR),                                              #   OR
                     jpkg_query.WhereSet("SIGUN",            96, ks, ws["sigun"]),       #   시군 벡터
-                    jpkg_query.WhereSet(MARINER_WS_END),                                             # )
+                    jpkg_query.WhereSet(OP_BRACE_CLOSE),                                             # )
                 ]
 
             # Fallback: SIGUN 스크립틀릿은 지역명 있을 때만 (n개 OR), LIFE_CYCLE/YEAR 미적용
             if sigun_scriptlet_values:
                 if len(sigun_scriptlet_values) == 1:
                     where_set_array += [
-                        jpkg_query.WhereSet(MARINER_WS_FILTER),
-                        jpkg_query.WhereSet("SIGUN", MARINER_WS_EXACT, sigun_scriptlet_values[0], 0),
+                        jpkg_query.WhereSet(OP_AND),
+                        jpkg_query.WhereSet("SIGUN", OP_INT_SUMMATION, sigun_scriptlet_values[0], 0),
                     ]
                 else:
-                    where_set_array.append(jpkg_query.WhereSet(MARINER_WS_FILTER))
-                    where_set_array.append(jpkg_query.WhereSet(MARINER_WS_OR))  # OR (
+                    where_set_array.append(jpkg_query.WhereSet(OP_AND))
+                    where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))  # OR (
                     for idx, sv in enumerate(sigun_scriptlet_values):
                         if idx > 0:
-                            where_set_array.append(jpkg_query.WhereSet(MARINER_WS_AND))  # OR
-                        where_set_array.append(jpkg_query.WhereSet("SIGUN", MARINER_WS_EXACT, sv, 0))
-                    where_set_array.append(jpkg_query.WhereSet(MARINER_WS_END))  # )
+                            where_set_array.append(jpkg_query.WhereSet(OP_OR))  # OR
+                        where_set_array.append(jpkg_query.WhereSet("SIGUN", OP_INT_SUMMATION, sv, 0))
+                    where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))  # )
                 logger.debug(f"[Mariner/{log_label}] Fallback SIGUN 스크립틀릿 적용: {sigun_scriptlet_values}")
 
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -235,8 +235,8 @@ def _query_dual_documents(
                 )
                 for chunk_id in excluded_values:
                     where_set_array += [
-                        jpkg_query.WhereSet(MARINER_WS_NOT),
-                        jpkg_query.WhereSet("ID", MARINER_WS_EXACT, chunk_id, 0),
+                        jpkg_query.WhereSet(OP_NOT),
+                        jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
                     ]
 
             query.setWhere(where_set_array)

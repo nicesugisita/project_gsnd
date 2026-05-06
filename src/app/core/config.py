@@ -83,6 +83,8 @@ class Settings(BaseSettings):
 
     # ── LLM ───────────────────────────────────────────────────────────────────
     LLM_ENABLED: bool = True
+    # 스트리밍 MORE_INFO 후속 의도 분류 LLM. False면 항상 OTHER(폴백), 호출 생략.
+    NEXT_INTENT_LLM_ENABLED: bool = True
     LLM_API_URL: str = ""
     LLM_API_TIMEOUT: int = 120
     RELEVANCE_LLM_API_URL: str = ""
@@ -127,6 +129,14 @@ class Settings(BaseSettings):
     RAG_GOV_OKMS_COLLECTION: str = ""
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
+    # OUR_REGION_TEL: 생략 동명 보강 JSON. 예: {"회원동":["회원1동","회원2동"],"양덕동":["양덕1동"]}
+    # 코드 기본값과 병합되며, 동일 키는 env가 덮어쓴다.
+    RAG_WELFARE_TEL_DONG_ABBREV_JSON: str = ""
+    # OUR_REGION_TEL: 자동 ○동→○1동… 보강 시 베이스(앞 글자 덩어리) 제외. JSON 배열 예: ["중앙","사림"]
+    RAG_WELFARE_TEL_DONG_EXPAND_EXCLUDE_BASES_JSON: str = ""
+    # OUR_REGION_TEL: SIGUN 필터가 시 단위만 올 때 구 접미 OR 확장. 예: {"경상남도 창원시":["의창구","성산구"]}
+    # 코드 기본값(창원 5구)과 병합; 동일 키는 env가 덮어쓴다. 다른 시·군은 여기에 키를 추가한다.
+    RAG_WELFARE_TEL_SIGUN_OR_SUFFIXES_JSON: str = ""
     RETRIEVAL_JUDGMENT_ENABLED: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
@@ -161,6 +171,8 @@ class Settings(BaseSettings):
 
     # ── JVM / JAR ─────────────────────────────────────────────────────────────
     JAR_LIB_PATH: str = ""
+    JF_ATTACHER_CONF_PATH: str = ""
+    JF_ATTACHER_NATIVE_LIB_PATH: str = ""
     JAVA_MIN_MEMORY: str = "32m"
     JAVA_MAX_MEMORY: str = "512m"
 
@@ -174,6 +186,11 @@ class Settings(BaseSettings):
     DB_CONNECTION_TIMEOUT: int = 5
     DB_POOL_SIZE: int = 5             # 커넥션 풀 크기 (lifespan에서 사용)
     DB_POOL_NAME: str = "gsnd_pool"
+    POLICY_PRIORITY_DB_ENABLED: bool = True
+    POLICY_PRIORITY_TABLE: str = "gsnd_policy_priority"
+    POLICY_PRIORITY_CACHE_TTL_SEC: int = 1800
+    POLICY_PRIORITY_CHANGE_CHECK_SEC: int = 1800
+    MORE_INFO_WELFARE_TEL_TIMEOUT_SEC: int = 5
 
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10

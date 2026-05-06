@@ -51,8 +51,10 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
+    resolve_fallback_max_expanded_queries,
+    run_sufficiency_judgment_fast,
+    should_rerun_sufficiency_judgment,
 )
-from .pipeline_utils import collect_okms_groupa_and_gov_docs
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,7 @@ async def process_rag_with_documents_v2(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    precomputed_search_target: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — comparison 전용
@@ -86,8 +89,14 @@ async def process_rag_with_documents_v2(
     OKMS Group A/B → Fallback → WELFARE_TEL (BUSINESS_NAME) → 관련성 필터 → 응답
     """
 
+    _ = precomputed_search_target
+
     try:
         t_total = time.monotonic()
+        _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        _COMP_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
+            message, policy_search_boost_enabled=not _skip_policy_boost
+        )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
@@ -128,7 +137,8 @@ async def process_rag_with_documents_v2(
             triples_list = [filter_okms_keywords(precomputed_keywords)]
             if len(expanded_queries) > 1:
                 triples_list.extend([[] for _ in range(len(expanded_queries) - 1)])
-            logger.info("[RAG/comparison_v2] 사전 계산된 키워드 사용: %s", precomputed_keywords)
+            logger.info("[RAG/comparison_v2] 사전 계산된 키워드 사용: %d개", len(precomputed_keywords or []))
+            logger.debug("[RAG/comparison_v2] 사전 계산된 키워드 상세: %s", precomputed_keywords)
         else:
             triples_list = await asyncio.gather(*[extract_triples(eq) for eq in expanded_queries])
             triples_list = [filter_okms_keywords(kws) for kws in triples_list]
@@ -235,6 +245,7 @@ async def process_rag_with_documents_v2(
             run_gov=_run_gov_okms_query,
             log_prefix="RAG/comparison_v2",
             status_callback=status_callback,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         logger.info("[TIMING][comparison] Step4-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -279,6 +290,7 @@ async def process_rag_with_documents_v2(
                 tri_built=tri_built,
                 per_query_limit=_COMP_GA_PER_QUERY,
                 run_group_a_fallback=_group_a_fallback_run,
+                policy_search_boost_enabled=not _skip_policy_boost,
             )
             logger.info("[TIMING][comparison] Step5-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
 
@@ -293,11 +305,13 @@ async def process_rag_with_documents_v2(
         # Step 5-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await retrieval_sufficiency_judgment(
+        okms_sufficiency = await run_sufficiency_judgment_fast(
+            judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=okms_final,
+            log_prefix="RAG/comparison_v2",
         )
         logger.info("[TIMING][comparison] Step5-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(
@@ -325,7 +339,7 @@ async def process_rag_with_documents_v2(
                 _candidates = await expand_query(reformed_query)
             logger.info("[TIMING][comparison] Step5-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
             fallback_expanded_queries = dedupe_cap_expanded_queries(
-                _candidates or [], reformed_query=reformed_query
+                _candidates or [], max_n=_COMP_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
             )
             if fallback_expanded_queries:
                 _t = time.monotonic()
@@ -334,6 +348,7 @@ async def process_rag_with_documents_v2(
                     " ".join(k.strip() for k in filter_okms_keywords(kws) if k and k.strip())
                     for kws in fallback_triples
                 ]
+                _prev_okms_docs = list(okms_final)
                 fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
                     message=message,
                     reformed_query=reformed_query,
@@ -342,6 +357,8 @@ async def process_rag_with_documents_v2(
                     per_query_limit=_COMP_GA_PER_QUERY,
                     run_group_a=_group_a_run,
                     run_gov=_run_gov_okms_query,
+                    max_policy_pairs=1,
+                    policy_search_boost_enabled=not _skip_policy_boost,
                 )
                 logger.info("[TIMING][comparison] Step5-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
@@ -351,19 +368,30 @@ async def process_rag_with_documents_v2(
                         reverse=True,
                     )[:_COMP_FINAL_TOP_N]
                     logger.info("[RAG/comparison_v2] fallback 보강 후 OKMS: %d개", len(okms_final))
-                    _t = time.monotonic()
-                    okms_sufficiency = await retrieval_sufficiency_judgment(
-                        user_question=message,
-                        intent=intent,
-                        collection_name=Config.RAG_OKMS_COLLECTION,
-                        docs=okms_final,
-                    )
-                    logger.info("[TIMING][comparison] Step5-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
-                    logger.info(
-                        "[RAG/comparison_v2] fallback 재판단: sufficient=%s, reason=%s",
-                        okms_sufficiency["sufficient"],
-                        okms_sufficiency["reason"],
-                    )
+                    if should_rerun_sufficiency_judgment(
+                        before_docs=_prev_okms_docs,
+                        after_docs=okms_final,
+                    ) and not (excluded_chunk_ids or excluded_service_names):
+                        _t = time.monotonic()
+                        okms_sufficiency = await run_sufficiency_judgment_fast(
+                            judge_fn=retrieval_sufficiency_judgment,
+                            user_question=message,
+                            intent=intent,
+                            collection_name=Config.RAG_OKMS_COLLECTION,
+                            docs=okms_final,
+                            log_prefix="RAG/comparison_v2",
+                        )
+                        logger.info("[TIMING][comparison] Step5-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
+                        logger.info(
+                            "[RAG/comparison_v2] fallback 재판단: sufficient=%s, reason=%s",
+                            okms_sufficiency["sufficient"],
+                            okms_sufficiency["reason"],
+                        )
+                    else:
+                        if excluded_chunk_ids or excluded_service_names:
+                            logger.info("[RAG/comparison_v2] fallback 재판단 스킵: more_info 모드")
+                        else:
+                            logger.info("[RAG/comparison_v2] fallback 재판단 스킵: 개선 폭 미미")
 
             if okms_sufficiency["sufficient"]:
                 logger.info("[RAG/comparison_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
@@ -380,14 +408,28 @@ async def process_rag_with_documents_v2(
                             message,
                             sigun_filters=comp_sigun_filters,
                             eupmyeondong_filters=comp_eupmyeondong_filters,
-                            excluded_chunk_ids=excluded_chunk_ids,
+                            max_results=-1,
                         )
                     except Exception as e:
                         logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")
                         return []
 
                 _t = time.monotonic()
-                _tel_result = await loop.run_in_executor(None, _run_welfare_tel_query)
+                _tel_future = loop.run_in_executor(None, _run_welfare_tel_query)
+                if excluded_chunk_ids or excluded_service_names:
+                    try:
+                        _tel_result = await asyncio.wait_for(
+                            _tel_future,
+                            timeout=float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC),
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[RAG/comparison_v2] OUR_REGION_TEL timeout(%.1fs) -> skip",
+                            float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC),
+                        )
+                        _tel_result = []
+                else:
+                    _tel_result = await _tel_future
                 logger.info("[TIMING][comparison] Step6 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
                 welfare_tel_docs.extend(_tel_result[:_COMP_WELFARE_TEL_PER_QUERY])
                 logger.info(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
@@ -410,7 +452,10 @@ async def process_rag_with_documents_v2(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message, top_docs, log_prefix="[RAG/comparison_v2]"
+            message,
+            top_docs,
+            log_prefix="[RAG/comparison_v2]",
+            apply_enabled=not _skip_policy_boost,
         )
         top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
         logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -463,6 +508,7 @@ async def process_rag_with_documents_v2(
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent="comparison",
             messages=messages,
+            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][comparison] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][comparison] process_rag_comparison 전체: %.3fs", time.monotonic() - t_total)

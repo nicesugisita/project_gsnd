@@ -138,7 +138,7 @@ async def run_welfare_tel_queries(
     eupmyeondong_filters: Optional[List[str]],
     per_query: int,
     log_prefix: str,
-    excluded_chunk_ids: Optional[List[str]] = None,
+    timeout_sec: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """사용자 키워드로 GSND_OUR_REGION_TEL 검색을 수행한다.
 
@@ -163,13 +163,25 @@ async def run_welfare_tel_queries(
                 keyword,
                 sigun_filters=sigun_filters,
                 eupmyeondong_filters=eupmyeondong_filters,
-                excluded_chunk_ids=excluded_chunk_ids,
+                max_results=-1,
             )
         except Exception as e:
             logger.warning(f"[{log_prefix}] OUR_REGION_TEL 검색 실패: {e}")
             return []
 
-    docs = await loop.run_in_executor(None, _run)
+    _future = loop.run_in_executor(None, _run)
+    if timeout_sec and timeout_sec > 0:
+        try:
+            docs = await asyncio.wait_for(_future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] OUR_REGION_TEL timeout(%.1fs) -> skip",
+                log_prefix,
+                timeout_sec,
+            )
+            return []
+    else:
+        docs = await _future
     result_docs = docs[:per_query] if docs else []
     logger.info(f"[{log_prefix}] OUR_REGION_TEL '{keyword[:30]}': {len(result_docs)}개")
     return result_docs

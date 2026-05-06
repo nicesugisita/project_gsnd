@@ -15,9 +15,9 @@ from app.core.config import Config
 from app.core.constants import (
     MARINER_SELECT_FIELD_NUM,
     MARINER_SETPROPS_EXTRA,
-    MARINER_WS_AND,
-    MARINER_WS_BM25,
-    MARINER_WS_VECTOR,
+    OP_OR,
+    OP_HASANY,
+    OP_VECTOR_SEARCH,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.sigun_utils import normalize_sigun
@@ -152,9 +152,9 @@ def query_mariner_documents(
         else:
             ko_weight, mi_weight = 0.2, 0.8
         where_set_array = [
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", MARINER_WS_BM25, keyword_string, ko_weight),
-            jpkg_query.WhereSet(MARINER_WS_AND),
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", MARINER_WS_VECTOR, keyword_string, mi_weight)
+            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY, keyword_string, ko_weight),
+            jpkg_query.WhereSet(OP_OR),
+            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, mi_weight)
         ]
         query.setWhere(where_set_array)
 

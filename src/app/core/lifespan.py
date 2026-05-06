@@ -120,6 +120,7 @@ def _preload_prompts() -> None:
         load_classification_general_prompt, load_classification_comparison_prompt,
         load_comparison_extract_prompt, load_comparison_attribute_prompt,
         load_comparison_triple_prompt, load_classification_recommended_prompt,
+        load_classification_llm_recommended_prompt,
         load_classification_search_prompt,
         load_region_age_collect_recommended_prompt,
         load_document_summary_prompt, load_uploaded_qa_prompt,
@@ -136,6 +137,7 @@ def _preload_prompts() -> None:
         load_classification_general_prompt, load_classification_comparison_prompt,
         load_comparison_extract_prompt, load_comparison_attribute_prompt,
         load_comparison_triple_prompt, load_classification_recommended_prompt,
+        load_classification_llm_recommended_prompt,
         load_classification_search_prompt,
         load_region_age_collect_recommended_prompt,
         load_document_summary_prompt, load_uploaded_qa_prompt,
@@ -143,6 +145,28 @@ def _preload_prompts() -> None:
     for loader in loaders:
         loader()
     logger.info("[Startup] 프롬프트 %d개 프리로드 완료", len(loaders))
+
+
+def _start_policy_priority_refresh_worker() -> None:
+    """정책 우선순위 키워드 변경 체크 워커 시작."""
+    try:
+        from app.chat.infra.rag.policy_priority import (
+            preload_policy_priority_cache,
+            start_policy_priority_refresh_worker,
+        )
+        preload_policy_priority_cache()
+        start_policy_priority_refresh_worker()
+    except Exception:
+        logger.exception("[Startup] Policy priority refresh worker 시작 실패")
+
+
+def _stop_policy_priority_refresh_worker() -> None:
+    """정책 우선순위 키워드 변경 체크 워커 종료."""
+    try:
+        from app.chat.infra.rag.policy_priority import stop_policy_priority_refresh_worker
+        stop_policy_priority_refresh_worker()
+    except Exception:
+        logger.exception("[Shutdown] Policy priority refresh worker 종료 실패")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +228,7 @@ async def lifespan(app: FastAPI):
     app.state.retriever  = _init_retriever()   # JVM 초기화 이후에 생성
 
     _preload_prompts()
+    _start_policy_priority_refresh_worker()
 
     logger.info("[Startup] 모든 자원 초기화 완료 — 서버 준비됨")
 
@@ -215,5 +240,6 @@ async def lifespan(app: FastAPI):
     await _close_http_client("LLM",        app.state.llm_client)
     await _close_http_client("DeepServer", app.state.ds_client)
     _close_db_pool(app.state.db_pool)
+    _stop_policy_priority_refresh_worker()
 
     logger.info("[Shutdown] 모든 자원 해제 완료")

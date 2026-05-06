@@ -202,7 +202,8 @@ async def _judge_single_doc(
 async def filter_irrelevant_docs(
     question: str,
     docs: List[Dict[str, Any]],
-    sigun_filters: Optional[List[str]] = None
+    sigun_filters: Optional[List[str]] = None,
+    max_judgment_docs: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """문서 목록에서 질문과 무관한 문서를 LLM으로 판단하여 제거.
 
@@ -210,11 +211,18 @@ async def filter_irrelevant_docs(
         question: 사용자 질문 (reformed_query — 대화 맥락이 반영된 검색 쿼리)
         docs: 검색 결과 문서 목록
         sigun_filters: 사용자 지역 필터
+        max_judgment_docs: 판단에 넘길 상한. None이면 10건, 음수(예: -1)이면 전부.
 
     Returns:
         관련 문서만 남긴 목록
     """
-    _MAX_DOCS_FOR_FILTER = 10
+    _DEFAULT_CAP = 10
+    if max_judgment_docs is not None and int(max_judgment_docs) < 0:
+        _max_for_filter = len(docs)
+    elif max_judgment_docs is not None:
+        _max_for_filter = max(1, int(max_judgment_docs))
+    else:
+        _max_for_filter = _DEFAULT_CAP
 
     if not docs:
         return docs
@@ -223,12 +231,14 @@ async def filter_irrelevant_docs(
         logger.debug("[RelevanceFilter] 문서 1건 이하 → 필터 생략")
         return docs
 
-    # 상위 10건만 판단 대상, 나머지 버림
-    target_docs = docs[:_MAX_DOCS_FOR_FILTER]
-    if len(docs) > _MAX_DOCS_FOR_FILTER:
-        # 문서 원문/상세 필드 노출 방지: 전체 docs 로그 비활성화
-        # logger.info(f"[RelevanceFilter] ========================= docs: {docs}")
-        logger.info(f"[RelevanceFilter] {len(docs)}건 중 상위 {_MAX_DOCS_FOR_FILTER}건만 판단, 나머지 {len(docs) - _MAX_DOCS_FOR_FILTER}건 제거")
+    target_docs = docs[:_max_for_filter]
+    if len(docs) > _max_for_filter:
+        logger.info(
+            "[RelevanceFilter] %s건 중 상위 %s건만 판단, 나머지 %s건 제거",
+            len(docs),
+            _max_for_filter,
+            len(docs) - _max_for_filter,
+        )
 
     logger.info(
         f"[RelevanceFilter] 관련성 판단 시작: {len(target_docs)}건 문서, "

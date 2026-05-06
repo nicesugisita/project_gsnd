@@ -4,18 +4,27 @@ import asyncio
 import logging
 from contextlib import contextmanager
 from itertools import zip_longest
-from typing import Any, Awaitable, Callable, Dict, List, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_USER
 from app.chat.infra.rag.policy_priority import (
     augment_okms_dual_query,
     policy_extra_okms_searches,
     policy_supplement_welfare_queries,
+    resolve_policy_boost_keywords,
 )
 
 from .document import _get_document_snippet, _get_document_name
 
 logger = logging.getLogger(__name__)
+
+
+FALLBACK_MAX_EXPANDED_DEFAULT = 2
+FALLBACK_MAX_EXPANDED_ELDERLY = 1
+FALLBACK_REJUDGE_MIN_DOC_GAIN = 1
+FALLBACK_REJUDGE_MIN_TOP_WEIGHT_GAIN = 0.03
+SUFFICIENCY_JUDGMENT_TIMEOUT_SEC = 4.0
+SUFFICIENCY_JUDGMENT_MAX_DOCS = 8
 
 
 @contextmanager
@@ -105,6 +114,93 @@ def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any
     return unique_docs
 
 
+def _okms_dual_query_for_search(
+    user_message: str,
+    vector_q: str,
+    keyword_q: str,
+    *,
+    policy_search_boost_enabled: bool,
+) -> Tuple[str, str]:
+    """Group A (vector, keyword) 쌍. MORE_INFO 등에서는 정책 키워드 보강 없이 원질의만 사용."""
+    if not policy_search_boost_enabled:
+        return (vector_q or "").strip(), (keyword_q or "").strip()
+    return augment_okms_dual_query(user_message, vector_q, keyword_q or "")
+
+
+def resolve_fallback_max_expanded_queries(
+    user_message: str,
+    *,
+    default_max: int = FALLBACK_MAX_EXPANDED_DEFAULT,
+    policy_search_boost_enabled: bool = True,
+) -> int:
+    """질문군별 fallback 확장 쿼리 상한을 반환."""
+    if not policy_search_boost_enabled:
+        return default_max
+    tags, _ = resolve_policy_boost_keywords(user_message)
+    if "elderly_benefits" in tags:
+        return FALLBACK_MAX_EXPANDED_ELDERLY
+    return default_max
+
+
+def should_rerun_sufficiency_judgment(
+    before_docs: List[Dict[str, Any]],
+    after_docs: List[Dict[str, Any]],
+    *,
+    min_doc_gain: int = FALLBACK_REJUDGE_MIN_DOC_GAIN,
+    min_top_weight_gain: float = FALLBACK_REJUDGE_MIN_TOP_WEIGHT_GAIN,
+) -> bool:
+    """fallback 후 재판단 필요 여부(문서 수/상위 weight 개선 기반)."""
+    before_n = len(before_docs or [])
+    after_n = len(after_docs or [])
+    if (after_n - before_n) >= min_doc_gain:
+        return True
+
+    def _top_weight(docs: List[Dict[str, Any]]) -> float:
+        if not docs:
+            return 0.0
+        return max(float(d.get("WEIGHT", 0) or 0) for d in docs)
+
+    return (_top_weight(after_docs) - _top_weight(before_docs)) >= min_top_weight_gain
+
+
+async def run_sufficiency_judgment_fast(
+    *,
+    judge_fn: Callable[..., Awaitable[Dict[str, Any]]],
+    user_question: str,
+    intent: str,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    timeout_sec: float = SUFFICIENCY_JUDGMENT_TIMEOUT_SEC,
+    max_docs: int = SUFFICIENCY_JUDGMENT_MAX_DOCS,
+    log_prefix: str = "RAG",
+) -> Dict[str, Any]:
+    """적합성 판단 호출을 타임아웃/문서수 cap으로 보호한다."""
+    target_docs = list(docs or [])[:max_docs]
+    if len(docs or []) > len(target_docs):
+        logger.debug(
+            "[%s] sufficiency docs cap: %d -> %d",
+            log_prefix,
+            len(docs or []),
+            len(target_docs),
+        )
+    try:
+        return await asyncio.wait_for(
+            judge_fn(
+                user_question=user_question,
+                intent=intent,
+                collection_name=collection_name,
+                docs=target_docs,
+            ),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[%s] sufficiency timeout(%.1fs) -> graceful fallback", log_prefix, timeout_sec)
+        return {"sufficient": False, "reason": "judgment_timeout"}
+    except Exception as e:
+        logger.warning("[%s] sufficiency error(%s) -> graceful fallback", log_prefix, e)
+        return {"sufficient": False, "reason": "judgment_error"}
+
+
 async def collect_okms_groupa_and_gov_docs(
     *,
     message: str,
@@ -117,16 +213,24 @@ async def collect_okms_groupa_and_gov_docs(
     log_prefix: str,
     status_callback: Callable[[str], Awaitable[None]] | None = None,
     log_skip_empty_triple: bool = False,
+    policy_search_boost_enabled: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """OKMS GroupA + GOV_OKMS 병렬 수집 공통 실행기."""
     loop = asyncio.get_event_loop()
 
-    policy_extra_pairs = policy_extra_okms_searches(message, reformed_query)
+    policy_extra_pairs = (
+        policy_extra_okms_searches(message, reformed_query)
+        if policy_search_boost_enabled
+        else []
+    )
     ga_pair_futures = [
         loop.run_in_executor(
             None,
             run_group_a,
-            *augment_okms_dual_query(message, eq, sq if sq else ""),
+            *_okms_dual_query_for_search(
+                message, eq, sq if sq else "",
+                policy_search_boost_enabled=policy_search_boost_enabled,
+            ),
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
@@ -183,15 +287,15 @@ async def collect_okms_groupa_and_gov_docs(
         if pair[0]:
             okms_group_a_docs.extend(pair[0][:per_query_limit])
     if policy_extra_pairs:
-        logger.info("[%s] 정책 검색 보강: GroupA 추가 %d쌍", log_prefix, len(policy_extra_pairs))
+        logger.debug("[%s] 정책 검색 보강: GroupA 추가 %d쌍", log_prefix, len(policy_extra_pairs))
 
     gov_okms_docs: List[Dict[str, Any]] = []
     for i, docs in enumerate(gov_okms_results, 1):
         if docs:
             gov_okms_docs.extend(docs[:per_query_limit])
-            logger.info("[%s] [GOV_OKMS] #%d: %d개 문서", log_prefix, i, min(len(docs), per_query_limit))
+            logger.debug("[%s] [GOV_OKMS] #%d: %d개 문서", log_prefix, i, min(len(docs), per_query_limit))
         else:
-            logger.info("[%s] [GOV_OKMS] #%d: 0개 문서", log_prefix, i)
+            logger.debug("[%s] [GOV_OKMS] #%d: 0개 문서", log_prefix, i)
 
     return okms_group_a_docs, gov_okms_docs
 
@@ -204,6 +308,8 @@ async def collect_okms_groupa_fallback_docs(
     tri_built: List[str],
     per_query_limit: int,
     run_group_a_fallback: Callable[[str, str], Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]],
+    max_policy_pairs: int = 1,
+    policy_search_boost_enabled: bool = True,
 ) -> List[Dict[str, Any]]:
     """OKMS GroupA fallback 재검색 수집 공통 실행기."""
     loop = asyncio.get_event_loop()
@@ -212,11 +318,18 @@ async def collect_okms_groupa_fallback_docs(
         loop.run_in_executor(
             None,
             run_group_a_fallback,
-            *augment_okms_dual_query(message, eq, sq if sq else ""),
+            *_okms_dual_query_for_search(
+                message, eq, sq if sq else "",
+                policy_search_boost_enabled=policy_search_boost_enabled,
+            ),
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    fb_policy_pairs = policy_extra_okms_searches(message, reformed_query)
+    fb_policy_pairs = (
+        policy_extra_okms_searches(message, reformed_query)[:max_policy_pairs]
+        if policy_search_boost_enabled
+        else []
+    )
     ga_fb_extra_futures = [
         loop.run_in_executor(None, run_group_a_fallback, v, k)
         for v, k in fb_policy_pairs
@@ -248,15 +361,24 @@ async def collect_okms_groupa_and_gov_fallback_docs(
     per_query_limit: int,
     run_group_a: Callable[[str, str], Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]],
     run_gov: Callable[[str], List[Dict[str, Any]]],
+    max_policy_pairs: int = 1,
+    policy_search_boost_enabled: bool = True,
 ) -> List[Dict[str, Any]]:
     """OKMS fallback 보강검색(GroupA + GOV) 문서 수집 공통 실행기."""
     loop = asyncio.get_event_loop()
 
     fb_pairs = [
-        augment_okms_dual_query(message, eq, sq if sq else "")
+        _okms_dual_query_for_search(
+            message, eq, sq if sq else "",
+            policy_search_boost_enabled=policy_search_boost_enabled,
+        )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    policy_pairs = policy_extra_okms_searches(message, reformed_query)
+    policy_pairs = (
+        policy_extra_okms_searches(message, reformed_query)[:max_policy_pairs]
+        if policy_search_boost_enabled
+        else []
+    )
     fb_pairs.extend(policy_pairs)
 
     fb_pair_futures = [
@@ -294,9 +416,17 @@ def build_welfare_search_queries(
     expanded_queries: List[str],
     search_queries: List[str],
     user_message: str,
+    max_policy_queries: int | None = None,
+    policy_search_boost_enabled: bool = True,
 ) -> Tuple[List[str], List[str]]:
     """search 의도 CENTER/TEL 공통 질의 목록 구성 + 정책 보강 질의 반환."""
-    policy_queries = policy_supplement_welfare_queries(user_message)
+    policy_queries = (
+        policy_supplement_welfare_queries(user_message)
+        if policy_search_boost_enabled
+        else []
+    )
+    if max_policy_queries is not None:
+        policy_queries = policy_queries[:max(0, max_policy_queries)]
     merged_parts = list(expanded_queries) + list(search_queries) + policy_queries
 
     seen_cf: set[str] = set()
@@ -320,37 +450,66 @@ async def collect_welfare_center_tel_docs(
     run_center_query: Callable[[str], List[Dict[str, Any]]],
     run_tel_query: Callable[[str], List[Dict[str, Any]]],
     log_prefix: str = "RAG/search_v2",
+    per_query_limit_tel: Optional[int] = None,
+    center_enabled: bool = True,
+    tel_enabled: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """CENTER + TEL 병렬 검색 결과 수집."""
+    """CENTER + TEL 병렬 검색 결과 수집.
+
+    per_query_limit: 0 미만이면 CENTER는 쿼리별 반환 전량.
+    per_query_limit_tel: None이면 TEL도 per_query_limit과 동일. 0 미만이면 TEL은 쿼리별 전량.
+    center_enabled / tel_enabled: False이면 해당 풀은 검색 생략(빈 리스트).
+    """
+    tel_cap = per_query_limit if per_query_limit_tel is None else per_query_limit_tel
     loop = asyncio.get_event_loop()
-    center_futures = [
-        loop.run_in_executor(None, run_center_query, q)
-        for q in queries
-    ]
-    tel_futures = [
-        loop.run_in_executor(None, run_tel_query, q)
-        for q in queries
-    ]
-    center_results, tel_results = await asyncio.gather(
-        asyncio.gather(*center_futures),
-        asyncio.gather(*tel_futures),
-    )
+    if center_enabled and queries:
+        # WELFARE_CENTER는 벡터·다필드 OR가 무거워 동시 다발 요청 시 Mariner 타임아웃(-60004)이 잦음 → 순차 실행
+        center_results = [
+            await loop.run_in_executor(None, run_center_query, q) for q in queries
+        ]
+    else:
+        center_results = [[] for _ in queries]
+
+    if tel_enabled and queries:
+        tel_futures = [
+            loop.run_in_executor(None, run_tel_query, q)
+            for q in queries
+        ]
+        tel_results = list(await asyncio.gather(*tel_futures))
+    else:
+        tel_results = [[] for _ in queries]
 
     center_docs: List[Dict[str, Any]] = []
-    for i, (q, docs) in enumerate(zip(queries, center_results), 1):
-        if docs:
-            center_docs.extend(docs[:per_query_limit])
-            logger.info("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], min(len(docs), per_query_limit))
-        else:
-            logger.info("[%s] [CENTER] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
+    if center_enabled:
+        for i, (q, docs) in enumerate(zip(queries, center_results), 1):
+            if docs:
+                if per_query_limit < 0:
+                    center_docs.extend(docs)
+                    n_take = len(docs)
+                else:
+                    center_docs.extend(docs[:per_query_limit])
+                    n_take = min(len(docs), per_query_limit)
+                logger.debug("[%s] [CENTER] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
+            else:
+                logger.debug("[%s] [CENTER] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
+    else:
+        logger.debug(
+            "[%s] [CENTER] 검색 생략(단일 풀 모드: OUR_REGION_TEL 등에서 CENTER 풀 비활성)",
+            log_prefix,
+        )
 
     tel_docs: List[Dict[str, Any]] = []
     for i, (q, docs) in enumerate(zip(queries, tel_results), 1):
         if docs:
-            tel_docs.extend(docs[:per_query_limit])
-            logger.info("[%s] [TEL] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], min(len(docs), per_query_limit))
+            if tel_cap < 0:
+                tel_docs.extend(docs)
+                n_take = len(docs)
+            else:
+                tel_docs.extend(docs[:tel_cap])
+                n_take = min(len(docs), tel_cap)
+            logger.debug("[%s] [TEL] 쿼리 #%d '%s': %d개", log_prefix, i, q[:30], n_take)
         else:
-            logger.info("[%s] [TEL] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
+            logger.debug("[%s] [TEL] 쿼리 #%d '%s': 0개", log_prefix, i, q[:30])
     return center_docs, tel_docs
 
 
