@@ -28,6 +28,7 @@ from app.dependencies import (
     _update_user_message,
     _validate_request,
     _validate_user_message,
+    chat_user_id_requires_nologin_canonical,
 )
 from ._stream_utils import _build_streaming_response
 from ._conversation_ctx import _check_user_limit, _merge_and_init_conversation
@@ -54,15 +55,14 @@ router = APIRouter()
 
 
 def _ensure_runtime_user_id(chat_request: ChatRequest) -> None:
-    """비로그인 요청에도 로그인과 동일 경로를 타도록 임시 user_id를 부여."""
-    if isinstance(chat_request.user_id, str) and chat_request.user_id.strip():
+    """비로그인·임시 user_id 를 conv_id 로 고정해 로그인과 같은 히스토리·전처리 경로를 쓴다."""
+    if not chat_user_id_requires_nologin_canonical(chat_request.user_id):
         return
 
     if not chat_request.conv_id:
         chat_request.conv_id = str(uuid.uuid4())
 
-    # 요구사항: 비로그인 user_id는 'nologin+conv_id' 형태로 고정
-    chat_request.user_id = f"nologin{chat_request.conv_id}"
+    chat_request.user_id = str(chat_request.conv_id)
 
 
 async def _chat_completions_core(request: Request, *, llm_recommended_followup: bool) -> Any:
@@ -169,7 +169,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[SigunCheck/non-stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
         # [3] 쿼리 재구성
-        user_message, skip_clarification_check = await _run_query_recreation(user_message, chat_request, is_clarification)
+        user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
 
         # [4] 경상남도 외 지역 체크
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
@@ -193,8 +193,10 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             preprocess = build_preprocess_skip_unified_recommended_question(user_message)
             logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
         else:
-            _preprocess_messages = None if skip_clarification_check else chat_request.messages
-            preprocess = await run_unified_preprocess(user_message, _preprocess_messages, use_rag)
+            # 짧은 후속·되묻기 재구성 직후에도 항상 전체 메시지를 넘김 → 스레드 길이(로그인/비로그인)와 무관하게 동일 형식 입력
+            preprocess = await run_unified_preprocess(
+                user_message, chat_request.messages, use_rag
+            )
         user_message = preprocess.query
         await _update_user_message(chat_request.messages, user_message)
 
@@ -297,8 +299,13 @@ async def suggest_questions(
         messages = None
         if conv_id:
             from app.conversation.history import get_chat_history_service
+            from app.dependencies import _resolve_chat_history_user_id
+
+            raw_uid = body.get("user_id")
+            scope_uid = raw_uid.strip() if isinstance(raw_uid, str) and raw_uid.strip() else None
             history_service = get_chat_history_service(Config)
-            messages = history_service.get_history(conv_id) or []
+            persist = _resolve_chat_history_user_id(scope_uid, conv_id)
+            messages = history_service.get_history(conv_id, persist) or []
             if not messages:
                 return JSONResponse(
                     content={

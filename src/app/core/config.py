@@ -197,6 +197,11 @@ class Settings(BaseSettings):
     SESSION_TABLE: str = ""
     MAX_CONCURRENT_USERS: int = 50
     CONV_LOCKS_MAX: int = 1000
+    # 비로그인 앱 전용 세션 문자열 등 → 히스토리 키는 nologin{conv_id} 로 통일. 콤마 구분 접두어(소문 비교).
+    # 비어 두면 코드 기본 목록 사용.
+    CHAT_EPHEMERAL_USER_ID_PREFIXES: str = ""
+    # True면 UUID v4 형태 user_id 를 비로그인으로 간주한다(실제 로그인 ID가 UUID 면 비활성 유지).
+    CHAT_USER_ID_IS_EPHEMERAL_IF_UUIDV4: bool = False
     DEFAULT_CONVERSATION_TITLE: str = "새로운 대화"
 
     # ── 되묻기 ────────────────────────────────────────────────────────────────

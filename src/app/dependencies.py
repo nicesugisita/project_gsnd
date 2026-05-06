@@ -22,6 +22,7 @@ Phase 1 providers (app.state에서 꺼내 반환):
 """
 
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
@@ -54,6 +55,49 @@ from app.chat._stream_utils import (  # noqa: F401  (re-export for callers)
 
 logger = logging.getLogger(__name__)
 ANONYMOUS_HISTORY_USER_ID = "__anonymous__"
+
+_UUID_V4 = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+_DEFAULT_CHAT_EPHEMERAL_PREFIXES: tuple[str, ...] = (
+    "temp-",
+    "guest-",
+    "anon-",
+    "visitor-",
+    "session-",
+    "device-",
+    "anonymous-",
+)
+
+
+def chat_ephemeral_user_id_prefixes() -> tuple[str, ...]:
+    raw = (getattr(Config, "CHAT_EPHEMERAL_USER_ID_PREFIXES", None) or "").strip()
+    if raw:
+        return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
+    return _DEFAULT_CHAT_EPHEMERAL_PREFIXES
+
+
+def chat_user_id_requires_nologin_canonical(user_id: Optional[str]) -> bool:
+    """채팅 히스토리 행 소유자를 비로그인 canonical(``conv_id``)로 고정해야 하는 입력인지."""
+
+    if not isinstance(user_id, str):
+        return True
+    s = user_id.strip()
+    if not s:
+        return True
+    if s == ANONYMOUS_HISTORY_USER_ID:
+        return True
+    low = s.lower()
+    if low in ("anonymous", "guest", "unknown", "null", "undefined"):
+        return True
+    for p in chat_ephemeral_user_id_prefixes():
+        if low.startswith(p):
+            return True
+    if getattr(Config, "CHAT_USER_ID_IS_EPHEMERAL_IF_UUIDV4", False) and bool(_UUID_V4.match(s)):
+        return True
+    return False
 
 
 # ============================================================================
@@ -215,6 +259,37 @@ def _resolve_history_user_id(user_id: Optional[str]) -> str:
     if isinstance(user_id, str) and user_id.strip():
         return user_id.strip()
     return ANONYMOUS_HISTORY_USER_ID
+
+
+def _resolve_chat_history_user_id(
+    user_id: Optional[str], conv_id: Optional[str]
+) -> str:
+    """
+    /v1/chat/completions 과 동일한 규칙으로 히스토리 행 소유자 ID를 만든다.
+
+    로그인 user_id 문자열은 그대로 두고, 비어 있거나 플레이스홀더·임시 접두어 또는
+    잘못된 ``nologin…`` 문자열은 ``conv_id`` 로 맞춘다.
+    """
+    cid = str(conv_id or "").strip()
+    canonical = cid if cid else ""
+
+    uid_raw = user_id.strip() if isinstance(user_id, str) and user_id.strip() else ""
+    if not uid_raw:
+        if cid:
+            return canonical
+        return ANONYMOUS_HISTORY_USER_ID
+
+    if chat_user_id_requires_nologin_canonical(uid_raw):
+        if cid:
+            return canonical
+        return ANONYMOUS_HISTORY_USER_ID
+
+    if uid_raw.startswith("nologin"):
+        if cid:
+            return canonical
+        return uid_raw
+
+    return uid_raw
 
 
 # ============================================================================
@@ -440,7 +515,7 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
         chat_request.conv_id = conv_id
         logger.info(f"[_save_chat_history] conv_id 자동 생성: {conv_id}")
 
-    persist_user_id = _resolve_history_user_id(user_id)
+    persist_user_id = _resolve_chat_history_user_id(user_id, conv_id)
 
     history_service = get_chat_history_service(Config)
     history_service.upsert_history(user_id=persist_user_id, conv_id=conv_id, messages=messages, overwrite=True)
