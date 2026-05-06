@@ -205,7 +205,7 @@ def query_welfare_center_documents(
         query.setSearchKeyword(keyword_string)
         query.setSearch(True)
         query.setDebug(False)
-        query.setPrintQuery(False)
+        query.setPrintQuery(True)
         query.setLoggable(False)
         query.setFaultless(True)
 
