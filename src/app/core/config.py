@@ -182,7 +182,6 @@ class Settings(BaseSettings):
     POLICY_PRIORITY_TABLE: str = "gsnd_policy_priority"
     POLICY_PRIORITY_CACHE_TTL_SEC: int = 1800
     POLICY_PRIORITY_CHANGE_CHECK_SEC: int = 1800
-    MORE_INFO_WELFARE_TEL_TIMEOUT_SEC: int = 5
 
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10

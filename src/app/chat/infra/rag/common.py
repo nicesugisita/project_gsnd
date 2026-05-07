@@ -7,10 +7,8 @@ rag_general, rag_guide_recommend, rag_search에서 공유하는 함수들을 모
 import logging
 import math
 import re
-import asyncio
 from typing import Dict, Any, List, Optional
 
-from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
 from app.chat.infra.rag import _get_document_name, _get_document_snippet
 from app.chat.infra.rag.expansion_cap import (
     MAX_EXPANDED_QUERIES_DEFAULT,
@@ -128,60 +126,3 @@ def filter_excluded_docs(
     return result
 
 
-# ============================================================
-# OUR_REGION_TEL 검색 유틸
-# ============================================================
-
-async def run_welfare_tel_queries(
-    keyword: str,
-    sigun_filters: List[str],
-    eupmyeondong_filters: Optional[List[str]],
-    per_query: int,
-    log_prefix: str,
-    timeout_sec: Optional[float] = None,
-) -> List[Dict[str, Any]]:
-    """사용자 키워드로 GSND_OUR_REGION_TEL 검색을 수행한다.
-
-    Args:
-        keyword: 검색 키워드 (사용자 원래 질문)
-        sigun_filters: SIGUN 필터 목록 (예: ["경상남도 창원시"])
-        eupmyeondong_filters: 읍면동 필터 목록 (예: ["동읍"])
-        per_query: 최대 수집 건수
-        log_prefix: 로그 식별자 (e.g. "RAG/general_v2")
-
-    Returns:
-        수집된 OUR_REGION_TEL 문서 목록
-    """
-    if not keyword:
-        return []
-
-    loop = asyncio.get_event_loop()
-
-    def _run():
-        try:
-            return query_welfare_tel_documents(
-                keyword,
-                sigun_filters=sigun_filters,
-                eupmyeondong_filters=eupmyeondong_filters,
-                max_results=-1,
-            )
-        except Exception as e:
-            logger.warning(f"[{log_prefix}] OUR_REGION_TEL 검색 실패: {e}")
-            return []
-
-    _future = loop.run_in_executor(None, _run)
-    if timeout_sec and timeout_sec > 0:
-        try:
-            docs = await asyncio.wait_for(_future, timeout=timeout_sec)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "[%s] OUR_REGION_TEL timeout(%.1fs) -> skip",
-                log_prefix,
-                timeout_sec,
-            )
-            return []
-    else:
-        docs = await _future
-    result_docs = docs[:per_query] if docs else []
-    logger.info(f"[{log_prefix}] OUR_REGION_TEL '{keyword[:30]}': {len(result_docs)}개")
-    return result_docs
