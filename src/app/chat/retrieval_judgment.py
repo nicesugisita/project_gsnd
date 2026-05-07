@@ -208,10 +208,8 @@ async def retrieval_sufficiency_judgment(
     Returns:
         {"sufficient": bool, "reason": str}
     """
-    # TODO: 임시 강제 활성화
-    # Config.RETRIEVAL_JUDGMENT_ENABLED 값과 무관하게 실제 LLM 판정을 수행한다.
     if not Config.RETRIEVAL_JUDGMENT_ENABLED:
-        logger.info("[RetrievalJudgment] 설정 비활성화 감지, 임시 강제 활성화로 계속 진행")
+        logger.info("[RetrievalJudgment] 설정 비활성화 감지, 강제 활성화로 계속 진행")
 
     if not docs:
         logger.info(
