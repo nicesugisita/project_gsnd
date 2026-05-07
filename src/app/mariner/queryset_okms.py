@@ -4,6 +4,7 @@ Mariner 쿼리셋 — GSND_BIZ_DATASET_V4 듀얼 검색 (Group A/B)
 """
 
 import logging
+import re
 import time
 from typing import Dict, Any, List, Optional
 
@@ -20,6 +21,7 @@ from app.core.constants import (
     OP_AND,
     OP_NOT,
     OP_HASANY,
+    OP_HASALL,
     OP_INT_SUMMATION,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
@@ -29,6 +31,78 @@ from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
 
 logger = logging.getLogger(__name__)
+
+_ANCHOR_STOPWORDS = {
+    "지원", "정보", "안내", "신청", "방법", "대상", "조건", "사업",
+    "제도", "서비스", "복지", "문의", "내용", "절차", "기준",
+}
+
+# 연도/숫자 토큰 패턴: anchor 후보에서 배제 (YEAR FilterSet과 중복 + BUSINESS_NAME에 보통 미수록)
+# 예: "2025", "2025년", "26년", "26", "10년", "1년"
+_NUMERIC_ANCHOR_RE = re.compile(r"^\d{1,4}(?:년|년도)?$")
+
+
+def _is_numeric_anchor_token(token: str) -> bool:
+    """순수 숫자(연도 포함) 토큰이면 anchor 후보에서 배제."""
+    return bool(_NUMERIC_ANCHOR_RE.fullmatch(token or ""))
+
+
+def _tokenize_query_terms(text: str) -> List[str]:
+    tokens: List[str] = []
+    for raw in str(text or "").split():
+        tok = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
+        if len(tok) < 2:
+            continue
+        tokens.append(tok)
+    return tokens
+
+
+def _extract_business_anchor(
+    vector: str,
+    keyword: str,
+    sigun_filters: Optional[List[str]],
+) -> str:
+    """
+    질의에서 사업명 정합성 앵커 1개를 추출.
+    - vector/keyword 공통 토큰 우선
+    - 지역명/일반어/연도(숫자) 토큰은 제외
+    """
+    vector_tokens = _tokenize_query_terms(vector)
+    keyword_tokens = _tokenize_query_terms(keyword)
+    if not vector_tokens and not keyword_tokens:
+        return ""
+
+    banned: set[str] = set(_ANCHOR_STOPWORDS)
+    for s in sigun_filters or []:
+        s = str(s or "").strip()
+        if not s:
+            continue
+        banned.add(s)
+        banned.add(s.replace("경상남도", "").strip())
+        banned.update(t for t in _tokenize_query_terms(s))
+
+    def _is_valid_anchor(tok: str) -> bool:
+        if tok in banned:
+            return False
+        if _is_numeric_anchor_token(tok):
+            return False
+        return True
+
+    vec_set = {t for t in vector_tokens if _is_valid_anchor(t)}
+    key_set = {t for t in keyword_tokens if _is_valid_anchor(t)}
+
+    # 공통 핵심어를 우선 사용(예: "기초연금")
+    common = sorted((vec_set & key_set), key=len, reverse=True)
+    for tok in common:
+        if len(tok) >= 3:
+            return tok
+
+    # 공통어가 없으면 vector 쪽에서 가장 긴 토큰 사용
+    candidates = sorted(vec_set, key=len, reverse=True)
+    for tok in candidates:
+        if len(tok) >= 3:
+            return tok
+    return ""
 
 
 def _build_okms_document_name(doc: Dict[str, Any]) -> str:
@@ -63,9 +137,10 @@ def _query_dual_documents(
     sigun_filters: Optional[List[str]] = None,
     lifecycle_filter: Optional[str] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    QuerySet(2) 듀얼 검색 공통 로직 — TEST_OKMS_V4 전용.
+    QuerySet(2) 듀얼 검색 공통 로직 — OKMS 컬렉션 전용.
 
     Query[0]: keyword(트리플쿼리), Query[1]: vector(확장쿼리)
     KO 필드 가중치 0.7 / MI 필드 가중치 0.3
@@ -115,7 +190,7 @@ def _query_dual_documents(
         num_queries = 2 if use_dual else 1
         queryset = jpkg_query.QuerySet(num_queries)
 
-        # SELECT 필드 (TEST_OKMS_V4 전용)
+        # SELECT 필드 (OKMS 컬렉션 전용)
         num = MARINER_SELECT_FIELD_NUM
         select_field_names = ["ID", "YEAR", "SIGUN", "CONTENT", "WEIGHT", "LIFE_CYCLE", "DEPARTMENT", "APPLICATION_PERIOD", "PURPOSE", "TEL", "BUSINESS_NAME", "ORG_NM", "PATH"]
 
@@ -191,6 +266,34 @@ def _query_dual_documents(
                 jpkg_query.WhereSet("SIGUN",            96, ks, ws["sigun"]),       #   시군 벡터
                 jpkg_query.WhereSet(OP_BRACE_CLOSE),                                             # )
             ]
+
+            # 사업명 정합성 앵커(하드코딩 없이 질의에서 동적 추출)
+            # 예: "창원 기초연금 ..." 질의에서 "기초연금"을 앵커로 사용
+            # apply_business_anchor=False(예: fallback)면 앵커 미적용 → 검색 폭 유지
+            anchor_term = (
+                _extract_business_anchor(
+                    vector=str(vector or ""),
+                    keyword=str(keyword or ""),
+                    sigun_filters=sigun_filters,
+                )
+                if apply_business_anchor
+                else ""
+            )
+            if anchor_term:
+                anchor = JString(anchor_term)
+                where_set_array += [
+                    jpkg_query.WhereSet(OP_AND),
+                    jpkg_query.WhereSet(OP_BRACE_OPEN),
+                    jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASALL, anchor, MARINER_WEIGHT_HIGH),
+                    jpkg_query.WhereSet(OP_OR),
+                    jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY, anchor, MARINER_WEIGHT_HIGH),
+                    jpkg_query.WhereSet(OP_BRACE_CLOSE),
+                ]
+                logger.debug(
+                    "[Mariner/%s] 사업명 앵커 적용: %s",
+                    log_label,
+                    anchor_term,
+                )
 
             # SIGUN 스크립틀릿 필터 (n개 OR)
             if sigun_scriptlet_values:
@@ -318,7 +421,7 @@ def _query_dual_documents(
                 doc = {field_name: str(result.getResult(i, idx) or "") for field_name, idx in field_indexes.items()}
                 doc["WEIGHT"] = str(weight_val)
 
-                # TEST_OKMS_V4 필드 매핑
+                # OKMS 필드 매핑
                 doc["CHUNK_ID"] = doc.get("ID", "")
                 doc["NAME"] = _build_okms_document_name(doc)
                 doc["CHUNK_PATH"] = str(doc.get("CONTENT", "") or "")
@@ -371,12 +474,17 @@ def query_group_a_documents(
     sigun_filters: Optional[List[str]] = None,
     lifecycle_filter: Optional[str] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Group A — 듀얼 검색 (QuerySet(2))
 
     keyword(트리플쿼리)와 vector(확장쿼리)를 동시에 Mariner에 전송합니다.
     KO 필드 가중치 0.7 / MI 필드 가중치 0.3
+
+    apply_business_anchor:
+        - True(기본): 정상 검색에서 사업명 앵커를 BUSINESS_NAME_KO/MI에 강하게 적용
+        - False: fallback 등에서 검색 폭을 넓히기 위해 앵커 미적용
 
     Returns:
         (keyword_docs, vector_docs) 튜플
@@ -388,4 +496,5 @@ def query_group_a_documents(
         sigun_filters=sigun_filters,
         lifecycle_filter=lifecycle_filter,
         excluded_chunk_ids=excluded_chunk_ids,
+        apply_business_anchor=apply_business_anchor,
     )

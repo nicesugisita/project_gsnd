@@ -1,5 +1,6 @@
 """MORE_INFO 히스토리 기반으로 제외 chunk/service 정보를 추출합니다."""
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_ASSISTANT
@@ -139,13 +140,41 @@ def get_base_user_query_from_history(messages: list) -> str:
             return content
     # fallback: more_info 메타가 누락된 경우
     # - user_candidates[0]: 가장 최근 user(대개 "더 알려줘")
-    # - user_candidates[1]: 그 이전 user(원질문 후보)
-    # 하드코딩 키워드 없이 대화 구조만으로 원질문을 우선 복원한다.
+    # - 그 이전 user들 중 "시군 되묻기 응답(예: 진주)"처럼 짧은 지역-only 응답은 제외하고
+    #   원질문 후보를 선택한다.
     if len(user_candidates) >= 2:
+        for candidate in user_candidates[1:]:
+            if not _is_sigun_only_reply(candidate):
+                return candidate
         return user_candidates[1]
     if user_candidates:
         return user_candidates[0]
     return ""
+
+
+def _is_sigun_only_reply(content: str) -> bool:
+    """'진주', '창원시'처럼 시군만 단답한 사용자 입력인지 추정."""
+    text = str(content or "").strip()
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    # 단답형 지역 응답만 대상으로 제한 (일반 질문 오탐 방지)
+    if len(compact) > 8:
+        return False
+    if not re.fullmatch(r"[가-힣]+", compact):
+        return False
+
+    try:
+        # 지연 임포트: 순환 참조 방지
+        from app.chat.infra.rag import _extract_sigun_from_message
+        from app.mariner.sigun_utils import normalize_sigun
+    except Exception:
+        return False
+
+    raws = _extract_sigun_from_message(text)
+    normalized = [normalize_sigun(r) for r in raws if r and r != "경남"]
+    siguns = [s for s in normalized if s.startswith("경상남도 ")]
+    return len(siguns) == 1
 
 
 def get_last_preprocess_from_history(messages: list) -> Optional[Dict[str, Any]]:

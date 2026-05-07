@@ -22,6 +22,7 @@ from app.core.constants import (
     OP_BRACE_CLOSE,
     OP_AND,
     OP_HASANY,
+    OP_HASALL,
     OP_VECTOR_SEARCH,
     MARINER_WEIGHT_HIGH,
     MARINER_WEIGHT_MED,
@@ -38,6 +39,35 @@ logger = logging.getLogger(__name__)
 _MAX_WELFARE_KEYWORD_CHARS = 520
 _MAX_WELFARE_KEYWORD_TOKEN_COUNT = 28
 _MAX_SQUEEZED_VARIANT_CHARS = 64
+_SCRIPTLET_OP_PARTIAL = 1
+_SCRIPTLET_WEIGHT_NONE = 0
+_WELFARE_QUERY_OR_TERMS: tuple[tuple[str, int, float], ...] = (
+    ("TEXT_CHUNK_KO", OP_HASANY, MARINER_WEIGHT_HIGH),
+    ("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, MARINER_WEIGHT_MED),
+    ("FACILITY_NAME", OP_HASANY, MARINER_WEIGHT_HIGH),
+    ("FACILITY_NAME", _SCRIPTLET_OP_PARTIAL, MARINER_WEIGHT_MED),
+)
+_WELFARE_SELECT_FIELDS: tuple[str, ...] = (
+    "ID",
+    "SIGUN",
+    "FACILITY_NAME",
+    "ADDRESS",
+    "FACILITY_TYPE",
+    "FACILITY_CATEGORY",
+    "FACILITY_CAPACITY",
+    "HOMEPAGE",
+    "TEL",
+    "WEIGHT",
+)
+_WELFARE_SNIPPET_FIELDS: tuple[tuple[str, str], ...] = (
+    ("FACILITY_TYPE", "시설유형"),
+    ("FACILITY_CATEGORY", "분류"),
+    ("ADDRESS", "주소"),
+    ("TEL", "전화"),
+    ("HOMEPAGE", "홈페이지"),
+)
+_ORDERBY_WEIGHT_DESC = 97
+_WEIGHT_SCALE = 0.0001
 
 # 클라 기본 타임아웃(60s)·벡터 병행 시 -100(소켓 타임아웃) 방지
 _WELFARE_MARINER_TIMEOUT_MS_MIN = 120_000
@@ -214,11 +244,7 @@ def query_welfare_center_documents(
 
         # SELECT 필드 (WELFARE_CENTER 전용)
         num = MARINER_SELECT_FIELD_NUM
-        select_field_names = [
-            "ID", "SIGUN", "FACILITY_NAME", "ADDRESS",
-            "FACILITY_TYPE", "FACILITY_CATEGORY", "FACILITY_CAPACITY",
-            "HOMEPAGE", "TEL", "WEIGHT",
-        ]
+        select_field_names = list(_WELFARE_SELECT_FIELDS)
 
         select_set_array = [
             jpkg_query.SelectSet(JString(field_name), num, 0)
@@ -228,47 +254,56 @@ def query_welfare_center_documents(
         query.setSelect(select_set_array)
 
         # V1 색인: TEXT_CHUNK_MI(Milvus)·TEXT_CHUNK_KO·FACILITY_NAME(어절). 지번/ADDRESS 검색색인 없음.
-        where_set_array = [
-            jpkg_query.WhereSet(OP_BRACE_OPEN),
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(OP_OR),
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(OP_OR),
-            jpkg_query.WhereSet("FACILITY_NAME", OP_HASANY, keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(OP_OR),
-            jpkg_query.WhereSet("FACILITY_NAME", 1, keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(OP_BRACE_CLOSE),
-        ]
+        where_set_array = [jpkg_query.WhereSet(OP_BRACE_OPEN)]
+        for idx, (field, op, weight) in enumerate(_WELFARE_QUERY_OR_TERMS):
+            if idx > 0:
+                where_set_array.append(jpkg_query.WhereSet(OP_OR))
+            where_set_array.append(jpkg_query.WhereSet(field, op, keyword_string, weight))
+        where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
         sigun_scriptlet_values: List[str] = []
-        skip_sigun = False
         for s in sigun_filters or []:
             t = str(s).strip()
             if not t:
                 continue
-            if t == "경상남도":
-                skip_sigun = True
-                break
             sigun_scriptlet_values.append(t)
 
-        if sigun_scriptlet_values and not skip_sigun:
+        if sigun_scriptlet_values:
             sigun_expanded = _expand_sigun_scriptlet_values(sigun_scriptlet_values)
             where_set_array.append(jpkg_query.WhereSet(OP_AND))
             if len(sigun_expanded) == 1:
                 where_set_array.append(
-                    jpkg_query.WhereSet("SIGUN", 1, JString(sigun_expanded[0]), 0),
+                    jpkg_query.WhereSet("SIGUN", OP_HASALL, JString(sigun_expanded[0]), _SCRIPTLET_WEIGHT_NONE),
                 )
             else:
                 where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))
                 for idx, sv in enumerate(sigun_expanded):
                     if idx > 0:
                         where_set_array.append(jpkg_query.WhereSet(OP_OR))
-                    where_set_array.append(jpkg_query.WhereSet("SIGUN", 1, JString(sv), 0))
+                    where_set_array.append(
+                        jpkg_query.WhereSet("SIGUN", OP_HASALL, JString(sv), _SCRIPTLET_WEIGHT_NONE),
+                    )
                 where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
+
+            # 시 단위 입력에서 FIELD 매칭 누락 시, ADDRESS 시명 토큰을 보조 OR로 사용.
+            base_sigun = str(sigun_scriptlet_values[0]).strip()
+            parts = base_sigun.split()
+            if len(parts) >= 2 and parts[0].endswith("도") and parts[1].endswith("시"):
+                city_token = parts[1]
+                where_set_array.extend(
+                    [
+                        jpkg_query.WhereSet(OP_AND),
+                        jpkg_query.WhereSet(OP_BRACE_OPEN),
+                        jpkg_query.WhereSet("SIGUN", OP_HASALL, JString(base_sigun), _SCRIPTLET_WEIGHT_NONE),
+                        jpkg_query.WhereSet(OP_OR),
+                        jpkg_query.WhereSet("ADDRESS", OP_HASALL, JString(city_token), _SCRIPTLET_WEIGHT_NONE),
+                        jpkg_query.WhereSet(OP_BRACE_CLOSE),
+                    ],
+                )
 
         query.setWhere(where_set_array)
 
-        order_set_array = [jpkg_query.OrderBySet(False, "WEIGHT", jpype.JByte(97))]
+        order_set_array = [jpkg_query.OrderBySet(False, "WEIGHT", jpype.JByte(_ORDERBY_WEIGHT_DESC))]
         query.setOrderby(order_set_array)
 
         queryset = jpkg_query.QuerySet(1)
@@ -305,7 +340,7 @@ def query_welfare_center_documents(
         for i in range(result_size):
             try:
                 raw_weight = result.getResult(i, field_indexes["WEIGHT"])
-                weight_val = float(str(raw_weight)) * 0.0001
+                weight_val = float(str(raw_weight)) * _WEIGHT_SCALE
             except (ValueError, TypeError):
                 weight_val = 0.0
 
@@ -322,13 +357,7 @@ def query_welfare_center_documents(
 
             # CHUNK_PATH: 참조문서 스니펫에 표시될 모든 시설 정보
             _snippet_parts = []
-            for _field, _label in [
-                ("FACILITY_TYPE",     "시설유형"),
-                ("FACILITY_CATEGORY", "분류"),
-                ("ADDRESS",           "주소"),
-                ("TEL",               "전화"),
-                ("HOMEPAGE",          "홈페이지"),
-            ]:
+            for _field, _label in _WELFARE_SNIPPET_FIELDS:
                 _val = str(doc.get(_field, "") or "").strip()
                 if _val:
                     _snippet_parts.append(f"{_label}: {_val}")
@@ -341,9 +370,6 @@ def query_welfare_center_documents(
                 doc_facility = str(doc.get("FACILITY_NAME", "") or "").strip()
                 sigun_matched = False
                 for ts in target_siguns:
-                    if ts == "경상남도":
-                        sigun_matched = True
-                        break
                     short = ts.split(" ", 1)[1] if " " in ts else ts
                     city_core = short.replace("시", "").replace("군", "").strip()
                     if doc_sigun == ts or doc_sigun == short or short in doc_address:
@@ -352,7 +378,7 @@ def query_welfare_center_documents(
                     if (
                         len(city_core) >= 2
                         and city_core in doc_facility
-                        and ts.startswith("경상남도 ")
+                        and " " in ts
                     ):
                         sigun_matched = True
                         break

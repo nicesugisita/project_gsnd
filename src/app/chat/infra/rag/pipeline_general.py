@@ -17,12 +17,10 @@ from app.core.config import Config
 # general 전용 Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
 from app.mariner.queryset_gov_okms import query_gov_okms_documents
-from app.mariner.queryset_okms_fallback import query_group_a_fallback
 from app.mariner.queryset_gsnd import query_GSND_general_documents
 from .common import (
     sort_weight_top30_then_year,
     build_referenced_documents,
-    run_welfare_tel_queries,
     filter_excluded_docs,
     dedupe_cap_expanded_queries,
     apply_policy_priority_to_documents,
@@ -52,7 +50,7 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
     resolve_fallback_max_expanded_queries,
-    run_sufficiency_judgment_fast,
+    run_sufficiency_with_shortcut,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,12 +193,15 @@ async def process_rag_general(
                 return [], []
 
         def _group_a_run_okms_fallback(vector: str, keywords: str):
-            """Group A Fallback: 연도/생애주기 제거, 시군 유지"""
+            """Group A Fallback: 정상 검색 함수 재사용, 생애주기/사업명 앵커 비활성(시군/연도/제외 유지)"""
             try:
-                return query_group_a_fallback(
+                return query_group_a_documents(
                     vector, keywords, Config.RAG_OKMS_COLLECTION,
+                    year_filters=gen_year_filters or None,
                     sigun_filters=gen_sigun_filters,
+                    lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    apply_business_anchor=False,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] Group A Fallback 검색 실패: {e}")
@@ -304,15 +305,16 @@ async def process_rag_general(
             logger.info(f"[RAG/general_v2] OKMS Fallback 후: {len(okms_final)}개 (FB-A {len(okms_fb_a_docs)}개 추가)")
 
         # ====================================================================
-        # Step 6-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
+        # Step 6-S: OKMS → GSND 전환 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await run_sufficiency_judgment_fast(
+        okms_sufficiency = await run_sufficiency_with_shortcut(
             judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=okms_final,
+            sigun_filters=gen_sigun_filters,
             log_prefix="RAG/general_v2",
         )
         logger.info("[TIMING][general] Step6-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -321,18 +323,32 @@ async def process_rag_general(
             f"reason={okms_sufficiency['reason']}"
         )
 
+        # 적합성 LLM 타임아웃 시에도 OKMS 상위 결과가 충분하면 GSND 보강 검색을 생략한다.
+        # (타임아웃 때문에 불필요한 Mariner GSND 요청이 추가로 발생하는 것을 방지)
+        if (
+            not okms_sufficiency.get("sufficient")
+            and okms_sufficiency.get("reason") == "judgment_timeout"
+            and len(okms_final) >= 5
+        ):
+            okms_sufficiency = {
+                "sufficient": True,
+                "reason": f"timeout_with_enough_okms_docs:{len(okms_final)}",
+            }
+            logger.info(
+                "[RAG/general_v2] 적합성 timeout 보정 적용: OKMS %d건 확보로 GSND 보강 생략",
+                len(okms_final),
+            )
+
         # ====================================================================
-        # Step 7: OUR_REGION_TEL 검색 (사용자 질문 키워드 기반, OKMS 부족 시)
+        # Step 7: GSND 보강 검색 (OKMS 부족 시)
         # ====================================================================
-        _WELFARE_TEL_PER_QUERY = 5
-        welfare_tel_docs: List[Dict[str, Any]] = []
         gsnd_top: List[Dict[str, Any]] = []
 
         fallback_expanded_queries: List[str] = []
         if okms_sufficiency["sufficient"]:
-            logger.info("[RAG/general_v2] OKMS 결과 충분 — OUR_REGION_TEL/GSND 검색 생략")
+            logger.info("[RAG/general_v2] OKMS 결과 충분 — GSND 검색 생략")
         else:
-            # 2차 fallback: 확장 쿼리 사용
+            # 2차 fallback: 확장 쿼리 사용 (GSND 보강 검색 시드로 활용)
             if status_callback:
                 await status_callback("검색을 보강하고 있습니다")
             _t = time.monotonic()
@@ -349,67 +365,21 @@ async def process_rag_general(
                 logger.info("[RAG/general_v2] fallback 확장 쿼리 적용: %d개", len(fallback_expanded_queries))
             else:
                 logger.info("[RAG/general_v2] fallback 확장 쿼리 없음 — 정제 질의 유지")
-            logger.info("[RAG/general_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
 
-            from app.chat.sigun import extract_eupmyeondong_from_message
-            gen_eupmyeondong = extract_eupmyeondong_from_message(message)
-            gen_eupmyeondong_filters = [gen_eupmyeondong] if gen_eupmyeondong else []
+            logger.info("[RAG/general_v2] OKMS 결과 부족 → GSND 순차 검색")
+            _GSND_SUPPLEMENT_COUNT = 2
+            _GSND_PER_QUERY = 10
+            gsnd_seed_queries = fallback_expanded_queries or list(expanded_queries)
+            gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
 
-            _t = time.monotonic()
-            welfare_tel_docs = await run_welfare_tel_queries(
-                message, gen_sigun_filters, gen_eupmyeondong_filters,
-                _WELFARE_TEL_PER_QUERY, "RAG/general_v2",
-                timeout_sec=(
-                    float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
-                    if (excluded_chunk_ids or excluded_service_names)
-                    else None
-                ),
-            )
-            logger.info("[TIMING][general] Step7 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/general_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
-
-            # ================================================================
-            # Step 7-S: WELFARE_TEL → GSND 전환 적합성 판단 (LLM)
-            # ================================================================
-            welfare_combined = sorted(
-                _deduplicate_documents(okms_final + welfare_tel_docs),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            _t = time.monotonic()
-            welfare_sufficiency = await run_sufficiency_judgment_fast(
-                judge_fn=retrieval_sufficiency_judgment,
-                user_question=message,
-                intent=intent,
-                collection_name=Config.RAG_WELFARE_TEL_COLLECTION,
-                docs=welfare_combined,
-                log_prefix="RAG/general_v2",
-            )
-            logger.info("[TIMING][general] Step7-S OUR_REGION_TEL 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(
-                f"[RAG/general_v2] OKMS+OUR_REGION_TEL 적합성: sufficient={welfare_sufficiency['sufficient']}, "
-                f"reason={welfare_sufficiency['reason']}"
-            )
-
-            # ================================================================
-            # Step 7-B: GSND 보강 검색 (OKMS+OUR_REGION_TEL 부족 시)
-            # ================================================================
-            if welfare_sufficiency["sufficient"]:
-                logger.info("[RAG/general_v2] OKMS+OUR_REGION_TEL 결과 충분 — GSND 검색 생략")
+            gsnd_year_filters = extract_year_filters(message)
+            if gsnd_year_filters:
+                logger.info(f"[RAG/general_v2] GSND 연도 필터: {gsnd_year_filters}")
             else:
-                logger.info("[RAG/general_v2] OKMS+OUR_REGION_TEL 결과 부족 → GSND 병렬 검색")
-                _GSND_SUPPLEMENT_COUNT = 2
-                _GSND_PER_QUERY = 10
-                gsnd_seed_queries = fallback_expanded_queries or list(expanded_queries)
-                gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
+                logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
 
-                gsnd_year_filters = extract_year_filters(message)
-                if gsnd_year_filters:
-                    logger.info(f"[RAG/general_v2] GSND 연도 필터: {gsnd_year_filters}")
-                else:
-                    logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
-
-                def _run_gsnd_query(query):
+            def _run_gsnd_query(query):
+                for attempt in range(2):
                     try:
                         docs = query_GSND_general_documents(
                             query, Config.RAG_COLLECTION,
@@ -423,36 +393,41 @@ async def process_rag_general(
                                 key=lambda x: float(x.get("WEIGHT", 0) or 0),
                                 reverse=True,
                             )[:_GSND_PER_QUERY]
+                        return []
                     except Exception as e:
+                        # Mariner timeout(-60004)은 단발성일 수 있어 1회 재시도한다.
+                        if attempt == 0 and "-60004" in str(e):
+                            logger.warning("[RAG/general_v2] GSND 쿼리 타임아웃(-60004) 재시도: %s", query[:80])
+                            continue
                         logger.warning(f"[RAG/general_v2] GSND 쿼리 검색 실패: {e}")
-                    return []
+                        return []
+                return []
 
-                gsnd_futures = [
-                    loop.run_in_executor(None, _run_gsnd_query, q)
-                    for q in gsnd_all_queries
-                ]
-                _t = time.monotonic()
-                gsnd_results = await asyncio.gather(*gsnd_futures)
-                logger.info("[TIMING][general] Step7-B GSND 보강 검색(병렬): %.3fs", time.monotonic() - _t)
+            _t = time.monotonic()
+            gsnd_results = [
+                await loop.run_in_executor(None, _run_gsnd_query, q)
+                for q in gsnd_all_queries
+            ]
+            logger.info("[TIMING][general] Step7 GSND 보강 검색(순차): %.3fs", time.monotonic() - _t)
 
-                gsnd_docs: List[Dict[str, Any]] = []
-                for i, (q, result) in enumerate(zip(gsnd_all_queries, gsnd_results), 1):
-                    if result:
-                        gsnd_docs.extend(result)
-                    logger.debug(f"[RAG/general_v2] GSND 병렬쿼리 #{i}: {len(result)}개 문서")
+            gsnd_docs: List[Dict[str, Any]] = []
+            for i, (q, result) in enumerate(zip(gsnd_all_queries, gsnd_results), 1):
+                if result:
+                    gsnd_docs.extend(result)
+                logger.debug(f"[RAG/general_v2] GSND 병렬쿼리 #{i}: {len(result)}개 문서")
 
-                gsnd_top = sorted(
-                    _deduplicate_documents(gsnd_docs),
-                    key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                    reverse=True,
-                )[:_GSND_SUPPLEMENT_COUNT]
-                logger.info(f"[RAG/general_v2] GSND 검색 합계: {len(gsnd_docs)}개 → 상위 {len(gsnd_top)}개 보강")
+            gsnd_top = sorted(
+                _deduplicate_documents(gsnd_docs),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )[:_GSND_SUPPLEMENT_COUNT]
+            logger.info(f"[RAG/general_v2] GSND 검색 합계: {len(gsnd_docs)}개 → 상위 {len(gsnd_top)}개 보강")
 
         # ====================================================================
-        # Step 7 합산: OKMS + WELFARE_TEL + GSND
+        # Step 7 합산: OKMS + GSND
         # ====================================================================
         top_docs = sorted(
-            _deduplicate_documents(okms_final + welfare_tel_docs + gsnd_top),
+            _deduplicate_documents(okms_final + gsnd_top),
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
         )

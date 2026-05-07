@@ -30,7 +30,7 @@ from app.dependencies import (
     _validate_user_message,
     chat_user_id_requires_nologin_canonical,
 )
-from ._stream_utils import _build_streaming_response
+from ._stream_utils import _build_streaming_response, SSE_RESPONSE_HEADERS
 from ._conversation_ctx import _check_user_limit, _merge_and_init_conversation
 from ._helpers import (
     _handle_clarify_response,
@@ -147,6 +147,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                     llm_recommended_followup=llm_recommended_followup,
                 ),
                 media_type="text/event-stream",
+                headers=SSE_RESPONSE_HEADERS,
             )
 
         # Non-streaming flow
@@ -269,6 +270,7 @@ async def collect_recommendation_inputs(body: RecommendStartRequest = Body(defau
             return StreamingResponse(
                 _build_streaming_response(QUESTION, response),
                 media_type="text/event-stream",
+                headers=SSE_RESPONSE_HEADERS,
             )
         return JSONResponse(content={"message": QUESTION, "conv_id": conv_id}, status_code=200)
     finally:

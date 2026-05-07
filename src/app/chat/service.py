@@ -15,7 +15,7 @@ from app.chat.more_results import (
     get_base_user_query_from_history,
     get_excluded_info_from_history,
 )
-from app.chat.query_reform import reform_query_with_history
+from app.chat.query_reform import reform_query_if_needed, reform_query_with_history
 from app.chat.routing import (
     classify_next_intent,
     expand_query,
@@ -45,7 +45,7 @@ __all__ = [
     "check_lifecycle",
     "get_last_preprocess_from_history", "get_base_user_query_from_history",
     "get_excluded_info_from_history",
-    "reform_query_with_history",
+    "reform_query_with_history", "reform_query_if_needed",
     "classify_next_intent", "expand_query",
     "extract_triples", "query_recreation",
     "retrieval_sufficiency_judgment",

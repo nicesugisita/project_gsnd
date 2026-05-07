@@ -14,7 +14,7 @@ from app.shared.schemas import ChatRequest
 from app.chat.service import (
     call_llm_api,
     query_recreation,
-    reform_query_with_history,
+    reform_query_if_needed,
 )
 from app.chat.sigun import (
     check_sigun,
@@ -46,9 +46,32 @@ from ._doc_filter import (
 from ._stream_utils import (
     _build_streaming_response,
     _stream_delta_content,
+    SSE_RESPONSE_HEADERS,
+    drain_status_until_done,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_assistant_preprocess_payload(
+    *,
+    user_message: str,
+    intent: str,
+    reformed_query: str | None,
+    expanded_queries: list | None,
+    search_target: str | None,
+    more_info: bool = False,
+) -> dict:
+    """히스토리 저장용 assistant preprocess 메타를 구성."""
+    final_reformed = (reformed_query or user_message or "").strip()
+    return {
+        "query": user_message,
+        "intent": intent or "general",
+        "reformed_query": final_reformed,
+        "expanded_queries": expanded_queries or ([final_reformed] if final_reformed else []),
+        "more_info": bool(more_info),
+        "search_target": search_target,
+    }
 
 
 def _get_rag_processor(intent: str, *, recommended_question_route: bool = False):
@@ -85,7 +108,8 @@ async def _handle_clarify_response(
                 clarify_response["choices"][0]["message"]["content"],
                 clarify_response
             ),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers=SSE_RESPONSE_HEADERS,
         )
 
     return JSONResponse(content=clarify_response, status_code=200)
@@ -229,10 +253,10 @@ async def _handle_rag_mode(
         if llm_recommended_followup:
             reformed_query = user_message
         elif reformed_query is None:
-            reformed_query = await reform_query_with_history(
+            reformed_query = await reform_query_if_needed(
                 user_message=user_message,
-                messages=chat_request.messages
-            ) or user_message
+                messages=chat_request.messages,
+            )
         logger.info(f"[RAG QUERY] {reformed_query}")
 
         async def rag_stream():
@@ -270,15 +294,7 @@ async def _handle_rag_mode(
             )
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
-            while not rag_task.done():
-                try:
-                    status_msg = await asyncio.wait_for(status_queue.get(), timeout=0.1)
-                    yield build_status_message(status_msg)
-                except asyncio.TimeoutError:
-                    continue
-
-            while not status_queue.empty():
-                status_msg = await status_queue.get()
+            async for status_msg in drain_status_until_done(rag_task, status_queue):
                 yield build_status_message(status_msg)
 
             try:
@@ -306,12 +322,21 @@ async def _handle_rag_mode(
                     # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
                     yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
+                    preprocess_payload = _build_assistant_preprocess_payload(
+                        user_message=user_message,
+                        intent=intent,
+                        reformed_query=reformed_query,
+                        expanded_queries=expanded_queries,
+                        search_target=search_target,
+                        more_info=False,
+                    )
                     await asyncio.to_thread(
                         partial(
                             _save_chat_history,
                             chat_request,
                             assistant_content,
                             user_message,
+                            preprocess=preprocess_payload,
                             referenced_documents=referenced_documents,
                         )
                     )
@@ -327,12 +352,21 @@ async def _handle_rag_mode(
                                 logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
                                 yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                             if intent == "guide_recommend" and assistant_content:
+                                preprocess_payload = _build_assistant_preprocess_payload(
+                                    user_message=user_message,
+                                    intent=intent,
+                                    reformed_query=reformed_query,
+                                    expanded_queries=expanded_queries,
+                                    search_target=search_target,
+                                    more_info=False,
+                                )
                                 await asyncio.to_thread(
                                     partial(
                                         _save_chat_history,
                                         chat_request,
                                         assistant_content,
                                         user_message,
+                                        preprocess=preprocess_payload,
                                         referenced_documents=referenced_documents,
                                     )
                                 )
@@ -349,15 +383,19 @@ async def _handle_rag_mode(
 
                     yield chunk
 
-        return StreamingResponse(rag_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            rag_stream(),
+            media_type="text/event-stream",
+            headers=SSE_RESPONSE_HEADERS,
+        )
     else:
         if llm_recommended_followup:
             reformed_query = user_message
         elif reformed_query is None:
-            reformed_query = await reform_query_with_history(
+            reformed_query = await reform_query_if_needed(
                 user_message=user_message,
-                messages=chat_request.messages
-            ) or user_message
+                messages=chat_request.messages,
+            )
         logger.info(f"[RAG QUERY] {reformed_query}")
         llm_kwargs = _build_llm_kwargs(chat_request)
         rag_processor = _get_rag_processor(
@@ -380,12 +418,21 @@ async def _handle_rag_mode(
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
         referenced_documents = _filter_referenced_documents_by_response(response_message, referenced_documents)
 
+        preprocess_payload = _build_assistant_preprocess_payload(
+            user_message=user_message,
+            intent=intent,
+            reformed_query=reformed_query,
+            expanded_queries=expanded_queries,
+            search_target=search_target,
+            more_info=False,
+        )
         conv_id = await asyncio.to_thread(
             partial(
                 _save_chat_history,
                 chat_request,
                 response_message,
                 user_message,
+                preprocess=preprocess_payload,
                 referenced_documents=referenced_documents,
             )
         )

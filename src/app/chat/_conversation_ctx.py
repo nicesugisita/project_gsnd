@@ -21,7 +21,7 @@ from app.dependencies import (
     chat_user_id_requires_nologin_canonical,
     ensure_conversation_exists,
 )
-from ._stream_utils import _build_streaming_response
+from ._stream_utils import _build_streaming_response, SSE_RESPONSE_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,7 @@ def _check_user_limit(
         return StreamingResponse(
             _build_streaming_response(response["choices"][0]["message"]["content"], response),
             media_type="text/event-stream",
+            headers=SSE_RESPONSE_HEADERS,
         )
     return JSONResponse(content=response, status_code=200)
 

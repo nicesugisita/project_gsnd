@@ -128,9 +128,7 @@ def query_GSND_general_documents(
 
         jpkg_query = jpype.JPackage("com.diquest.ir5.common.msg.protocol.query")
         query = jpkg_query.Query("", "")
-        print("----------------------------------------------",keyword)
         keyword_string = JString(keyword)
-        print("----------------------------------------------",keyword_string)
 
         startnum = 0
         endnum = int(max_top_n) - 1
@@ -141,6 +139,7 @@ def query_GSND_general_documents(
         query.setDebug(True)
         query.setPrintQuery(True)
         query.setLoggable(True)
+        query.setFaultless(True)
 
         query.setValue("VS_THRESHOLD", str(threshold))
         query.setValue("VS_RESULT_SIZE", str(max_top_n))

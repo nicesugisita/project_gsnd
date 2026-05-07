@@ -2,7 +2,7 @@
 RAG 서비스 v2 — comparison 플로우
 
 general과 동일한 검색 구조를 사용합니다 (GSND 제외).
-OKMS Group A/B 듀얼 검색 → WELFARE_TEL (BUSINESS_NAME 기반) → LLM 응답
+OKMS Group A/B 듀얼 검색 → Fallback → LLM 응답
 
 기존 services/rag_service.py는 변경하지 않습니다.
 """
@@ -20,10 +20,6 @@ from app.core.config import Config
 # Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
 from app.mariner.queryset_gov_okms import query_gov_okms_documents
-from app.mariner.queryset_okms_fallback import query_group_a_fallback
-from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
-
-# 복지 문의처 공통 모듈
 
 # 기존 rag_service에서 필요한 함수를 import
 from app.chat.infra.rag import (
@@ -52,7 +48,7 @@ from .pipeline_utils import (
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
     resolve_fallback_max_expanded_queries,
-    run_sufficiency_judgment_fast,
+    run_sufficiency_with_shortcut,
     should_rerun_sufficiency_judgment,
 )
 
@@ -86,7 +82,7 @@ async def process_rag_with_documents_v2(
     RAG 문서 검색 및 최종 응답 생성 — comparison 전용
 
     general과 동일한 검색 구조 (GSND 제외):
-    OKMS Group A/B → Fallback → WELFARE_TEL (BUSINESS_NAME) → 관련성 필터 → 응답
+    OKMS Group A/B → Fallback → 관련성 필터 → 응답
     """
 
     _ = precomputed_search_target
@@ -196,11 +192,15 @@ async def process_rag_with_documents_v2(
                 return [], []
 
         def _group_a_fallback_run(vector: str, keywords: str):
+            """Group A Fallback: 정상 검색 함수 재사용, 생애주기/사업명 앵커 비활성(시군/연도/제외 유지)"""
             try:
-                return query_group_a_fallback(
+                return query_group_a_documents(
                     vector, keywords, selected_collection,
+                    year_filters=comp_year_filters or None,
                     sigun_filters=comp_sigun_filters,
+                    lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    apply_business_anchor=False,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] Group A Fallback 실패: {e}")
@@ -219,8 +219,6 @@ async def process_rag_with_documents_v2(
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] GOV_OKMS 쿼리 실패: {e}")
                 return []
-
-        loop = asyncio.get_event_loop()
 
         for i, sq in enumerate(tri_built, 1):
             if sq:
@@ -302,15 +300,16 @@ async def process_rag_with_documents_v2(
             logger.info(f"[RAG/comparison_v2] Fallback 후: {len(okms_final)}개 (FB-A {len(fb_a_docs)}개)")
 
         # ====================================================================
-        # Step 5-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
+        # Step 5-S: OKMS 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await run_sufficiency_judgment_fast(
+        okms_sufficiency = await run_sufficiency_with_shortcut(
             judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=okms_final,
+            sigun_filters=comp_sigun_filters,
             log_prefix="RAG/comparison_v2",
         )
         logger.info("[TIMING][comparison] Step5-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -320,15 +319,11 @@ async def process_rag_with_documents_v2(
         )
 
         # ====================================================================
-        # Step 6: WELFARE_TEL 검색 (OKMS BUSINESS_NAME + SIGUN 기반, OKMS 부족 시)
+        # Step 6: OKMS 2차 Fallback (확장쿼리 기반 보강 검색, OKMS 부족 시)
         # ====================================================================
-        _COMP_WELFARE_TEL_PER_QUERY = 5
-        welfare_tel_docs: List[Dict[str, Any]] = []
-
         if okms_sufficiency["sufficient"]:
-            logger.info("[RAG/comparison_v2] OKMS 결과 충분 — OUR_REGION_TEL 검색 생략")
+            logger.info("[RAG/comparison_v2] OKMS 결과 충분 — 2차 Fallback 생략")
         else:
-            # 2차 fallback: 확장 쿼리 기반 OKMS 보강 검색
             if status_callback:
                 await status_callback("검색을 보강하고 있습니다")
             _t = time.monotonic()
@@ -373,12 +368,13 @@ async def process_rag_with_documents_v2(
                         after_docs=okms_final,
                     ) and not (excluded_chunk_ids or excluded_service_names):
                         _t = time.monotonic()
-                        okms_sufficiency = await run_sufficiency_judgment_fast(
+                        okms_sufficiency = await run_sufficiency_with_shortcut(
                             judge_fn=retrieval_sufficiency_judgment,
                             user_question=message,
                             intent=intent,
                             collection_name=Config.RAG_OKMS_COLLECTION,
                             docs=okms_final,
+                            sigun_filters=comp_sigun_filters,
                             log_prefix="RAG/comparison_v2",
                         )
                         logger.info("[TIMING][comparison] Step5-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
@@ -393,50 +389,9 @@ async def process_rag_with_documents_v2(
                         else:
                             logger.info("[RAG/comparison_v2] fallback 재판단 스킵: 개선 폭 미미")
 
-            if okms_sufficiency["sufficient"]:
-                logger.info("[RAG/comparison_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
-            else:
-                logger.info("[RAG/comparison_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
-
-                from app.chat.sigun import extract_eupmyeondong_from_message
-                comp_eupmyeondong = extract_eupmyeondong_from_message(message)
-                comp_eupmyeondong_filters = [comp_eupmyeondong] if comp_eupmyeondong else []
-
-                def _run_welfare_tel_query():
-                    try:
-                        return query_welfare_tel_documents(
-                            message,
-                            sigun_filters=comp_sigun_filters,
-                            eupmyeondong_filters=comp_eupmyeondong_filters,
-                            max_results=-1,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 실패: {e}")
-                        return []
-
-                _t = time.monotonic()
-                _tel_future = loop.run_in_executor(None, _run_welfare_tel_query)
-                if excluded_chunk_ids or excluded_service_names:
-                    try:
-                        _tel_result = await asyncio.wait_for(
-                            _tel_future,
-                            timeout=float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC),
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "[RAG/comparison_v2] OUR_REGION_TEL timeout(%.1fs) -> skip",
-                            float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC),
-                        )
-                        _tel_result = []
-                else:
-                    _tel_result = await _tel_future
-                logger.info("[TIMING][comparison] Step6 OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
-                welfare_tel_docs.extend(_tel_result[:_COMP_WELFARE_TEL_PER_QUERY])
-                logger.info(f"[RAG/comparison_v2] OUR_REGION_TEL 검색 합계: {len(welfare_tel_docs)}개")
-
-        # OKMS + WELFARE_TEL 합산
+        # OKMS 결과 정렬
         top_docs = sorted(
-            _deduplicate_documents(okms_final + welfare_tel_docs),
+            _deduplicate_documents(okms_final),
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
         )
