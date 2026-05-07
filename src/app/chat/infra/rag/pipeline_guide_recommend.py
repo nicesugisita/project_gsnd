@@ -48,7 +48,7 @@ from .pipeline_utils import (
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
     resolve_fallback_max_expanded_queries,
-    run_sufficiency_judgment_fast,
+    run_sufficiency_with_shortcut,
     should_rerun_sufficiency_judgment,
 )
 logger = logging.getLogger(__name__)
@@ -330,12 +330,13 @@ async def process_rag_guide_recommend(
         # Step D-S: OKMS 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
-        okms_sufficiency = await run_sufficiency_judgment_fast(
+        okms_sufficiency = await run_sufficiency_with_shortcut(
             judge_fn=retrieval_sufficiency_judgment,
             user_question=message,
             intent=intent,
             collection_name=Config.RAG_OKMS_COLLECTION,
             docs=gr_top_docs,
+            sigun_filters=gr_sigun_filters,
             log_prefix="RAG/guide_recommend_v2",
         )
         logger.info("[TIMING][guide_recommend] StepD-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
@@ -397,12 +398,13 @@ async def process_rag_guide_recommend(
                         after_docs=gr_top_docs,
                     ) and not (excluded_chunk_ids or excluded_service_names):
                         _t = time.monotonic()
-                        okms_sufficiency = await run_sufficiency_judgment_fast(
+                        okms_sufficiency = await run_sufficiency_with_shortcut(
                             judge_fn=retrieval_sufficiency_judgment,
                             user_question=message,
                             intent=intent,
                             collection_name=Config.RAG_OKMS_COLLECTION,
                             docs=gr_top_docs,
+                            sigun_filters=gr_sigun_filters,
                             log_prefix="RAG/guide_recommend_v2",
                         )
                         logger.info("[TIMING][guide_recommend] StepD-S3 fallback 재판단: %.3fs", time.monotonic() - _t)

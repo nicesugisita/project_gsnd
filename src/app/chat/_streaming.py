@@ -40,7 +40,11 @@ from app.dependencies import (
     _update_user_message,
 )
 from ._doc_filter import _filter_referenced_documents_by_response
-from ._stream_utils import _build_streaming_response, _stream_delta_content
+from ._stream_utils import (
+    _build_streaming_response,
+    _stream_delta_content,
+    drain_status_until_done,
+)
 from ._helpers import _get_rag_processor, _run_query_recreation
 from ._conversation_ctx import _save_stream_history
 from app.chat.more_results import (
@@ -456,14 +460,8 @@ async def _streaming_chat_flow(
                 shorten_text(reformed_query or "", 80),
             )
 
-        while True:
-            if rag_task.done() and status_queue.empty():
-                break
-            try:
-                status_msg = await asyncio.wait_for(status_queue.get(), timeout=0.2)
-                yield build_status_message(status_msg)
-            except asyncio.TimeoutError:
-                pass
+        async for status_msg in drain_status_until_done(rag_task, status_queue):
+            yield build_status_message(status_msg)
 
         try:
             result, referenced_documents = await rag_task

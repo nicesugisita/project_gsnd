@@ -173,27 +173,28 @@ async def generate_final_response_v2(
 
         if not final_prompt:
             logger.warning(f"[Final Response v2] {intent} 프롬프트 로드 실패 - 기본 LLM 사용")
-            logger.info(
-                "[Final Response v2][LLM Input Params/Fallback] %s",
-                json.dumps(
-                    {
-                        "intent": intent,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": stream,
-                        "frequency_penalty": frequency_penalty,
-                        "repetition_penalty": repetition_penalty,
-                        "top_p": top_p,
-                        "top_k": top_k,
-                        "seed": seed,
-                        "tools": tools,
-                        "messages": [{"role": ROLE_USER, "content": message}],
-                        "multi_turn_messages": messages or [],
-                    },
-                    ensure_ascii=False,
-                    default=str,
-                ),
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[Final Response v2][LLM Input Params/Fallback] %s",
+                    json.dumps(
+                        {
+                            "intent": intent,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "stream": stream,
+                            "frequency_penalty": frequency_penalty,
+                            "repetition_penalty": repetition_penalty,
+                            "top_p": top_p,
+                            "top_k": top_k,
+                            "seed": seed,
+                            "tools": tools,
+                            "messages": [{"role": ROLE_USER, "content": message}],
+                            "multi_turn_messages": messages or [],
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                )
             # 멀티턴 히스토리가 있으면 포함 (LLM이 대화 맥락을 파악하도록)
             _fb_msgs = [m for m in (messages or []) if m.get("role") in (ROLE_USER, ROLE_ASSISTANT)]
             if not _fb_msgs:
@@ -267,37 +268,48 @@ async def generate_final_response_v2(
         else:
             combined_prompts = [system_prompt]
 
+        # 풀 페이로드 직렬화는 디버그 시에만 수행 (TTFT 절감)
+        # INFO에는 핵심 카운트만 남겨 운영 가시성을 유지한다.
         logger.info(
-            "[Final Response v2][MultiTurn Full Messages] %s",
-            json.dumps(messages or [], ensure_ascii=False, default=str),
+            "[Final Response v2][LLM Input Summary] intent=%s stream=%s "
+            "temperature=%s max_tokens=%s top_docs=%d welfare_docs=%d "
+            "lifecycle=%s region=%s birth_year=%s more_info=%s",
+            intent, stream, temperature, max_tokens,
+            len(top_docs or []), len(welfare_docs or []),
+            lifecycle or "", user_region or "", user_birth_year or "", more_info_mode,
         )
-        logger.info(
-            "[Final Response v2][LLM Input Params] %s",
-            json.dumps(
-                {
-                    "intent": intent,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": stream,
-                    "frequency_penalty": frequency_penalty,
-                    "repetition_penalty": repetition_penalty,
-                    "top_p": top_p,
-                    "top_k": top_k,
-                    "seed": seed,
-                    "tools": tools,
-                    "lifecycle": lifecycle,
-                    "user_region": user_region,
-                    "user_birth_year": user_birth_year,
-                    "more_info_mode": more_info_mode,
-                    "top_docs_count": len(top_docs or []),
-                    "welfare_docs_count": len(welfare_docs or []),
-                    "extra_system_prompts": combined_prompts,
-                    "messages": final_messages,
-                },
-                ensure_ascii=False,
-                default=str,
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[Final Response v2][MultiTurn Full Messages] %s",
+                json.dumps(messages or [], ensure_ascii=False, default=str),
+            )
+            logger.debug(
+                "[Final Response v2][LLM Input Params] %s",
+                json.dumps(
+                    {
+                        "intent": intent,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": stream,
+                        "frequency_penalty": frequency_penalty,
+                        "repetition_penalty": repetition_penalty,
+                        "top_p": top_p,
+                        "top_k": top_k,
+                        "seed": seed,
+                        "tools": tools,
+                        "lifecycle": lifecycle,
+                        "user_region": user_region,
+                        "user_birth_year": user_birth_year,
+                        "more_info_mode": more_info_mode,
+                        "top_docs_count": len(top_docs or []),
+                        "welfare_docs_count": len(welfare_docs or []),
+                        "extra_system_prompts": combined_prompts,
+                        "messages": final_messages,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
 
         response = await call_llm_api(
             temperature=temperature,

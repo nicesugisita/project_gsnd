@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+import re
 from contextlib import contextmanager
 from itertools import zip_longest
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_USER
+from app.core.config import Config
 from app.chat.infra.rag.policy_priority import (
     augment_okms_dual_query,
     policy_extra_okms_searches,
@@ -25,6 +27,93 @@ FALLBACK_REJUDGE_MIN_DOC_GAIN = 1
 FALLBACK_REJUDGE_MIN_TOP_WEIGHT_GAIN = 0.03
 SUFFICIENCY_JUDGMENT_TIMEOUT_SEC = 4.0
 SUFFICIENCY_JUDGMENT_MAX_DOCS = 8
+
+# ---- 적합성 판정 휴리스틱 단축 ----
+# 검색 결과가 명확히 충분한 케이스(상위 문서 BUSINESS_NAME에 사용자 핵심어가 그대로 들어있는 경우)는
+# LLM 판정을 생략한다. 보수적으로 적용해 false-positive 위험 최소화.
+SUFFICIENCY_SHORTCUT_MIN_DOCS = 3
+SUFFICIENCY_SHORTCUT_MIN_ANCHOR_LEN = 3
+# 시군명/일반어는 anchor 후보에서 배제해 false-positive 차단
+_SUFFICIENCY_SHORTCUT_ANCHOR_STOPWORDS = {
+    "지원", "정보", "안내", "신청", "방법", "대상", "조건", "사업",
+    "제도", "서비스", "복지", "문의", "내용", "절차", "기준",
+}
+_SUFFICIENCY_NUMERIC_RE = re.compile(r"^\d{1,4}(?:년|년도)?$")
+
+
+def _tokenize_for_shortcut(text: str) -> List[str]:
+    tokens: List[str] = []
+    for raw in str(text or "").split():
+        tok = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
+        if len(tok) < SUFFICIENCY_SHORTCUT_MIN_ANCHOR_LEN:
+            continue
+        if tok in _SUFFICIENCY_SHORTCUT_ANCHOR_STOPWORDS:
+            continue
+        if _SUFFICIENCY_NUMERIC_RE.fullmatch(tok):
+            continue
+        tokens.append(tok)
+    return tokens
+
+
+def _doc_business_name(doc: Dict[str, Any]) -> str:
+    for key in ("BUSINESS_NAME", "BUSINESS_NAME_KO", "NAME", "ORG_NM"):
+        value = str(doc.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def shortcut_sufficiency_by_anchor(
+    *,
+    user_question: str,
+    docs: List[Dict[str, Any]],
+    sigun_filters: Optional[List[str]] = None,
+    log_prefix: str = "RAG",
+) -> Optional[Dict[str, Any]]:
+    """검색 결과가 명확히 충분하면 LLM 판정 없이 sufficient=True 반환.
+
+    조건(모두 충족 시 단축):
+    - docs 개수 >= SUFFICIENCY_SHORTCUT_MIN_DOCS
+    - 사용자 질의에서 추출한 anchor 토큰(>=3자, 시군명/일반어/연도 제외)이 존재
+    - 상위 1건 문서의 BUSINESS_NAME 류 필드에 anchor 포함
+
+    조건 미충족 시 None → 호출측은 LLM 판정으로 폴백.
+    """
+    if not docs or len(docs) < SUFFICIENCY_SHORTCUT_MIN_DOCS:
+        return None
+
+    candidate_tokens = _tokenize_for_shortcut(user_question)
+    if not candidate_tokens:
+        return None
+
+    # 시군명 토큰은 anchor 후보에서 제외 (예: "창원", "진주")
+    banned: set[str] = set()
+    for s in sigun_filters or []:
+        s = str(s or "").strip()
+        if not s:
+            continue
+        banned.add(s)
+        banned.add(s.replace("경상남도", "").strip())
+        banned.update(_tokenize_for_shortcut(s))
+
+    anchors = [t for t in candidate_tokens if t not in banned]
+    if not anchors:
+        return None
+
+    top_name = _doc_business_name(docs[0])
+    if not top_name:
+        return None
+
+    matched_anchor = next((t for t in anchors if t in top_name), None)
+    if not matched_anchor:
+        return None
+
+    reason = f"shortcut_anchor_top1:{matched_anchor}"
+    logger.info(
+        "[%s] sufficiency shortcut: %s | top_name=%s | docs=%d",
+        log_prefix, reason, top_name[:60], len(docs),
+    )
+    return {"sufficient": True, "reason": reason}
 
 
 @contextmanager
@@ -161,6 +250,44 @@ def should_rerun_sufficiency_judgment(
         return max(float(d.get("WEIGHT", 0) or 0) for d in docs)
 
     return (_top_weight(after_docs) - _top_weight(before_docs)) >= min_top_weight_gain
+
+
+async def run_sufficiency_with_shortcut(
+    *,
+    judge_fn: Callable[..., Awaitable[Dict[str, Any]]],
+    user_question: str,
+    intent: str,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    sigun_filters: Optional[List[str]] = None,
+    timeout_sec: float = SUFFICIENCY_JUDGMENT_TIMEOUT_SEC,
+    max_docs: int = SUFFICIENCY_JUDGMENT_MAX_DOCS,
+    log_prefix: str = "RAG",
+) -> Dict[str, Any]:
+    """휴리스틱 단축이 가능하면 LLM 호출 없이 즉시 충분 판정, 아니면 LLM 폴백.
+
+    Config.RAG_SUFFICIENCY_FAST_PATH_ENABLED=False면 단축을 건너뛴다.
+    """
+    if Config.RAG_SUFFICIENCY_FAST_PATH_ENABLED:
+        shortcut = shortcut_sufficiency_by_anchor(
+            user_question=user_question,
+            docs=docs,
+            sigun_filters=sigun_filters,
+            log_prefix=log_prefix,
+        )
+        if shortcut is not None:
+            return shortcut
+
+    return await run_sufficiency_judgment_fast(
+        judge_fn=judge_fn,
+        user_question=user_question,
+        intent=intent,
+        collection_name=collection_name,
+        docs=docs,
+        timeout_sec=timeout_sec,
+        max_docs=max_docs,
+        log_prefix=log_prefix,
+    )
 
 
 async def run_sufficiency_judgment_fast(
