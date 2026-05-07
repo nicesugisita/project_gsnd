@@ -166,6 +166,7 @@ def fetch_mariner_docs_for_recommended_question_sync(
             all_docs.extend(
                 query_gov_okms_documents_by_display_name(
                     q,
+                    year_filters=year_filters,
                     lifecycle_filter=lifecycle or None,
                     sigun_filters=sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any, Dict, Iterable, List, Optional
 
 import jpype
 from jpype import JString
@@ -42,16 +43,34 @@ from app.mariner.queryset_gov_okms import (
 logger = logging.getLogger(__name__)
 
 _LOG = "recommended_question_name"
-_TARGET_DOC_YEAR = "2026"
 
 
-def _is_target_year_doc(doc: Dict[str, Any]) -> bool:
-    """추천 후속 질문 전용: 2026년 문서만 허용."""
+def _resolve_target_years(year_filters: Optional[Iterable[str]]) -> List[str]:
+    """대상 연도 목록을 결정.
+
+    - year_filters에 사용자 명시(또는 상위에서 추출한) 연도가 있으면 그 값을 사용
+    - 비어 있으면 시스템 현재 연도 1개로 폴백
+    중복 제거 + 정렬, 모두 4자리 숫자 문자열로 정규화한다.
+    """
+    raw = [str(y).strip() for y in (year_filters or []) if str(y).strip()]
+    normalized = sorted({y for y in raw if y.isdigit() and len(y) == 4})
+    if not normalized:
+        normalized = [str(date.today().year)]
+    return normalized
+
+
+def _is_target_year_doc(doc: Dict[str, Any], target_years: Iterable[str]) -> bool:
+    """추천 후속 질문 전용: target_years 중 하나라도 매칭되는 문서만 허용."""
     if not isinstance(doc, dict):
+        return False
+    years = [str(y).strip() for y in target_years if str(y).strip()]
+    if not years:
         return False
     for key in ("YEAR", "APPLICATION_PERIOD", "NAME", "BUSINESS_NAME", "SERVICE_NAME"):
         value = str(doc.get(key, "") or "").strip()
-        if _TARGET_DOC_YEAR in value:
+        if not value:
+            continue
+        if any(y in value for y in years):
             return True
     return False
 
@@ -106,6 +125,8 @@ def query_okms_documents_by_display_name(
         s for s in (sigun_filters or [])
         if s and s != "경상남도"
     ]
+
+    target_years = _resolve_target_years(year_filters)
 
     try:
         ensure_jvm_thread()
@@ -182,18 +203,32 @@ def query_okms_documents_by_display_name(
                     jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
-        query.setWhere(where_set_array)
+        # 대상 연도 WhereSet (사용자 명시 또는 시스템 현재 연도, 다중 연도면 OR)
+        if len(target_years) == 1:
+            where_set_array += [
+                jpkg_query.WhereSet(OP_AND),
+                jpkg_query.WhereSet("YEAR", OP_HASANY, JString(target_years[0]), MARINER_WEIGHT_HIGH),
+            ]
+        else:
+            where_set_array.append(jpkg_query.WhereSet(OP_AND))
+            where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))
+            for idx, y in enumerate(target_years):
+                if idx > 0:
+                    where_set_array.append(jpkg_query.WhereSet(OP_OR))
+                where_set_array.append(
+                    jpkg_query.WhereSet("YEAR", OP_HASANY, JString(y), MARINER_WEIGHT_HIGH)
+                )
+            where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
-        # recommended-question 전용 정책: YEAR 색인 WhereSet으로 2026년 문서만 검색
-        where_set_array += [
-            jpkg_query.WhereSet(OP_AND),
-            jpkg_query.WhereSet("YEAR", OP_HASANY, JString(_TARGET_DOC_YEAR), MARINER_WEIGHT_HIGH),
-        ]
+        query.setWhere(where_set_array)
 
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)
 
-        logger.info("[%s/OKMS] name-only 검색: %r collection=%s", _LOG, q[:80], collection)
+        logger.info(
+            "[%s/OKMS] name-only 검색: %r collection=%s years=%s",
+            _LOG, q[:80], collection, target_years,
+        )
         ret = command.request(queryset)
         if ret < 0:
             logger.error("[%s/OKMS] 요청 오류: %s", _LOG, ret)
@@ -224,7 +259,7 @@ def query_okms_documents_by_display_name(
             doc["CHUNK_ID"] = doc.get("ID", "")
             doc["NAME"] = _build_okms_document_name(doc)
             doc["CHUNK_PATH"] = str(doc.get("CONTENT", "") or "")
-            if not _is_target_year_doc(doc):
+            if not _is_target_year_doc(doc, target_years):
                 continue
 
             docs.append(doc)
@@ -244,12 +279,17 @@ def query_okms_documents_by_display_name(
 
 def query_gov_okms_documents_by_display_name(
     display_name: str,
+    year_filters: Optional[List[str]] = None,
     lifecycle_filter: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
     max_results: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """행정안전부 GOV 컬렉션(``RAG_GOV_OKMS_COLLECTION``) — 서비스명 필드만 QuerySet(1) 검색."""
+    """행정안전부 GOV 컬렉션(``RAG_GOV_OKMS_COLLECTION``) — 서비스명 필드만 QuerySet(1) 검색.
+
+    GOV_OKMS는 YEAR 색인이 없으므로 검색 단계 필터는 적용하지 않으며,
+    수신 문서의 NAME/SERVICE_NAME/APPLICATION_PERIOD 등에 대상 연도 문자열이 있을 때만 통과시킨다.
+    """
     t1 = time.monotonic()
     if not Config.RAG_ENABLED:
         logger.warning("[%s/GOV] RAG 비활성화", _LOG)
@@ -272,6 +312,8 @@ def query_gov_okms_documents_by_display_name(
         for chunk_id in (excluded_chunk_ids or [])
         if str(chunk_id).strip()
     }
+
+    target_years = _resolve_target_years(year_filters)
 
     _top_n = int(max_results or 8)
     _top_n = max(1, min(_top_n, 20))
@@ -333,7 +375,10 @@ def query_gov_okms_documents_by_display_name(
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)
 
-        logger.info("[%s/GOV] name-only 검색: %r collection=%s", _LOG, q[:80], collection)
+        logger.info(
+            "[%s/GOV] name-only 검색: %r collection=%s years=%s",
+            _LOG, q[:80], collection, target_years,
+        )
         ret = command.request(queryset)
         if ret < 0:
             logger.error("[%s/GOV] 요청 오류: %s", _LOG, ret)
@@ -382,7 +427,7 @@ def query_gov_okms_documents_by_display_name(
             doc["CHUNK_PATH"] = _combined
             doc.setdefault("SIGUN", sigun_scriptlet_values[0] if sigun_scriptlet_values else "")
             doc.setdefault("YEAR", "")
-            if not _is_target_year_doc(doc):
+            if not _is_target_year_doc(doc, target_years):
                 continue
             docs.append(doc)
 

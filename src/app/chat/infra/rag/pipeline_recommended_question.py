@@ -18,6 +18,7 @@ from app.chat.infra.rag import (
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
 )
+from app.shared.utils.year_filter import extract_year_filters
 from app.chat.infra.rag.common import build_referenced_documents, filter_excluded_docs
 from app.chat.infra.rag.response_generator import generate_final_response_v2
 from app.mariner.sigun_utils import normalize_sigun
@@ -93,6 +94,12 @@ async def process_rag_recommended_question(
         else:
             lifecycle = _extract_lifecycle_from_message(message) or ""
 
+        rq_year_filters = extract_year_filters(message) or None
+        if rq_year_filters:
+            logger.debug(
+                "[RAG/recommended_question] 연도 필터: %s", rq_year_filters
+            )
+
         gr_top_docs: List[Dict[str, Any]] = []
         if extract_reference_mariner_query_strings(meta_refs):
             if status_callback:
@@ -102,7 +109,7 @@ async def process_rag_recommended_question(
                 meta_refs,
                 gr_sigun_filters or None,
                 None,
-                None,
+                rq_year_filters,
                 excluded_chunk_ids,
             )
             if gr_top_docs and (excluded_chunk_ids or excluded_service_names):

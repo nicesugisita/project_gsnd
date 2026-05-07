@@ -14,14 +14,12 @@ from typing import Dict, Any, List, Optional
 
 from app.core.config import Config
 
-# TEST_OKMS_V4 Mariner 쿼리셋
+# OKMS Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
 from app.mariner.queryset_gov_okms import query_gov_okms_documents
-from app.mariner.queryset_okms_fallback import query_group_a_fallback
 from .common import (
     sort_weight_top30_then_year,
     build_referenced_documents,
-    run_welfare_tel_queries,
     filter_excluded_docs,
     dedupe_cap_expanded_queries,
     apply_policy_priority_to_documents,
@@ -245,7 +243,7 @@ async def process_rag_guide_recommend(
         )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
-        # TEST_OKMS_V4 독립 정렬 → top 10 (Fallback 입력용)
+        # OKMS 독립 정렬 → top 10 (Fallback 입력용)
         gr_group_a_top = sorted(
             _deduplicate_documents(gr_group_a_docs),
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
@@ -277,7 +275,7 @@ async def process_rag_guide_recommend(
                 f"  CHUNK_ID={doc.get('CHUNK_ID', '')}"
             )
 
-        # Step D: TEST_OKMS_V4 쿼터 → top 5
+        # Step D: OKMS 쿼터 → top 5
         _GR_FINAL_TOP_N = 5
         gr_top_docs = gr_group_a_top[:_GR_FINAL_TOP_N]
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 쿼터 확정: {len(gr_top_docs)}개")
@@ -295,12 +293,15 @@ async def process_rag_guide_recommend(
             logger.info(f"[RAG/guide_recommend_v2] OKMS 결과 {len(gr_top_docs)}건 < {_GR_FALLBACK_THRESHOLD}건 → Fallback 검색 시작")
 
             def _group_a_run_okms_fallback(vector: str, keywords: str):
-                """Group A Fallback: 연도/생애주기 제거, 시군 유지"""
+                """Group A Fallback: 정상 검색 함수 재사용, 생애주기/사업명 앵커 비활성(시군/연도/제외 유지)"""
                 try:
-                    return query_group_a_fallback(
+                    return query_group_a_documents(
                         vector, keywords, selected_collection,
+                        year_filters=gr_year_filters or None,
                         sigun_filters=gr_sigun_filters,
+                        lifecycle_filter=None,
                         excluded_chunk_ids=excluded_chunk_ids,
+                        apply_business_anchor=False,
                     )
                 except Exception as e:
                     logger.warning(f"[RAG/guide_recommend_v2] Group A Fallback 검색 실패: {e}")
@@ -326,7 +327,7 @@ async def process_rag_guide_recommend(
             logger.info(f"[RAG/guide_recommend_v2] OKMS Fallback 후: {len(gr_top_docs)}개 (FB-A {len(gr_fb_a_docs)}개 추가)")
 
         # ====================================================================
-        # Step D-S: OKMS → WELFARE_TEL 전환 적합성 판단 (LLM)
+        # Step D-S: OKMS 적합성 판단 (LLM)
         # ====================================================================
         _t = time.monotonic()
         okms_sufficiency = await run_sufficiency_judgment_fast(
@@ -344,15 +345,11 @@ async def process_rag_guide_recommend(
         )
 
         # ====================================================================
-        # Step D-W: WELFARE_TEL 검색 (OKMS BUSINESS_NAME + SIGUN 기반, OKMS 부족 시)
+        # Step D-W: OKMS 2차 Fallback (확장쿼리 기반 보강 검색, OKMS 부족 시)
         # ====================================================================
-        _GR_WELFARE_TEL_PER_QUERY = 5
-        gr_welfare_tel_docs: List[Dict[str, Any]] = []
-
         if okms_sufficiency["sufficient"]:
-            logger.info("[RAG/guide_recommend_v2] OKMS 결과 충분 — OUR_REGION_TEL 검색 생략")
+            logger.info("[RAG/guide_recommend_v2] OKMS 결과 충분 — 2차 Fallback 생략")
         else:
-            # 2차 fallback: 확장 쿼리 기반 OKMS 보강 검색
             if status_callback:
                 await status_callback("검색을 보강하고 있습니다")
             _t = time.monotonic()
@@ -420,31 +417,9 @@ async def process_rag_guide_recommend(
                         else:
                             logger.info("[RAG/guide_recommend_v2] fallback 재판단 스킵: 개선 폭 미미")
 
-            if okms_sufficiency["sufficient"]:
-                logger.info("[RAG/guide_recommend_v2] fallback 후 충분 — OUR_REGION_TEL 검색 생략")
-            else:
-                logger.info("[RAG/guide_recommend_v2] OKMS 결과 부족 → OUR_REGION_TEL 검색 진행")
-
-                from app.chat.sigun import extract_eupmyeondong_from_message
-                gr_eupmyeondong = extract_eupmyeondong_from_message(message)
-                gr_eupmyeondong_filters = [gr_eupmyeondong] if gr_eupmyeondong else []
-
-                _t = time.monotonic()
-                gr_welfare_tel_docs = await run_welfare_tel_queries(
-                    message, gr_sigun_filters, gr_eupmyeondong_filters,
-                    _GR_WELFARE_TEL_PER_QUERY, "RAG/guide_recommend_v2",
-                    timeout_sec=(
-                        float(Config.MORE_INFO_WELFARE_TEL_TIMEOUT_SEC)
-                        if (excluded_chunk_ids or excluded_service_names)
-                        else None
-                    ),
-                )
-                logger.info("[TIMING][guide_recommend] StepD-W OUR_REGION_TEL 검색: %.3fs", time.monotonic() - _t)
-                logger.info(f"[RAG/guide_recommend_v2] OUR_REGION_TEL 검색 합계: {len(gr_welfare_tel_docs)}개")
-
-        # OKMS + WELFARE_TEL 합산 (OKMS 쿼터 내 정렬)
+        # OKMS 결과 정렬 (OKMS 쿼터 내)
         gr_top_docs = sorted(
-            _deduplicate_documents(gr_top_docs + gr_welfare_tel_docs),
+            _deduplicate_documents(gr_top_docs),
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
         )[:_GR_FINAL_TOP_N]
