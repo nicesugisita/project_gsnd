@@ -4,6 +4,7 @@ Mariner 쿼리셋 — GSND_BIZ_DATASET_V4 듀얼 검색 (Group A/B)
 """
 
 import logging
+import re
 import time
 from typing import Dict, Any, List, Optional
 
@@ -29,6 +30,62 @@ from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
 
 logger = logging.getLogger(__name__)
+
+_ANCHOR_STOPWORDS = {
+    "지원", "정보", "안내", "신청", "방법", "대상", "조건", "사업",
+    "제도", "서비스", "복지", "문의", "내용", "절차", "기준",
+}
+
+
+def _tokenize_query_terms(text: str) -> List[str]:
+    tokens: List[str] = []
+    for raw in str(text or "").split():
+        tok = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
+        if len(tok) < 2:
+            continue
+        tokens.append(tok)
+    return tokens
+
+
+def _extract_business_anchor(
+    vector: str,
+    keyword: str,
+    sigun_filters: Optional[List[str]],
+) -> str:
+    """
+    질의에서 사업명 정합성 앵커 1개를 추출.
+    - vector/keyword 공통 토큰 우선
+    - 지역명/일반어는 제외
+    """
+    vector_tokens = _tokenize_query_terms(vector)
+    keyword_tokens = _tokenize_query_terms(keyword)
+    if not vector_tokens and not keyword_tokens:
+        return ""
+
+    banned: set[str] = set(_ANCHOR_STOPWORDS)
+    for s in sigun_filters or []:
+        s = str(s or "").strip()
+        if not s:
+            continue
+        banned.add(s)
+        banned.add(s.replace("경상남도", "").strip())
+        banned.update(t for t in _tokenize_query_terms(s))
+
+    vec_set = {t for t in vector_tokens if t not in banned}
+    key_set = {t for t in keyword_tokens if t not in banned}
+
+    # 공통 핵심어를 우선 사용(예: "기초연금")
+    common = sorted((vec_set & key_set), key=len, reverse=True)
+    for tok in common:
+        if len(tok) >= 3:
+            return tok
+
+    # 공통어가 없으면 vector 쪽에서 가장 긴 토큰 사용
+    candidates = sorted(vec_set, key=len, reverse=True)
+    for tok in candidates:
+        if len(tok) >= 3:
+            return tok
+    return ""
 
 
 def _build_okms_document_name(doc: Dict[str, Any]) -> str:
@@ -191,6 +248,29 @@ def _query_dual_documents(
                 jpkg_query.WhereSet("SIGUN",            96, ks, ws["sigun"]),       #   시군 벡터
                 jpkg_query.WhereSet(OP_BRACE_CLOSE),                                             # )
             ]
+
+            # 사업명 정합성 앵커(하드코딩 없이 질의에서 동적 추출)
+            # 예: "창원 기초연금 ..." 질의에서 "기초연금"을 앵커로 사용
+            anchor_term = _extract_business_anchor(
+                vector=str(vector or ""),
+                keyword=str(keyword or ""),
+                sigun_filters=sigun_filters,
+            )
+            if anchor_term:
+                anchor = JString(anchor_term)
+                where_set_array += [
+                    jpkg_query.WhereSet(OP_AND),
+                    jpkg_query.WhereSet(OP_BRACE_OPEN),
+                    jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASALL, anchor, MARINER_WEIGHT_HIGH),
+                    jpkg_query.WhereSet(OP_OR),
+                    jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY, anchor, MARINER_WEIGHT_HIGH),
+                    jpkg_query.WhereSet(OP_BRACE_CLOSE),
+                ]
+                logger.debug(
+                    "[Mariner/%s] 사업명 앵커 적용: %s",
+                    log_label,
+                    anchor_term,
+                )
 
             # SIGUN 스크립틀릿 필터 (n개 OR)
             if sigun_scriptlet_values:
