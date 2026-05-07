@@ -14,7 +14,7 @@ from app.shared.schemas import ChatRequest
 from app.chat.service import (
     call_llm_api,
     query_recreation,
-    reform_query_with_history,
+    reform_query_if_needed,
 )
 from app.chat.sigun import (
     check_sigun,
@@ -46,6 +46,8 @@ from ._doc_filter import (
 from ._stream_utils import (
     _build_streaming_response,
     _stream_delta_content,
+    SSE_RESPONSE_HEADERS,
+    drain_status_until_done,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,7 +108,8 @@ async def _handle_clarify_response(
                 clarify_response["choices"][0]["message"]["content"],
                 clarify_response
             ),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers=SSE_RESPONSE_HEADERS,
         )
 
     return JSONResponse(content=clarify_response, status_code=200)
@@ -250,10 +253,10 @@ async def _handle_rag_mode(
         if llm_recommended_followup:
             reformed_query = user_message
         elif reformed_query is None:
-            reformed_query = await reform_query_with_history(
+            reformed_query = await reform_query_if_needed(
                 user_message=user_message,
-                messages=chat_request.messages
-            ) or user_message
+                messages=chat_request.messages,
+            )
         logger.info(f"[RAG QUERY] {reformed_query}")
 
         async def rag_stream():
@@ -291,15 +294,7 @@ async def _handle_rag_mode(
             )
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
-            while not rag_task.done():
-                try:
-                    status_msg = await asyncio.wait_for(status_queue.get(), timeout=0.1)
-                    yield build_status_message(status_msg)
-                except asyncio.TimeoutError:
-                    continue
-
-            while not status_queue.empty():
-                status_msg = await status_queue.get()
+            async for status_msg in drain_status_until_done(rag_task, status_queue):
                 yield build_status_message(status_msg)
 
             try:
@@ -388,15 +383,19 @@ async def _handle_rag_mode(
 
                     yield chunk
 
-        return StreamingResponse(rag_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            rag_stream(),
+            media_type="text/event-stream",
+            headers=SSE_RESPONSE_HEADERS,
+        )
     else:
         if llm_recommended_followup:
             reformed_query = user_message
         elif reformed_query is None:
-            reformed_query = await reform_query_with_history(
+            reformed_query = await reform_query_if_needed(
                 user_message=user_message,
-                messages=chat_request.messages
-            ) or user_message
+                messages=chat_request.messages,
+            )
         logger.info(f"[RAG QUERY] {reformed_query}")
         llm_kwargs = _build_llm_kwargs(chat_request)
         rag_processor = _get_rag_processor(
