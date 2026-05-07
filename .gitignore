@@ -79,3 +79,11 @@ uv.lock
 
 .cursorrules
 .cursorrules.md
+
+# Local Copilot/GitHub metadata
+.github/
+
+# ─── Copilot local artifacts (shared config stays in .github/) ─
+.copilot/
+.github/prompts/local/
+.github/chatmodes/local/
