@@ -43,6 +43,7 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
+from .policy_priority import resolve_policy_boost_keywords
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
@@ -90,12 +91,13 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
-        # guide_recommend는 탐색형 질의가 많아 query-time 정책 부스트를 끄고,
-        # 검색 후 재정렬(soft-priority)만 유지한다.
-        _query_policy_boost_enabled = False
+        policy_tags, _ = resolve_policy_boost_keywords(message)
+        # guide_recommend에서 low_income 태그는 query-time 부스트를 끄고,
+        # elderly/implant 등은 기존 우선 정책을 유지한다.
+        _query_policy_boost_enabled = (not _skip_policy_boost) and ("low_income" not in policy_tags)
         _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
             message,
-            policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
+            policy_search_boost_enabled=_query_policy_boost_enabled,
         )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
@@ -244,7 +246,7 @@ async def process_rag_guide_recommend(
             log_prefix="RAG/guide_recommend_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
-            policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
+            policy_search_boost_enabled=_query_policy_boost_enabled,
         )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -388,7 +390,7 @@ async def process_rag_guide_recommend(
                     run_group_a=_group_a_run_okms_query,
                     run_gov=_run_gov_okms_query,
                     max_policy_pairs=1,
-                    policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
+                    policy_search_boost_enabled=_query_policy_boost_enabled,
                 )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
