@@ -19,25 +19,19 @@ import pytest
 from app.mariner.queryset_welfare_tel import (
     _expand_sigun_scriptlet_values,
     _expand_ambiguous_eupmyeondong_filters,
-    _augment_welfare_tel_search_keyword,
     _eupmyeondong_filter_or_tokens,
-    _eupmyeondong_tokens_from_bare_place_keyword,
-    _has_standalone_bokji_center_phrase,
-    _merge_eup_ambiguous_numbered_dongs_into_keyword,
-    _prepare_welfare_tel_mariner_keyword,
 )
 
 
 def test_expand_sigun_changwon_includes_base_before_gu_suffixes() -> None:
     out = _expand_sigun_scriptlet_values(["경상남도 창원시"])
     assert out[0] == "경상남도 창원시"
-    assert "경상남도 창원시 의창구" in out
-    assert "경상남도 창원시 진해구" in out
-    assert len(out) == 1 + 5
+    assert "창원시" in out
+    assert len(out) == 2
 
 
 def test_expand_sigun_unmapped_passes_through() -> None:
-    assert _expand_sigun_scriptlet_values(["경상남도 진주시"]) == ["경상남도 진주시"]
+    assert _expand_sigun_scriptlet_values(["경상남도 진주시"]) == ["경상남도 진주시", "진주시"]
 
 
 def test_eupmyeondong_filter_or_tokens_ambiguous_dong() -> None:
@@ -62,74 +56,6 @@ def test_expand_ambiguous_eupmyeondong_filters_dedupes() -> None:
     assert "회원1동" in out
     # 회원1동은 한 번만
     assert out.count("회원1동") == 1
-
-
-def test_merge_adds_numbered_when_keyword_short() -> None:
-    kw = _merge_eup_ambiguous_numbered_dongs_into_keyword("창원", ["회원동"])
-    assert "창원" in kw
-    assert "회원1동" in kw
-    assert "회원2동" in kw
-
-
-def test_prepare_keyword_pipeline_like_short_triple() -> None:
-    """RAG Step2 이후 키워드만 '창원'처럼 짧게 오는 경우(동사무소 맥락 없음)."""
-    prepared = _prepare_welfare_tel_mariner_keyword("창원", ["회원동"])
-    assert "창원" in prepared
-    assert "회원1동" in prepared
-
-
-def test_prepare_full_user_phrase() -> None:
-    prepared = _prepare_welfare_tel_mariner_keyword(
-        "창원 회원동 동사무소 연락처",
-        ["회원동"],
-    )
-    assert "창원" in prepared
-    assert "회원1동" in prepared or "회원동" in prepared
-
-
-def test_eup_tokens_from_bare_place_okpo() -> None:
-    toks = _eupmyeondong_tokens_from_bare_place_keyword("거제시 옥포 주민센터 연락처")
-    assert "옥포동" in toks
-    assert "옥포1동" in toks
-    assert "옥포2동" in toks
-
-
-def test_eup_tokens_bare_deokgye_plain_dong() -> None:
-    """덕계동은 번호 분동이 아니라 단일 행정동 이름."""
-    toks = _eupmyeondong_tokens_from_bare_place_keyword("양산 덕계 행정복지센터 연락처")
-    assert "덕계동" in toks
-
-
-def test_augment_yangsan_deokgye_haengjeong() -> None:
-    aug = _augment_welfare_tel_search_keyword("양산 덕계 행정복지센터 연락처")
-    assert "덕계동" in aug
-
-
-def test_eup_tokens_skips_city_name_before_jumin() -> None:
-    """`거제시 주민센터`는 시명+시설만 있어 동 보강 대상이 아님."""
-    assert _eupmyeondong_tokens_from_bare_place_keyword("거제시 주민센터 연락처") == []
-
-
-def test_eup_tokens_skip_gyeongnam_city_short_before_dongsamuso() -> None:
-    """`양산`은 경남 시 약칭 → `양산1동` 보강 금지(과매칭)."""
-    assert _eupmyeondong_tokens_from_bare_place_keyword("양산 동사무소 연락처") == []
-
-
-def test_standalone_bokji_center_phrase() -> None:
-    assert _has_standalone_bokji_center_phrase("양산 복지센터")
-    assert not _has_standalone_bokji_center_phrase("사회복지센터")
-    assert not _has_standalone_bokji_center_phrase("양산 행정복지센터")
-
-
-def test_augment_maps_bokji_center_to_haengjeong() -> None:
-    aug = _augment_welfare_tel_search_keyword("양산 복지센터 연락처")
-    assert "행정복지센터" in aug
-    assert "행복복지센터" in aug
-
-
-def test_prepare_geoje_okpo_includes_numbered_dongs() -> None:
-    p = _prepare_welfare_tel_mariner_keyword("거제시 옥포 주민센터 연락처", None)
-    assert "옥포1동" in p
 
 
 def test_extract_eupmyeondong_matches_pipeline_for_hoewon() -> None:

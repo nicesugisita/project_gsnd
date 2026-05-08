@@ -11,6 +11,7 @@ httpx 싱글턴 클라이언트로 커넥션 풀을 재사용합니다.
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Dict, Any, List, Optional
 
@@ -20,6 +21,8 @@ from app.core.config import Config
 from app.core.constants import CHAT_COMPLETIONS_ENDPOINT
 
 logger = logging.getLogger(__name__)
+
+_DISABILITY_ROOT_PATTERN = re.compile(r"장애[\w가-힣]*")
 
 _RELEVANCE_SYSTEM_PROMPT = """
 당신은 경상남도 복지 정보 검색 시스템의 문서 관련성 판단기입니다.
@@ -108,6 +111,22 @@ def _build_doc_messages(
         {"role": "system", "content": _RELEVANCE_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(parts)},
     ]
+
+
+def _contains_disability_term(text: str) -> bool:
+    """질문 텍스트에 장애 관련 키워드가 포함되어 있는지."""
+    return bool(_DISABILITY_ROOT_PATTERN.search(str(text or "")))
+
+
+def _is_disability_related_doc(doc: Dict[str, Any]) -> bool:
+    """문서 제목(NAME/BUSINESS_NAME) 기준으로 장애 관련 문서 여부를 판별."""
+    title_blob = " ".join(
+        [
+            str(doc.get("NAME", "") or ""),
+            str(doc.get("BUSINESS_NAME", "") or ""),
+        ]
+    )
+    return bool(_DISABILITY_ROOT_PATTERN.search(title_blob))
 
 
 # ============================================================
@@ -225,6 +244,30 @@ async def filter_irrelevant_docs(
         _max_for_filter = _DEFAULT_CAP
 
     if not docs:
+        return docs
+
+    # 사용자 질문에 장애 키워드가 없으면, 장애 관련 문서는 LLM 판단 전에 선제 제거한다.
+    # 검색 단계에서 유입된 노이즈(예: 기초연금 질의에 장애인연금 혼입)를 안정적으로 차단하기 위함.
+    if not _contains_disability_term(question):
+        non_disability_docs: List[Dict[str, Any]] = []
+        removed_names: List[str] = []
+        for i, doc in enumerate(docs):
+            if _is_disability_related_doc(doc):
+                doc_name = str(doc.get("NAME", "") or doc.get("BUSINESS_NAME", "") or "").strip() or f"#{i + 1}"
+                removed_names.append(doc_name)
+                continue
+            non_disability_docs.append(doc)
+
+        if removed_names:
+            logger.info(
+                "[RelevanceFilter] 장애 키워드 미포함 질의 — 장애 관련 문서 %d건 선제 제거: %s",
+                len(removed_names),
+                removed_names,
+            )
+            docs = non_disability_docs
+
+    if not docs:
+        logger.info("[RelevanceFilter] 장애 관련 선제 제거 후 문서 없음")
         return docs
 
     if len(docs) <= 1:
