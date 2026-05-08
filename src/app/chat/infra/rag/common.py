@@ -1,0 +1,128 @@
+"""
+services_v2 공통 유틸리티
+
+rag_general, rag_guide_recommend, rag_search에서 공유하는 함수들을 모아둡니다.
+"""
+
+import logging
+import math
+import re
+from typing import Dict, Any, List, Optional
+
+from app.chat.infra.rag import _get_document_name, _get_document_snippet
+from app.chat.infra.rag.expansion_cap import (
+    MAX_EXPANDED_QUERIES_DEFAULT,
+    dedupe_cap_expanded_queries,
+)
+from app.chat.infra.rag.policy_priority import (
+    apply_policy_priority_to_documents,
+    resolve_policy_boost_keywords,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 정렬 유틸
+# ============================================================
+
+def sort_key_year_weight(doc: Dict[str, Any]) -> tuple:
+    """정렬 키: YEAR 최신순 → 동일 연도 시 WEIGHT 높은 순.
+
+    OKMS 문서는 YEAR 필드, GSND 문서는 COMPLI_DT 필드에서 4자리 연도를 추출합니다.
+    """
+    year_str = str(doc.get("YEAR", "") or "").strip()
+    if not year_str:
+        year_str = str(doc.get("COMPLI_DT", "") or "").strip()
+    year_match = re.search(r'(\d{4})', year_str)
+    year_val = int(year_match.group(1)) if year_match else 0
+    weight_val = float(doc.get("WEIGHT", 0) or 0)
+    return (year_val, weight_val)
+
+
+def sort_weight_top30_then_year(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """웨이트 상위 30%는 최신순(YEAR 내림차순)으로 정렬하고,
+    나머지 70%는 웨이트 내림차순으로 아래에 붙인다.
+
+    - 상위 그룹 기준: 전체 문서를 WEIGHT 내림차순 정렬 후 상위 ceil(30%) 개
+    - 상위 그룹 정렬: YEAR 내림차순 → 같은 연도면 WEIGHT 내림차순
+    - 하위 그룹 정렬: WEIGHT 내림차순 유지
+    """
+    if not docs:
+        return docs
+
+    sorted_by_weight = sorted(docs, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+    cutoff = max(1, math.ceil(len(sorted_by_weight) * 0.3))
+    top_group = sorted_by_weight[:cutoff]
+    bottom_group = sorted_by_weight[cutoff:]
+
+    top_sorted = sorted(top_group, key=sort_key_year_weight, reverse=True)
+    return top_sorted + bottom_group
+
+
+# ============================================================
+# 참고 문서 구성
+# ============================================================
+
+def build_referenced_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """CHUNK_ID 기준 중복 제거 후 참고 문서 목록 생성."""
+    seen_chunk_ids: set = set()
+    referenced_documents: List[Dict[str, str]] = []
+    for doc in docs:
+        chunk_id = doc.get("CHUNK_ID", "")
+        if chunk_id and chunk_id in seen_chunk_ids:
+            continue
+        if chunk_id:
+            seen_chunk_ids.add(chunk_id)
+        referenced_documents.append({
+            "id": str(doc.get("ID", "")),
+            "chunk_id": str(chunk_id or ""),
+            "name": _get_document_name(doc),
+            "snippet": _get_document_snippet(doc),
+            "path": str(doc.get("PATH", "") or doc.get("CHUNK_PATH", "") or ""),
+        })
+    return referenced_documents
+
+
+def filter_excluded_docs(
+    docs: List[Dict[str, Any]],
+    excluded_chunk_ids: List[str],
+    excluded_service_names: List[str] = None,
+) -> List[Dict[str, Any]]:
+    """이미 사용자에게 보여준 문서를 제외.
+
+    chunk_id와 서비스명(NAME) 모두 비교하여 같은 서비스가 다른 청크로
+    재등장하는 중복을 방지합니다.
+    """
+    if not excluded_chunk_ids and not excluded_service_names:
+        return docs
+    excluded_chunk_set = set(excluded_chunk_ids or [])
+    excluded_name_set = set(n for n in (excluded_service_names or []) if n)
+    result = []
+    removed_chunk_ids: List[str] = []
+    removed_names: List[str] = []
+    for d in docs:
+        chunk_id = str(d.get("CHUNK_ID", ""))
+        if chunk_id and chunk_id in excluded_chunk_set:
+            if len(removed_chunk_ids) < 20:
+                removed_chunk_ids.append(chunk_id)
+            continue
+        if excluded_name_set:
+            doc_name = str(d.get("NAME", "") or d.get("BUSINESS_NAME", "") or "").strip()
+            if doc_name and doc_name in excluded_name_set:
+                if len(removed_names) < 20:
+                    removed_names.append(doc_name)
+                continue
+        result.append(d)
+    logger.info(
+        "[MoreResults][PostFilter] 입력=%d건 | 제외후=%d건 | 제거 chunk_ids=%d(샘플=%s) | 제거 names=%d(샘플=%s)",
+        len(docs),
+        len(result),
+        len(removed_chunk_ids),
+        removed_chunk_ids[:10],
+        len(removed_names),
+        removed_names[:10],
+    )
+    return result
+
+

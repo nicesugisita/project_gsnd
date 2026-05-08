@@ -1,0 +1,89 @@
+# ─── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# ─── Virtual environments ───────────────────────────────────
+venv/
+.venv/
+gsnd_venv/
+
+# ─── Test / type / lint caches ────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ─── Logs & runtime ───────────────────────────────────────────
+*.log
+nohup.out
+.uvicorn.pid
+logs/
+log/
+
+# ─── Shell helpers (로컬 실행용 — 공유하려면 !스크립트명.sh 로 예외)
+*.sh
+
+# ─── Secrets & local env (keep examples tracked) ─────────────
+# .env.* 만 쓰면 .env_dev / .env_local 같은 이름은 무시되지 않음 → .env* 로 통일
+.env*
+!.env.example
+
+# ─── Generated / large local payloads (repo-specific) ────────
+jar_lib/
+uploaded_texts/
+stt_results/
+tts_results/
+wip/
+*.tar.gz
+mariner/filter/
+mariner/archive/
+src/tests/*.csv
+
+# ─── Certificates / keys (local TLS) ─────────────────────────
+server.crt
+server.key
+
+# ─── IDE / tooling ────────────────────────────────────────────
+.idea/
+.devcontainer/
+claude-devcontainer-main/
+.claude/
+.serena/
+.history/
+
+# ─── Local notes (optional; remove negation if you want docs/) ─
+CLAUDE.md
+PROJECT.md
+REFERENCE.md
+docs/
+
+# ─── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Dependency lock (project policy: not versioned) ──────────
+uv.lock
+
+.cursorrules
+.cursorrules.md
+
+# Local Copilot/GitHub metadata
+.github/
+
+# ─── Copilot local artifacts (shared config stays in .github/) ─
+.copilot/
+.github/prompts/local/
+.github/chatmodes/local/

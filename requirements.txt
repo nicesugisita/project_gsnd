@@ -1,0 +1,40 @@
+# Python >= 3.11, < 4 (3.12 권장)
+
+# Web Framework
+fastapi==0.115.2
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+pydantic==2.13.3
+pydantic-settings==2.11.0
+
+# HTTP Client
+httpx==0.27.0
+requests==2.31.0
+
+# Tokenization
+tiktoken==0.12.0
+
+# NLP (Korean morphological analysis)
+kiwipiepy
+numpy>=1.19.0  # kiwipiepy 의존성
+
+# Logging
+python-json-logger==2.0.7
+
+# Type Checking
+typing-extensions==4.15.0
+
+# STT (Speech-to-Text)
+websocket-client==1.9.0
+websockets==12.0  # 비동기 WebSocket 라이브러리
+# PyAudio wheels are unavailable on Python 3.13+ in many Windows environments.
+pyaudio==0.2.14; python_version < "3.13"
+
+# Database
+mysql-connector-python==8.2.0
+jpype1==1.7.0
+
+# Caching
+cachetools==5.3.3
+async-lru==2.0.4
+
