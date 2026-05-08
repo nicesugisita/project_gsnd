@@ -220,6 +220,7 @@ async def _handle_rag_mode(
     excluded_service_names: list | None = None,
     final_user_message: str | None = None,
     more_info: bool = False,
+    more_detail: bool = False,
 ) -> JSONResponse | StreamingResponse:
     """Handle RAG mode response using query reform and retrieval."""
     from app.shared.utils.status_messages import build_status_message, STATUS_QUERY_REFORM
@@ -302,6 +303,7 @@ async def _handle_rag_mode(
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
                 final_user_message=final_user_message,
+                more_detail=more_detail,
             )
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
@@ -450,6 +452,7 @@ async def _handle_rag_mode(
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
             final_user_message=final_user_message,
+            more_detail=more_detail,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
         response_message, referenced_documents = await rag_processor(**_rag_kw)

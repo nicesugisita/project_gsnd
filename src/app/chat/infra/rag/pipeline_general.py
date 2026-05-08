@@ -338,6 +338,7 @@ async def process_rag_general(
             collect_okms_groupa_and_gov_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=expanded_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -578,8 +579,7 @@ async def process_rag_general(
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
-            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
-            more_detail_mode=more_detail,
+            more_info_mode=more_detail or bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][general] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][general] process_rag_general 전체: %.3fs", time.monotonic() - t_total)

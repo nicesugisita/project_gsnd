@@ -144,7 +144,8 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             if base_user_query and _is_context_dependent_followup(base_user_query):
                 base_user_query = ""
             next_intent = await classify_next_intent(chat_request.messages, user_message)
-            llm_detected_more = next_intent.get("intent") == "MORE_INFO"
+            llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
+            llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
             more_detected = llm_detected_more
             if (
                 not more_detected
@@ -202,6 +203,10 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                     more_excluded_chunk_ids,
                     more_excluded_service_names,
                 ) = get_excluded_info_from_history(chat_request.messages)
+                if llm_detected_more_detail:
+                    # MORE_DETAIL(general 세부 요청)은 제외 로직 적용 안 함
+                    more_excluded_chunk_ids, more_excluded_service_names = [], []
+                    logger.info("[MoreResults/non-stream] MORE_DETAIL → 검색 제외 목록 초기화")
 
                 llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
                 more_final_user_message = llm_rq or (original_user_message or "").strip() or None
@@ -376,6 +381,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             excluded_service_names=more_excluded_service_names,
             final_user_message=more_final_user_message,
             more_info=more_detected,
+            more_detail=llm_detected_more_detail,
         )
 
     except Exception as e:

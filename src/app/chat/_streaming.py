@@ -119,6 +119,7 @@ class _MoreResultsContext:
     excluded_chunk_ids: List[str] = field(default_factory=list)
     excluded_service_names: List[str] = field(default_factory=list)
     last_preprocess: Optional[dict] = None
+    more_detail: bool = False  # general intent일 때 "더 자세" 키워드 감지
 
 
 async def _resolve_more_results_context(
@@ -137,7 +138,8 @@ async def _resolve_more_results_context(
     if base_user_query and _is_context_dependent_followup(base_user_query):
         base_user_query = ""
     next_intent = await classify_next_intent(messages, user_message)
-    llm_detected_more = next_intent.get("intent") == "MORE_INFO"
+    llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
+    llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
     detected = llm_detected_more
 
     if (
@@ -209,10 +211,15 @@ async def _resolve_more_results_context(
             logger.debug("[MoreResults] conv_id=%s | fallback re_query 적용: %s", conv_id, shorten_text(re_query, 80))
 
     excluded_chunk_ids, excluded_service_names = get_excluded_info_from_history(messages)
-    logger.info(
-        "[MoreResults] conv_id=%s | 제외 대상 집계 chunk_ids=%d | service_names=%d",
-        conv_id, len(excluded_chunk_ids), len(excluded_service_names),
-    )
+    if llm_detected_more_detail:
+        # MORE_DETAIL(general 세부 요청)은 동일 문서를 다시 참조해야 할 수 있으므로 제외 로직 적용 안 함
+        excluded_chunk_ids, excluded_service_names = [], []
+        logger.info("[MoreResults] conv_id=%s | MORE_DETAIL → 검색 제외 목록 초기화", conv_id)
+    else:
+        logger.info(
+            "[MoreResults] conv_id=%s | 제외 대상 집계 chunk_ids=%d | service_names=%d",
+            conv_id, len(excluded_chunk_ids), len(excluded_service_names),
+        )
     logger.debug(
         "[MoreResults] conv_id=%s | 제외 샘플 chunk_ids=%s | service_names=%s",
         conv_id, excluded_chunk_ids[:10], excluded_service_names[:10],
@@ -225,6 +232,14 @@ async def _resolve_more_results_context(
         conv_id, shorten_text(final_user_message or "", 100),
     )
 
+    # more_detail: LLM이 MORE_DETAIL로 분류한 경우 (general intent 직전 대화)
+    more_detail = llm_detected_more_detail
+    if more_detail:
+        logger.info(
+            "[MoreResults] conv_id=%s | more_detail 감지 (LLM next_intent=MORE_DETAIL)",
+            conv_id,
+        )
+    
     return _MoreResultsContext(
         detected=True,
         re_query=re_query,
@@ -232,6 +247,7 @@ async def _resolve_more_results_context(
         excluded_chunk_ids=excluded_chunk_ids,
         excluded_service_names=excluded_service_names,
         last_preprocess=last_preprocess,
+        more_detail=more_detail,
     )
 
 
@@ -532,6 +548,7 @@ async def _streaming_chat_flow(
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,
+            more_detail=more.more_detail,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
         rag_task = asyncio.create_task(rag_processor(**_rag_kwargs))
