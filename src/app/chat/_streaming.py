@@ -96,6 +96,7 @@ def _write_timing_csv(row: dict) -> None:
 @dataclass
 class _MoreResultsContext:
     detected: bool = False
+    blocked_followup: bool = False  # MORE_INFO였으나 차단됨(직전 general/메타없음) — exclusion 없이 intent만 재사용
     re_query: Optional[str] = None
     final_user_message: Optional[str] = None
     excluded_chunk_ids: List[str] = field(default_factory=list)
@@ -114,6 +115,16 @@ async def _resolve_more_results_context(
     base_user_query = get_base_user_query_from_history(messages)
     next_intent = await classify_next_intent(messages, user_message)
     detected = next_intent.get("intent") == "MORE_INFO"
+
+    # general 의도 응답에 대한 후속 발화는 MORE_INFO(추가 검색)로 처리하지 않는다.
+    # last_preprocess가 None이면 이전 intent를 알 수 없으므로 안전하게 차단한다.
+    if detected and (not last_preprocess or last_preprocess.get("intent") == "general"):
+        detected = False
+        logger.debug(
+            "[MoreResults] conv_id=%s | 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화", conv_id
+        )
+        # 후속 발화임을 보존: exclusion 없이 직전 intent만 재사용하도록 blocked_followup 설정
+        return _MoreResultsContext(last_preprocess=last_preprocess, blocked_followup=True)
 
     logger.debug(
         "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
@@ -363,6 +374,17 @@ async def _streaming_chat_flow(
             logger.info(
                 "[MoreResults] conv_id=%s | 히스토리 재사용 intent=%s | reformed=%s",
                 chat_request.conv_id, more.last_preprocess["intent"], shorten_text(user_message, 80),
+            )
+        elif more.blocked_followup and more.last_preprocess:
+            # 직전 general 후속 — exclusion 없이 직전 reformed_query + intent 재사용
+            re_query = str(more.last_preprocess.get("reformed_query") or "").strip() or user_message
+            user_message = re_query
+            await _update_user_message(chat_request.messages, user_message)
+            preprocess_data = _build_preprocess_from_history(user_message, more.last_preprocess)
+            logger.info(
+                "[MoreResults/stream] general 후속 → 히스토리 intent 재사용 intent=%s reformed=%s (exclusion 없음)",
+                more.last_preprocess.get("intent"),
+                shorten_text(user_message, 80),
             )
 
         if preprocess_data is None:

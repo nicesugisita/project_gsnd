@@ -100,7 +100,9 @@ def get_excluded_info_from_history(messages: list) -> Tuple[List[str], List[str]
                 continue
             if not saw_assistant:
                 continue
-            if content and latest_minfo is False:
+            # latest_minfo is not True: False(첫 답변) 또는 None(메타 없는 구버전 메시지) 모두 체인 경계로 처리.
+            # is False 조건은 None을 걸러내지 못해 전체 히스토리를 순회하는 버그가 있었음.
+            if content and latest_minfo is not True:
                 break
 
     return excluded_chunk_ids, excluded_service_names
@@ -136,7 +138,8 @@ def get_base_user_query_from_history(messages: list) -> str:
             continue
         if not saw_assistant:
             continue
-        if latest_minfo is False:
+        # latest_minfo is not True: False 또는 None(메타 없는 구버전) 모두 체인 경계로 처리.
+        if latest_minfo is not True:
             return content
     # fallback: more_info 메타가 누락된 경우
     # - user_candidates[0]: 가장 최근 user(대개 "더 알려줘")

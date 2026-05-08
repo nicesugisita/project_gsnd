@@ -90,8 +90,12 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        # guide_recommend는 탐색형 질의가 많아 query-time 정책 부스트를 끄고,
+        # 검색 후 재정렬(soft-priority)만 유지한다.
+        _query_policy_boost_enabled = False
         _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
+            message,
+            policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
         )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
@@ -197,7 +201,7 @@ async def process_rag_guide_recommend(
             await status_callback("질문을 분석하고 있습니다")
 
         def _group_a_run_okms_query(vector: str, keywords: str):
-            """Group A 검색: vector/keyword를 균등 가중치로 Mariner에 전송, (keyword_docs, vector_docs) 반환"""
+            """Group A 검색: 추천 질의는 탐색 폭 유지를 위해 사업명 앵커를 비활성화한다."""
             try:
                 return query_group_a_documents(
                     vector, keywords, selected_collection,
@@ -205,6 +209,7 @@ async def process_rag_guide_recommend(
                     sigun_filters=gr_sigun_filters,
                     lifecycle_filter=lifecycle or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    apply_business_anchor=False,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] Group A 쿼리 검색 실패: {e}")
@@ -239,7 +244,7 @@ async def process_rag_guide_recommend(
             log_prefix="RAG/guide_recommend_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
-            policy_search_boost_enabled=not _skip_policy_boost,
+            policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
         )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -383,7 +388,7 @@ async def process_rag_guide_recommend(
                     run_group_a=_group_a_run_okms_query,
                     run_gov=_run_gov_okms_query,
                     max_policy_pairs=1,
-                    policy_search_boost_enabled=not _skip_policy_boost,
+                    policy_search_boost_enabled=_query_policy_boost_enabled and (not _skip_policy_boost),
                 )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:

@@ -367,21 +367,15 @@ def augment_okms_dual_query(
     if not tags:
         return vec, kw
 
+    # 하드코딩 보강어를 쓰지 않고 DB 로딩 키워드만 사용한다.
+    if not kws:
+        return vec, kw
+
     low_vec = vec.casefold()
-    if "elderly_benefits" in tags:
-        for needle in ("기초연금", "노인맞춤돌봄"):
-            if needle.casefold() not in low_vec:
-                vec = f"{vec} {needle}".strip()
-                low_vec = vec.casefold()
-    elif "implant" in tags:
-        if "임플란트" not in low_vec:
-            vec = f"{vec} 임플란트".strip()
+    for needle in _pick_distinct_keywords(kws, n=2):
+        if needle.casefold() not in low_vec:
+            vec = f"{vec} {needle}".strip()
             low_vec = vec.casefold()
-    elif "low_income" in tags:
-        for needle in ("생계급여", "의료급여"):
-            if needle.casefold() not in low_vec:
-                vec = f"{vec} {needle}".strip()
-                low_vec = vec.casefold()
 
     if kw and kws:
         kw_cf = kw.casefold()
@@ -403,24 +397,32 @@ def policy_extra_okms_searches(user_message: str, reformed_query: str) -> List[T
     tag_keywords = _get_tag_keywords_map()
     if not tags or not rq:
         return []
+
     if "elderly_benefits" in tags:
         elderly_kws = tag_keywords.get("elderly_benefits", ())
         anchors = _pick_distinct_keywords(elderly_kws, n=2)
-        anchor_1 = anchors[0] if len(anchors) >= 1 else "기초연금"
-        anchor_2 = anchors[1] if len(anchors) >= 2 else "노인맞춤돌봄"
-        return [
-            (f"{rq} {anchor_1} 안내", anchor_1),
-            (f"{rq} {anchor_2}", anchor_2),
-        ]
+        if not anchors:
+            return []
+        pairs: List[Tuple[str, str]] = []
+        for idx, anchor in enumerate(anchors):
+            suffix = " 안내" if idx == 0 else ""
+            pairs.append((f"{rq} {anchor}{suffix}".strip(), anchor))
+        return pairs
+
     if "implant" in tags:
-        implant_kws = tag_keywords.get("implant", ())
-        implant_kw = implant_kws[0] if implant_kws else "임플란트"
+        implant_kws = _pick_distinct_keywords(tag_keywords.get("implant", ()), n=1)
+        if not implant_kws:
+            return []
+        implant_kw = implant_kws[0]
         return [(f"{rq} {implant_kw} 지원", implant_kw)]
+
     if "low_income" in tags:
-        low_income_kws = tag_keywords.get("low_income", ())
-        key_1 = low_income_kws[0] if len(low_income_kws) >= 1 else "생계급여"
-        key_2 = low_income_kws[1] if len(low_income_kws) >= 2 else "의료급여"
-        return [(f"{rq} {key_1} {key_2}", f"{key_1} {key_2}")]
+        low_income_kws = _pick_distinct_keywords(tag_keywords.get("low_income", ()), n=2)
+        if not low_income_kws:
+            return []
+        joined = " ".join(low_income_kws)
+        return [(f"{rq} {joined}".strip(), joined)]
+
     return []
 
 

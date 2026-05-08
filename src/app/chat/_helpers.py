@@ -213,6 +213,10 @@ async def _handle_rag_mode(
     keywords: list = None,
     llm_recommended_followup: bool = False,
     search_target: str | None = None,
+    excluded_chunk_ids: list | None = None,
+    excluded_service_names: list | None = None,
+    final_user_message: str | None = None,
+    more_info: bool = False,
 ) -> JSONResponse | StreamingResponse:
     """Handle RAG mode response using query reform and retrieval."""
     from app.shared.utils.status_messages import build_status_message, STATUS_QUERY_REFORM
@@ -291,6 +295,9 @@ async def _handle_rag_mode(
                 precomputed_expanded_queries=expanded_queries,
                 precomputed_keywords=keywords,
                 precomputed_search_target=search_target,
+                excluded_chunk_ids=excluded_chunk_ids,
+                excluded_service_names=excluded_service_names,
+                final_user_message=final_user_message,
             )
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
@@ -328,7 +335,7 @@ async def _handle_rag_mode(
                         reformed_query=reformed_query,
                         expanded_queries=expanded_queries,
                         search_target=search_target,
-                        more_info=False,
+                        more_info=more_info,
                     )
                     await asyncio.to_thread(
                         partial(
@@ -358,7 +365,7 @@ async def _handle_rag_mode(
                                     reformed_query=reformed_query,
                                     expanded_queries=expanded_queries,
                                     search_target=search_target,
-                                    more_info=False,
+                                    more_info=more_info,
                                 )
                                 await asyncio.to_thread(
                                     partial(
@@ -411,6 +418,9 @@ async def _handle_rag_mode(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
+            excluded_chunk_ids=excluded_chunk_ids,
+            excluded_service_names=excluded_service_names,
+            final_user_message=final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
         response_message, referenced_documents = await rag_processor(**_rag_kw)
@@ -424,7 +434,7 @@ async def _handle_rag_mode(
             reformed_query=reformed_query,
             expanded_queries=expanded_queries,
             search_target=search_target,
-            more_info=False,
+            more_info=more_info,
         )
         conv_id = await asyncio.to_thread(
             partial(
