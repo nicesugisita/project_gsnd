@@ -54,10 +54,11 @@ from app.chat.more_results import (
 )
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.rag import filter_okms_keywords
-from app.chat.infra.rag.pipeline_general import process_rag_general
 from app.chat.routing import classify_next_intent
 
 logger = logging.getLogger(__name__)
+
+_MORE_INFO_REUSABLE_INTENTS = {"guide_recommend", "search", "comparison"}
 
 _TIMING_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tests"))
 _TIMING_FIELDS = [
@@ -76,6 +77,21 @@ _TIMING_FIELDS = [
     # TTFT
     "t_ttft",
 ]
+
+
+def _is_context_dependent_followup(text: str) -> bool:
+    """명시 주제가 부족해 직전 문맥 의존 가능성이 큰 짧은 후속 발화인지 판정."""
+    q = str(text or "").strip()
+    if not q:
+        return False
+    compact = "".join(q.split())
+    if len(compact) > 20:
+        return False
+    try:
+        nouns = [n.strip() for n in extract_nouns(q, use_bigram=False) if n and n.strip()]
+    except Exception:
+        nouns = []
+    return len(nouns) <= 1
 
 
 def _get_timing_csv_path() -> str:
@@ -98,7 +114,6 @@ def _write_timing_csv(row: dict) -> None:
 class _MoreResultsContext:
     detected: bool = False
     blocked_followup: bool = False  # MORE_INFO였으나 차단됨(직전 general/메타없음) — exclusion 없이 intent만 재사용
-    more_detail: bool = False       # MORE_DETAIL 후속(직전=general) — 동일 쿼리로 더 깊이 검색
     re_query: Optional[str] = None
     final_user_message: Optional[str] = None
     excluded_chunk_ids: List[str] = field(default_factory=list)
@@ -114,19 +129,57 @@ async def _resolve_more_results_context(
 ) -> _MoreResultsContext:
     """'더 알려줘' 의도를 감지하고 재검색에 필요한 컨텍스트를 반환."""
     last_preprocess = get_last_preprocess_from_history(messages)
+    reusable_preprocess = get_last_preprocess_from_history(
+        messages,
+        allowed_intents=_MORE_INFO_REUSABLE_INTENTS,
+    )
     base_user_query = get_base_user_query_from_history(messages)
+    if base_user_query and _is_context_dependent_followup(base_user_query):
+        base_user_query = ""
     next_intent = await classify_next_intent(messages, user_message)
-    detected = next_intent.get("intent") == "MORE_INFO"
+    llm_detected_more = next_intent.get("intent") == "MORE_INFO"
+    detected = llm_detected_more
 
-    # general 의도 응답에 대한 후속 발화는 MORE_INFO(추가 검색)로 처리하지 않는다.
-    # last_preprocess가 None이면 이전 intent를 알 수 없으므로 안전하게 차단한다.
-    if detected and (not last_preprocess or last_preprocess.get("intent") == "general"):
-        detected = False
-        logger.debug(
-            "[MoreResults] conv_id=%s | 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화", conv_id
+    if (
+        not detected
+        and last_preprocess
+        and str(last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
+        and _is_context_dependent_followup(user_message)
+    ):
+        detected = True
+        logger.info(
+            "[MoreResults] conv_id=%s | 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
+            conv_id,
+            last_preprocess.get("intent"),
         )
-        # 후속 발화임을 보존: exclusion 없이 직전 intent만 재사용하도록 blocked_followup 설정
-        return _MoreResultsContext(last_preprocess=last_preprocess, blocked_followup=True)
+
+    # 직전 preprocess가 general/없음이어도 base_user_query가 있으면 MORE_INFO 흐름을 유지한다.
+    # (이 경우 검색 질의는 base_user_query를 우선 사용)
+    if detected and (not last_preprocess or last_preprocess.get("intent") == "general"):
+        can_recover_from_history = bool(
+            reusable_preprocess
+            and (llm_detected_more or _is_context_dependent_followup(user_message))
+        )
+        if can_recover_from_history:
+            last_preprocess = reusable_preprocess
+            logger.info(
+                "[MoreResults] conv_id=%s | 직전 general/메타누락 감지 → 재사용 가능한 직전 intent로 복구 intent=%s",
+                conv_id,
+                last_preprocess.get("intent"),
+            )
+        elif base_user_query:
+            last_preprocess = None
+            logger.info(
+                "[MoreResults] conv_id=%s | 직전 general/메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                conv_id,
+            )
+        else:
+            detected = False
+            logger.debug(
+                "[MoreResults] conv_id=%s | 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화", conv_id
+            )
+            # 후속 발화임을 보존: exclusion 없이 직전 intent만 재사용하도록 blocked_followup 설정
+            return _MoreResultsContext(last_preprocess=last_preprocess, blocked_followup=True)
 
     logger.debug(
         "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
@@ -135,34 +188,15 @@ async def _resolve_more_results_context(
         shorten_text(str(next_intent.get("re_query", "") or ""), 80),
     )
 
-    # MORE_DETAIL: 이전 general 제도에 대한 상세 설명 요청 → general intent 재사용
-    if (
-        not detected
-        and next_intent.get("intent") == "MORE_DETAIL"
-        and last_preprocess
-        and last_preprocess.get("intent") == "general"
-    ):
-        # next_intent LLM 이 만든 re_query("...자세히/구체적으로 알려주세요" 형태)를
-        # 최종 응답 생성용 사용자 질문 문구로 넘긴다. 이렇게 하면 LLM 이 받는 질문이
-        # 상세 요청형 문장이 되어 system_prompt 의 4단계 구조 규칙이 자연스럽게 발동.
-        more_detail_user_msg = str(next_intent.get("llm_re_query", "") or "").strip() or None
-        logger.debug(
-            "[MoreResults] conv_id=%s | MORE_DETAIL 후속(직전=general) → general intent 재사용 + 더 많은 문서 회수 | final_user_message=%s",
-            conv_id,
-            shorten_text(more_detail_user_msg or "", 100),
-        )
-        return _MoreResultsContext(
-            last_preprocess=last_preprocess,
-            blocked_followup=True,
-            more_detail=True,
-            final_user_message=more_detail_user_msg,
-        )
-
     if not detected:
         return _MoreResultsContext(last_preprocess=last_preprocess)
 
     re_query: Optional[str] = None
-    if last_preprocess and last_preprocess.get("reformed_query"):
+    if (
+        last_preprocess
+        and str(last_preprocess.get("intent") or "") != "general"
+        and last_preprocess.get("reformed_query")
+    ):
         re_query = str(last_preprocess["reformed_query"]).strip()
         logger.debug("[MoreResults] conv_id=%s | 검색질의 재사용(reformed_query): %s", conv_id, shorten_text(re_query, 80))
     elif base_user_query:
@@ -429,6 +463,7 @@ async def _streaming_chat_flow(
                 "reformed_query": pp.reformed_query, "expanded_queries": pp.expanded_queries,
                 "keywords": pp.keywords,
                 "search_target": pp.search_target,
+                "policy_priority_tag": pp.policy_priority_tag,
             }
 
         user_intent      = preprocess_data["intent"]
@@ -436,6 +471,7 @@ async def _streaming_chat_flow(
         expanded_queries = preprocess_data["expanded_queries"]
         keywords         = preprocess_data["keywords"]
         search_target    = preprocess_data.get("search_target")
+        policy_priority_tag = preprocess_data.get("policy_priority_tag")
 
         if llm_recommended_followup and user_intent != "guide_recommend":
             _unified_intent = user_intent
@@ -452,12 +488,13 @@ async def _streaming_chat_flow(
             )
 
         yield f"data: {json.dumps({'chat-intent': user_intent})}\n\n"
-        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries, 'search_target': search_target}}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries, 'search_target': search_target, 'policy_priority_tag': policy_priority_tag}}, ensure_ascii=False)}\n\n"
         _preprocess_to_persist = {
             "query": preprocess_data.get("query", ""), "intent": user_intent,
             "reformed_query": reformed_query, "expanded_queries": expanded_queries,
             "more_info": bool(more.detected),
             "search_target": search_target,
+            "policy_priority_tag": policy_priority_tag,
         }
         _capture_preprocess_timings(_timings, preprocess_data, expanded_queries)
 
@@ -491,15 +528,12 @@ async def _streaming_chat_flow(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
+            precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
-        # MORE_DETAIL 후속에서만 process_rag_general 의 캡 상향 플래그를 전달.
-        # 다른 RAG processor 들은 해당 인자를 받지 않으므로 분기로 처리.
-        if more.more_detail and rag_processor is process_rag_general:
-            _rag_kwargs["more_detail"] = True
         rag_task = asyncio.create_task(rag_processor(**_rag_kwargs))
         if more.detected:
             logger.info(
@@ -565,10 +599,24 @@ async def _streaming_chat_flow(
                 yield "data: [DONE]\n\n"
                 return
 
-        referenced_documents = _filter_referenced_documents_by_response(assistant_content, referenced_documents)
-        _persist_referenced_documents = referenced_documents
-        if referenced_documents:
-            yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
+        raw_referenced_documents = list(referenced_documents or [])
+        filtered_referenced_documents = _filter_referenced_documents_by_response(
+            assistant_content,
+            referenced_documents,
+        )
+        if raw_referenced_documents:
+            _persist_referenced_documents = raw_referenced_documents
+            if not filtered_referenced_documents:
+                logger.info(
+                    "[MoreResults] conv_id=%s | 응답 매칭 0건 → 히스토리 raw referenced_documents 보존(%d건)",
+                    chat_request.conv_id,
+                    len(raw_referenced_documents),
+                )
+        else:
+            _persist_referenced_documents = filtered_referenced_documents
+
+        if filtered_referenced_documents:
+            yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
 
         # NOTE:
         # 클라이언트가 [DONE] 직후 연결을 닫으면 finally 블록의 await 저장이 취소될 수 있다.

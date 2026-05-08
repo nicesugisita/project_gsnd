@@ -61,6 +61,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_MORE_INFO_REUSABLE_INTENTS = {"guide_recommend", "search", "comparison"}
+
+
+def _is_context_dependent_followup(text: str) -> bool:
+    """명시 주제가 부족해 직전 문맥 의존 가능성이 큰 짧은 후속 발화인지 판정."""
+    q = str(text or "").strip()
+    if not q:
+        return False
+    compact = "".join(q.split())
+    if len(compact) > 20:
+        return False
+    try:
+        nouns = [n.strip() for n in extract_nouns(q, use_bigram=False) if n and n.strip()]
+    except Exception:
+        nouns = []
+    return len(nouns) <= 1
+
 
 def _ensure_runtime_user_id(chat_request: ChatRequest) -> None:
     """비로그인·임시 user_id 를 conv_id 로 고정해 로그인과 같은 히스토리·전처리 경로를 쓴다."""
@@ -119,28 +136,56 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
         if use_more_results_router_path:
             more_last_preprocess = get_last_preprocess_from_history(chat_request.messages)
+            more_reusable_preprocess = get_last_preprocess_from_history(
+                chat_request.messages,
+                allowed_intents=_MORE_INFO_REUSABLE_INTENTS,
+            )
             base_user_query = get_base_user_query_from_history(chat_request.messages)
+            if base_user_query and _is_context_dependent_followup(base_user_query):
+                base_user_query = ""
             next_intent = await classify_next_intent(chat_request.messages, user_message)
-            more_detected = next_intent.get("intent") == "MORE_INFO"
-            # general 의도 응답에 대한 후속 발화는 MORE_INFO(추가 검색)로 처리하지 않는다.
-            # more_last_preprocess가 None이면 이전 intent를 알 수 없으므로 안전하게 차단한다.
-            if more_detected and (not more_last_preprocess or more_last_preprocess.get("intent") == "general"):
-                more_detected = False
-                more_blocked_followup = True
-                logger.debug("[MoreResults/non-stream] 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화")
-            # MORE_DETAIL: 이전 general 제도에 대한 상세 설명 요청 → general intent 재사용
+            llm_detected_more = next_intent.get("intent") == "MORE_INFO"
+            more_detected = llm_detected_more
             if (
                 not more_detected
-                and not more_blocked_followup
-                and next_intent.get("intent") == "MORE_DETAIL"
                 and more_last_preprocess
-                and more_last_preprocess.get("intent") == "general"
+                and str(more_last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
+                and _is_context_dependent_followup(user_message)
             ):
-                more_blocked_followup = True
-                logger.debug("[MoreResults/non-stream] MORE_DETAIL 후속(직전=general) → general intent 재사용 경로")
+                more_detected = True
+                logger.info(
+                    "[MoreResults/non-stream] 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
+                    more_last_preprocess.get("intent"),
+                )
+            # 직전 preprocess가 general/없음이어도 base_user_query가 있으면 MORE_INFO 흐름을 유지한다.
+            # (이 경우 검색 질의는 base_user_query를 우선 사용)
+            if more_detected and (not more_last_preprocess or more_last_preprocess.get("intent") == "general"):
+                can_recover_from_history = bool(
+                    more_reusable_preprocess
+                    and (llm_detected_more or _is_context_dependent_followup(user_message))
+                )
+                if can_recover_from_history:
+                    more_last_preprocess = more_reusable_preprocess
+                    logger.info(
+                        "[MoreResults/non-stream] 직전 general/메타누락 감지 → 재사용 가능한 직전 intent로 복구 intent=%s",
+                        more_last_preprocess.get("intent"),
+                    )
+                elif base_user_query:
+                    more_last_preprocess = None
+                    logger.info(
+                        "[MoreResults/non-stream] 직전 general/메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                    )
+                else:
+                    more_detected = False
+                    more_blocked_followup = True
+                    logger.debug("[MoreResults/non-stream] 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화")
             if more_detected:
                 re_query = None
-                if more_last_preprocess and more_last_preprocess.get("reformed_query"):
+                if (
+                    more_last_preprocess
+                    and str(more_last_preprocess.get("intent") or "") != "general"
+                    and more_last_preprocess.get("reformed_query")
+                ):
                     re_query = str(more_last_preprocess["reformed_query"]).strip()
                 elif base_user_query:
                     re_query = str(base_user_query).strip()
@@ -326,6 +371,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             keywords=preprocess.keywords,
             llm_recommended_followup=llm_recommended_followup,
             search_target=getattr(preprocess, "search_target", None),
+            policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
             excluded_chunk_ids=more_excluded_chunk_ids,
             excluded_service_names=more_excluded_service_names,
             final_user_message=more_final_user_message,
