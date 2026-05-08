@@ -87,6 +87,7 @@ def query_GSND_general_documents(
     facility_type_filter: Optional[str] = None,
     search_mode: str = "hybrid",
     excluded_chunk_ids: Optional[List[str]] = None,
+    apply_year_filter: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     general 플로우의 GSND 보강 검색 (Step 7-B)에서 사용하는 Mariner 검색 함수.
@@ -116,6 +117,17 @@ def query_GSND_general_documents(
         )
 
     try:
+        normalized_search_mode = str(search_mode or "hybrid").strip().lower()
+        use_vector_clause = normalized_search_mode in ("hybrid", "vector", "vector_only")
+        use_keyword_clause = normalized_search_mode in ("hybrid", "keyword", "keyword_only")
+        if not use_vector_clause and not use_keyword_clause:
+            logger.warning(
+                "[Mariner/general/GSND] unknown search_mode=%r -> fallback to hybrid",
+                search_mode,
+            )
+            use_vector_clause = True
+            use_keyword_clause = True
+
         timeout = Config.MARINER_TIMEOUT
         threshold = Config.MARINER_THRESHOLD
         max_top_n = Config.MARINER_MAX_RESULTS
@@ -166,18 +178,40 @@ def query_GSND_general_documents(
         order_set_array = [jpkg_query.OrderBySet(True, "COMPLI_DT", jpype.JByte(97))]
         query.setOrderby(order_set_array)
 
-        # WHERE: 4-field OR 검색식
-        where_set_array = [
-            jpkg_query.WhereSet(OP_BRACE_OPEN),                                        # OR (
-            jpkg_query.WhereSet("NAME_KO",        2,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY,  keyword_string, MARINER_WEIGHT_MED),
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("NAME_MI",        2,  keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(OP_OR),                                        #   OR
-            jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_HIGH),
-            jpkg_query.WhereSet(OP_BRACE_CLOSE),                                       # )
-        ]
+        # WHERE: 검색 모드별 OR 검색식
+        # - hybrid: keyword + vector
+        # - keyword_only: keyword 절만 사용(엔진 부하 완화)
+        # - vector_only: vector 절만 사용
+        where_clauses = []
+        if use_keyword_clause:
+            where_clauses.extend(
+                [
+                    jpkg_query.WhereSet("NAME_KO", 2, keyword_string, MARINER_WEIGHT_MED),
+                    jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY, keyword_string, MARINER_WEIGHT_MED),
+                    jpkg_query.WhereSet("NAME_MI", 2, keyword_string, MARINER_WEIGHT_HIGH),
+                ]
+            )
+        if use_vector_clause:
+            where_clauses.append(
+                jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_HIGH)
+            )
+
+        if not where_clauses:
+            where_clauses.extend(
+                [
+                    jpkg_query.WhereSet("NAME_KO", 2, keyword_string, MARINER_WEIGHT_MED),
+                    jpkg_query.WhereSet("TEXT_CHUNK_KO", OP_HASANY, keyword_string, MARINER_WEIGHT_MED),
+                    jpkg_query.WhereSet("NAME_MI", 2, keyword_string, MARINER_WEIGHT_HIGH),
+                    jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, MARINER_WEIGHT_HIGH),
+                ]
+            )
+
+        where_set_array = [jpkg_query.WhereSet(OP_BRACE_OPEN)]
+        for idx, clause in enumerate(where_clauses):
+            if idx > 0:
+                where_set_array.append(jpkg_query.WhereSet(OP_OR))
+            where_set_array.append(clause)
+        where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
         # SIGUN 스크립틀릿 (op 1)
         if sigun_filters:
@@ -223,22 +257,25 @@ def query_GSND_general_documents(
         query.setWhere(where_set_array)
 
         # COMPLI_DT FilterSet (감지된 연도의 최소~최대 범위, 없으면 올해)
-        if year_filters:
-            filter_years = sorted(set(str(y).strip() for y in year_filters if str(y).strip()))
-        else:
-            filter_years = [str(date.today().year)]
+        if apply_year_filter:
+            if year_filters:
+                filter_years = sorted(set(str(y).strip() for y in year_filters if str(y).strip()))
+            else:
+                filter_years = [str(date.today().year)]
 
-        if filter_years:
-            min_year = filter_years[0]
-            max_year = filter_years[-1]
-            filter_set_array = [
-                jpkg_query.FilterSet(
-                    jpype.JByte(3), "COMPLI_DT",
-                    jpype.JArray(jpype.JString)([f"{min_year}0101", f"{max_year}1231"]), 0
-                )
-            ]
-            query.setFilter(filter_set_array)
-            logger.debug(f"[Mariner/general/GSND] COMPLI_DT FilterSet: {min_year}~{max_year}")
+            if filter_years:
+                min_year = filter_years[0]
+                max_year = filter_years[-1]
+                filter_set_array = [
+                    jpkg_query.FilterSet(
+                        jpype.JByte(3), "COMPLI_DT",
+                        jpype.JArray(jpype.JString)([f"{min_year}0101", f"{max_year}1231"]), 0
+                    )
+                ]
+                query.setFilter(filter_set_array)
+                logger.debug(f"[Mariner/general/GSND] COMPLI_DT FilterSet: {min_year}~{max_year}")
+        else:
+            logger.info("[Mariner/general/GSND] COMPLI_DT FilterSet 스킵 (timeout fallback)")
 
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)

@@ -10,7 +10,7 @@ general 의도의 검색 및 응답 생성을 별도 파일로 분리한 것입�
 import logging
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from app.core.config import Config
 
@@ -369,6 +369,8 @@ async def process_rag_general(
             logger.info("[RAG/general_v2] OKMS 결과 부족 → GSND 순차 검색")
             _GSND_SUPPLEMENT_COUNT = 2
             _GSND_PER_QUERY = 10
+            _GSND_STAGE_MAX_SEC = 15.0
+            _GSND_TIMEOUT_BREAK_THRESHOLD = 2
             gsnd_seed_queries = fallback_expanded_queries or list(expanded_queries)
             gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
 
@@ -378,36 +380,76 @@ async def process_rag_general(
             else:
                 logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
 
-            def _run_gsnd_query(query):
+            def _run_gsnd_query(query: str) -> Tuple[List[Dict[str, Any]], bool]:
                 for attempt in range(2):
                     try:
+                        use_year_filter = (attempt == 0)
+                        gsnd_search_mode = "hybrid" if attempt == 0 else "keyword_only"
                         docs = query_GSND_general_documents(
                             query, Config.RAG_COLLECTION,
                             sigun_filters=gen_sigun_filters,
                             year_filters=gsnd_year_filters or None,
                             excluded_chunk_ids=excluded_chunk_ids,
+                            apply_year_filter=use_year_filter,
+                            search_mode=gsnd_search_mode,
                         )
                         if docs:
                             return sorted(
                                 docs,
                                 key=lambda x: float(x.get("WEIGHT", 0) or 0),
                                 reverse=True,
-                            )[:_GSND_PER_QUERY]
-                        return []
+                            )[:_GSND_PER_QUERY], False
+                        return [], False
                     except Exception as e:
-                        # Mariner timeout(-60004)은 단발성일 수 있어 1회 재시도한다.
+                        # Mariner timeout(-60004) 시에는 1회 재시도하되,
+                        # 2차에서는 COMPLI_DT 연도 필터를 제거해 엔진 부하를 완화한다.
                         if attempt == 0 and "-60004" in str(e):
-                            logger.warning("[RAG/general_v2] GSND 쿼리 타임아웃(-60004) 재시도: %s", query[:80])
+                            logger.warning(
+                                "[RAG/general_v2] GSND 쿼리 타임아웃(-60004) 재시도(연도필터 해제): %s",
+                                query[:80],
+                            )
                             continue
+                        if "-60004" in str(e):
+                            logger.warning(
+                                "[RAG/general_v2] GSND 쿼리 타임아웃 누적 후보: %s",
+                                query[:80],
+                            )
+                            return [], True
                         logger.warning(f"[RAG/general_v2] GSND 쿼리 검색 실패: {e}")
-                        return []
-                return []
+                        return [], False
+                return [], False
 
             _t = time.monotonic()
-            gsnd_results = [
-                await loop.run_in_executor(None, _run_gsnd_query, q)
-                for q in gsnd_all_queries
-            ]
+            gsnd_results: List[List[Dict[str, Any]]] = []
+            gsnd_timeout_count = 0
+            for q in gsnd_all_queries:
+                elapsed = time.monotonic() - _t
+                if elapsed > _GSND_STAGE_MAX_SEC:
+                    logger.warning(
+                        "[RAG/general_v2] GSND 보강 검색 시간 상한(%.0fs) 초과로 중단",
+                        _GSND_STAGE_MAX_SEC,
+                    )
+                    break
+                remaining = max(_GSND_STAGE_MAX_SEC - elapsed, 0.0)
+                try:
+                    docs, timed_out = await asyncio.wait_for(
+                        loop.run_in_executor(None, _run_gsnd_query, q),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[RAG/general_v2] GSND 보강 검색 15초 초과로 다음 단계 진행",
+                    )
+                    break
+                gsnd_results.append(docs)
+                if timed_out:
+                    gsnd_timeout_count += 1
+                    if gsnd_timeout_count >= _GSND_TIMEOUT_BREAK_THRESHOLD:
+                        logger.warning(
+                            "[RAG/general_v2] GSND 타임아웃 누적 %d회로 보강 검색 조기 중단",
+                            gsnd_timeout_count,
+                        )
+                        break
             logger.info("[TIMING][general] Step7 GSND 보강 검색(순차): %.3fs", time.monotonic() - _t)
 
             gsnd_docs: List[Dict[str, Any]] = []
