@@ -57,20 +57,12 @@ async def process_rag_recommended_question(
     final_user_message: Optional[str] = None,
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
-    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> Tuple[Any, List[Dict[str, str]]]:
     """
     호출 시그니처는 process_rag_guide_recommend와 동일하게 유지한다.
     (라우터/스트리밍에서 동일 kwargs로 호출 가능)
     """
-    _ = (
-        precomputed_expanded_queries,
-        precomputed_keywords,
-        recommended_question_prompt,
-        intent,
-        precomputed_search_target,
-        precomputed_policy_priority_tag,
-    )
+    _ = (precomputed_expanded_queries, precomputed_keywords, recommended_question_prompt, intent, precomputed_search_target)
 
     try:
         t_total = time.monotonic()

@@ -42,7 +42,6 @@ class PreprocessResult:
     keywords: List[str] = field(default_factory=list)
     elapsed: float = 0.0
     search_target: Optional[str] = None
-    policy_priority_tag: Optional[str] = None
 
 
 async def run_pre_check(
@@ -118,7 +117,6 @@ def build_preprocess_skip_unified_recommended_question(user_message: str) -> Pre
         keywords=list(kw) if kw else [],
         elapsed=0.0,
         search_target=None,
-        policy_priority_tag=None,
     )
 
 
@@ -141,7 +139,6 @@ async def run_unified_preprocess(
         keywords=result.get("keywords") or [],
         elapsed=elapsed,
         search_target=result.get("search_target"),
-        policy_priority_tag=result.get("policy_priority_tag"),
     )
 
 
