@@ -30,6 +30,19 @@ def test_resolve_elderly_benefits():
     assert "기초연금" in kws
 
 
+def test_resolve_elderly_benefits_age_65_plus():
+    msg = "만 65세인데 받을 수 있는 혜택이 뭐가 있나요?"
+    tags, kws = resolve_policy_boost_keywords(msg)
+    assert "elderly_benefits" in tags
+    assert "기초연금" in kws
+
+
+def test_resolve_elderly_benefits_age_64_not_matched():
+    msg = "만 64세인데 받을 수 있는 혜택이 뭐가 있나요?"
+    tags, _kws = resolve_policy_boost_keywords(msg)
+    assert "elderly_benefits" not in tags
+
+
 def test_dedupe_cap_order_and_max():
     rq = "기준"
     raw = ["a", "b", "a", rq, "c", "d"]

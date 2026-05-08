@@ -310,10 +310,13 @@ def _elderly_benefits_heuristic(message: str) -> bool:
     m = message.strip()
     if not m:
         return False
+    age_values = [int(x) for x in re.findall(r"(?:만\s*)?(\d{1,3})\s*세", m)]
+    has_age_65_or_more = any(age >= 65 for age in age_values)
     age_or_elder = any(
         x in m
         for x in ("70", "칠십", "노인", "어르신", "부모", "고령")
     )
+    age_or_elder = age_or_elder or has_age_65_or_more
     benefit_ctx = any(
         x in m
         for x in ("혜택", "지원", "돌봄", "연금", "급여", "복지")
