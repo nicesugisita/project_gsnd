@@ -371,6 +371,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             keywords=preprocess.keywords,
             llm_recommended_followup=llm_recommended_followup,
             search_target=getattr(preprocess, "search_target", None),
+            policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
             excluded_chunk_ids=more_excluded_chunk_ids,
             excluded_service_names=more_excluded_service_names,
             final_user_message=more_final_user_message,

@@ -118,6 +118,7 @@ async def generate_final_response_v2(
     messages: list = None,
     user_region: str = "",
     user_birth_year: str = "",
+    policy_priority_tag: Optional[str] = None,
     more_info_mode: bool = False,
     use_llm_recommended_prompt: bool = False,
 ) -> Any:
@@ -253,7 +254,7 @@ async def generate_final_response_v2(
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
         if not more_info_mode:
-            user_message += soft_priority_instruction_for_prompt(message)
+            user_message += soft_priority_instruction_for_prompt(policy_priority_tag)
         user_message += " "
 
         final_messages = [{"role": ROLE_USER, "content": user_message}]

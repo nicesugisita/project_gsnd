@@ -60,6 +60,7 @@ def _build_assistant_preprocess_payload(
     reformed_query: str | None,
     expanded_queries: list | None,
     search_target: str | None,
+    policy_priority_tag: str | None,
     more_info: bool = False,
 ) -> dict:
     """히스토리 저장용 assistant preprocess 메타를 구성."""
@@ -71,6 +72,7 @@ def _build_assistant_preprocess_payload(
         "expanded_queries": expanded_queries or ([final_reformed] if final_reformed else []),
         "more_info": bool(more_info),
         "search_target": search_target,
+        "policy_priority_tag": policy_priority_tag,
     }
 
 
@@ -213,6 +215,7 @@ async def _handle_rag_mode(
     keywords: list = None,
     llm_recommended_followup: bool = False,
     search_target: str | None = None,
+    policy_priority_tag: str | None = None,
     excluded_chunk_ids: list | None = None,
     excluded_service_names: list | None = None,
     final_user_message: str | None = None,
@@ -295,6 +298,7 @@ async def _handle_rag_mode(
                 precomputed_expanded_queries=expanded_queries,
                 precomputed_keywords=keywords,
                 precomputed_search_target=search_target,
+                precomputed_policy_priority_tag=policy_priority_tag,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
                 final_user_message=final_user_message,
@@ -346,6 +350,7 @@ async def _handle_rag_mode(
                         reformed_query=reformed_query,
                         expanded_queries=expanded_queries,
                         search_target=search_target,
+                        policy_priority_tag=policy_priority_tag,
                         more_info=more_info,
                     )
                     await asyncio.to_thread(
@@ -387,6 +392,7 @@ async def _handle_rag_mode(
                                     reformed_query=reformed_query,
                                     expanded_queries=expanded_queries,
                                     search_target=search_target,
+                                    policy_priority_tag=policy_priority_tag,
                                     more_info=more_info,
                                 )
                                 await asyncio.to_thread(
@@ -440,6 +446,7 @@ async def _handle_rag_mode(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
+            precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
             final_user_message=final_user_message,
@@ -466,6 +473,7 @@ async def _handle_rag_mode(
             reformed_query=reformed_query,
             expanded_queries=expanded_queries,
             search_target=search_target,
+            policy_priority_tag=policy_priority_tag,
             more_info=more_info,
         )
         conv_id = await asyncio.to_thread(

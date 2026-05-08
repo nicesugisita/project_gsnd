@@ -463,6 +463,7 @@ async def _streaming_chat_flow(
                 "reformed_query": pp.reformed_query, "expanded_queries": pp.expanded_queries,
                 "keywords": pp.keywords,
                 "search_target": pp.search_target,
+                "policy_priority_tag": pp.policy_priority_tag,
             }
 
         user_intent      = preprocess_data["intent"]
@@ -470,6 +471,7 @@ async def _streaming_chat_flow(
         expanded_queries = preprocess_data["expanded_queries"]
         keywords         = preprocess_data["keywords"]
         search_target    = preprocess_data.get("search_target")
+        policy_priority_tag = preprocess_data.get("policy_priority_tag")
 
         if llm_recommended_followup and user_intent != "guide_recommend":
             _unified_intent = user_intent
@@ -486,12 +488,13 @@ async def _streaming_chat_flow(
             )
 
         yield f"data: {json.dumps({'chat-intent': user_intent})}\n\n"
-        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries, 'search_target': search_target}}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'preprocess': {'query': preprocess_data.get('query', ''), 'intent': user_intent, 'intent_reason': preprocess_data.get('intent_reason', ''), 'reformed_query': reformed_query, 'expanded_queries': expanded_queries, 'search_target': search_target, 'policy_priority_tag': policy_priority_tag}}, ensure_ascii=False)}\n\n"
         _preprocess_to_persist = {
             "query": preprocess_data.get("query", ""), "intent": user_intent,
             "reformed_query": reformed_query, "expanded_queries": expanded_queries,
             "more_info": bool(more.detected),
             "search_target": search_target,
+            "policy_priority_tag": policy_priority_tag,
         }
         _capture_preprocess_timings(_timings, preprocess_data, expanded_queries)
 
@@ -525,6 +528,7 @@ async def _streaming_chat_flow(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
+            precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,

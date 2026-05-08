@@ -78,6 +78,7 @@ async def process_rag_general(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — general 전용
@@ -87,12 +88,14 @@ async def process_rag_general(
     """
 
     _ = precomputed_search_target
+    precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
         _GEN_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
+            policy_priority_tag=precomputed_policy_priority_tag,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
 
         # Step 1: 쿼리 확장 (Mariner 검색 전)
@@ -239,6 +242,7 @@ async def process_rag_general(
         okms_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
             message=message,
             reformed_query=reformed_query,
+            policy_priority_tag=precomputed_policy_priority_tag,
             expanded_queries=expanded_queries,
             tri_built=ga_tri_built,
             per_query_limit=_GEN_GA_PER_QUERY,
@@ -485,7 +489,7 @@ async def process_rag_general(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             top_docs,
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
@@ -506,7 +510,7 @@ async def process_rag_general(
                 )
                 _t = time.monotonic()
                 lower_docs = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     lower_docs,
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
@@ -534,6 +538,7 @@ async def process_rag_general(
             fb_results = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=fallback_seed_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -565,7 +570,7 @@ async def process_rag_general(
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
                 fb_pool = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     fb_pool,
                     log_prefix="[RAG/general_v2][C4]",
                     apply_enabled=not _skip_policy_boost,
@@ -614,6 +619,7 @@ async def process_rag_general(
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][general] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)

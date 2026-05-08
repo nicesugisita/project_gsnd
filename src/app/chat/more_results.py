@@ -244,5 +244,6 @@ def get_last_preprocess_from_history(
             "reformed_query": reformed_query,
             "expanded_queries": [str(q).strip() for q in expanded_queries if str(q).strip()],
             "search_target": preprocess.get("search_target"),
+            "policy_priority_tag": preprocess.get("policy_priority_tag"),
         }
     return None
