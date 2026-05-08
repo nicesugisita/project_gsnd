@@ -55,6 +55,7 @@ async def process_rag_recommended_question(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    more_detail: bool = False,
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
@@ -66,6 +67,7 @@ async def process_rag_recommended_question(
     _ = (
         precomputed_expanded_queries,
         precomputed_keywords,
+        more_detail,
         recommended_question_prompt,
         intent,
         precomputed_search_target,

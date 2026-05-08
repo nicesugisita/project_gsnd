@@ -303,8 +303,9 @@ async def _handle_rag_mode(
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
                 final_user_message=final_user_message,
-                more_detail=more_detail,
             )
+            if intent == "general":
+                _rag_stream_kw["more_detail"] = more_detail
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
             async for status_msg in drain_status_until_done(rag_task, status_queue):
@@ -452,9 +453,10 @@ async def _handle_rag_mode(
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
             final_user_message=final_user_message,
-            more_detail=more_detail,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
+        if intent == "general":
+            _rag_kw["more_detail"] = more_detail
         response_message, referenced_documents = await rag_processor(**_rag_kw)
 
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
