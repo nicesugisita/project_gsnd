@@ -13,15 +13,6 @@ INSUFFICIENT_INFO_PATTERNS = (
     "제공된 정보만으로는 해당 내용을 안내하기 어렵습니다",
 )
 
-# 문서명에서 추출되는 한글 토큰 중 단독으로 매칭에 쓰면 오탐 위험이 큰 일반 행정어.
-# 핵심 토큰 매칭(⑤ 전략)에서 alias 후보로 채택하지 않는다.
-_DOCNAME_GENERIC_TOKENS = {
-    "사업안내", "사업계획", "운영지침", "추진계획",
-    "사업", "안내", "지침", "계획", "운영", "지원사업",
-    "정책", "보건소", "행정", "복지센터", "최종본", "이용",
-    "보건복지부", "경상남도", "경남도", "경남",
-}
-
 
 def _enrich_referenced_documents(docs: Optional[list]) -> list:
     """문서명으로 DB에서 dataset ID를 조회해 참조 문서에 보강."""
@@ -85,20 +76,6 @@ def _extract_service_aliases(doc: Dict[str, Any]) -> List[str]:
         service_part = re.sub(r'\.\w+$', '', service_part).strip()
         if service_part and service_part != raw_name:
             aliases.append(service_part)
-    # ⑤ 한글 핵심 토큰: 공백·언더스코어로 분리된 문서명에서 한글 토큰을 추출해
-    # alias 로 추가한다. 일반 행정어(_DOCNAME_GENERIC_TOKENS)는 다른 의미 토큰이
-    # 있을 때만 제외하고(오탐 방지), 일반 행정어밖에 없으면 폴백으로 사용한다.
-    # (예: "2026년 기초연금 사업안내.pdf" → "기초연금" / "운영지침.pdf" → "운영지침")
-    if raw_name:
-        cleaned = re.sub(r'^\d{4}년?\s*', '', raw_name)
-        cleaned = re.sub(r'\.\w+$', '', cleaned)
-        cleaned = re.sub(r'^\([^)]+\)\s*', '', cleaned)
-        all_tokens = re.findall(r'[가-힣]{3,}', cleaned)
-        specific_tokens = [t for t in all_tokens if t not in _DOCNAME_GENERIC_TOKENS]
-        if specific_tokens:
-            aliases.extend(specific_tokens)
-        else:
-            aliases.extend(all_tokens)
     snippet = str(doc.get("snippet", "") or "")
     for line in snippet.splitlines():
         line = line.strip()

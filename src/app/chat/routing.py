@@ -191,12 +191,7 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
         parsed = json.loads(match.group(0) if match else text)
 
         raw_intent = str(parsed.get("intent", "OTHER")).upper()
-        if raw_intent == "MORE_INFO":
-            mapped_intent = "MORE_INFO"
-        elif raw_intent == "MORE_DETAIL":
-            mapped_intent = "MORE_DETAIL"
-        else:
-            mapped_intent = "OTHER"
+        mapped_intent = "MORE_INFO" if raw_intent == "MORE_INFO" else "OTHER"
         llm_re_query = str(parsed.get("re_query", "") or "").strip()
         re_query = llm_re_query or fallback_re_query
         if mapped_intent == "MORE_INFO" and base_user_query:

@@ -118,9 +118,9 @@ async def generate_final_response_v2(
     messages: list = None,
     user_region: str = "",
     user_birth_year: str = "",
+    policy_priority_tag: Optional[str] = None,
     more_info_mode: bool = False,
     use_llm_recommended_prompt: bool = False,
-    more_detail_mode: bool = False,
 ) -> Any:
     """
     v2 최종 응답 생성 (모든 의도 공통)
@@ -249,26 +249,12 @@ async def generate_final_response_v2(
                 "그 경우에도 답변 전체를 한 줄·한 문장으로만 제한하지 마세요.\n"
             )
 
-        if more_detail_mode and intent != "recommended_question":
-            user_message += (
-                "\n\n[추가 규칙]\n"
-                "- 이번 응답은 사용자의 '더 자세히 알려줘' 요청에 따른 상세 설명입니다.\n"
-                "- 단순 사실 조회로 처리하지 말고, 시스템 프롬프트의 4단계 구조"
-                "(사업 개요 → 상세 요건 → 지원 혜택 → 신청 안내)를 사용해 문서에 적힌 "
-                "구체적인 수치(금액·기준·연령 등), 자격 요건, 신청 방법, 제출 서류, "
-                "문의처를 가능한 한 모두 포함해 답변하세요.\n"
-                "- retrieved_documents 의 여러 문서에 동일 사업의 세부 정보가 분산돼 있으면 "
-                "통합해 빠짐없이 안내하되, 문서에 없는 내용은 절대 추가하지 마세요.\n"
-                "- 한두 문장으로 짧게 끝내지 말고, 사용자가 추가 질문 없이 신청까지 진행할 수 "
-                "있을 만큼 충실하게 작성하세요.\n"
-            )
-
         if facility_content:
             user_message += (
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
         if not more_info_mode:
-            user_message += soft_priority_instruction_for_prompt(message)
+            user_message += soft_priority_instruction_for_prompt(policy_priority_tag)
         user_message += " "
 
         final_messages = [{"role": ROLE_USER, "content": user_message}]
