@@ -75,6 +75,7 @@ async def process_rag_general(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
     more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
