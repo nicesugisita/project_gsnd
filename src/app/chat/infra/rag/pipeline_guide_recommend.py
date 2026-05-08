@@ -386,6 +386,7 @@ async def process_rag_guide_recommend(
                 fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
                     message=message,
                     reformed_query=reformed_query,
+                    policy_priority_tag=precomputed_policy_priority_tag,
                     expanded_queries=fallback_expanded,
                     tri_built=fallback_tri,
                     per_query_limit=_GR_GA_PER_QUERY,
