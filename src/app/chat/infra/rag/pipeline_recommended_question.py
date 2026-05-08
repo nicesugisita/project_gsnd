@@ -1,7 +1,7 @@
 """
 추천 후속 질문 전용 파이프라인 (/v1/chat/recommended-question).
 
-프론트 ``metadata.referenced_documents``의 사업명·문서명으로 Mariner(GSND_BIZ / GOV_OKMS) 검색 후,
+프론트 ``metadata.referenced_documents``의 사업명·문서명으로 Mariner(GOV_OKMS) 검색 후,
 ``retrieved_documents`` 본문과 함께 ``classification_llm_recommended_prompt`` 로 최종 LLM 답변을 생성한다.
 """
 

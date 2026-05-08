@@ -363,11 +363,13 @@ reformed_query의 의미를 유지한 채,
     "확장 쿼리 4",
     "확장 쿼리 5"
   ],
-  "search_target": null
+  "search_target": null,
+  "policy_priority_tag": null
 }
 
 ※ intent가 "search"이면 search_target은 "admin_local_office" | "welfare_facility" | "ambiguous" 중 하나(필수).
 ※ intent가 search가 아니면 search_target은 반드시 null.
+※ policy_priority_tag은 항상 포함하고, 값은 "implant" | "low_income" | "elderly_benefits" | null 중 하나.
 
 ==================================================
 [입력]

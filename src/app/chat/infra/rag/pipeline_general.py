@@ -396,6 +396,7 @@ async def process_rag_general(
             okms_fb_a_docs = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=expanded_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -445,7 +446,7 @@ async def process_rag_general(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             top_docs,
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
@@ -471,7 +472,7 @@ async def process_rag_general(
                 )
                 _t = time.monotonic()
                 lower_docs = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     lower_docs,
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
@@ -499,6 +500,7 @@ async def process_rag_general(
             fb_results = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=fallback_seed_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -530,7 +532,7 @@ async def process_rag_general(
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
                 fb_pool = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     fb_pool,
                     log_prefix="[RAG/general_v2][C4]",
                     apply_enabled=not _skip_policy_boost,

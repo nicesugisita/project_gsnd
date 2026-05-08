@@ -155,9 +155,9 @@ async def _resolve_more_results_context(
             last_preprocess.get("intent"),
         )
 
-    # 직전 preprocess가 general/없음이어도 base_user_query가 있으면 MORE_INFO 흐름을 유지한다.
-    # (이 경우 검색 질의는 base_user_query를 우선 사용)
-    if detected and (not last_preprocess or last_preprocess.get("intent") == "general"):
+    # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
+    # 직전 intent가 general이어도 last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
+    if detected and not last_preprocess:
         can_recover_from_history = bool(
             reusable_preprocess
             and (llm_detected_more or _is_context_dependent_followup(user_message))
@@ -170,15 +170,15 @@ async def _resolve_more_results_context(
                 last_preprocess.get("intent"),
             )
         elif base_user_query:
-            last_preprocess = None
             logger.info(
-                "[MoreResults] conv_id=%s | 직전 general/메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                "[MoreResults] conv_id=%s | 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
                 conv_id,
             )
         else:
             detected = False
             logger.debug(
-                "[MoreResults] conv_id=%s | 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화", conv_id
+                "[MoreResults] conv_id=%s | 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화",
+                conv_id,
             )
             # 후속 발화임을 보존: exclusion 없이 직전 intent만 재사용하도록 blocked_followup 설정
             return _MoreResultsContext(last_preprocess=last_preprocess, blocked_followup=True)
@@ -196,7 +196,6 @@ async def _resolve_more_results_context(
     re_query: Optional[str] = None
     if (
         last_preprocess
-        and str(last_preprocess.get("intent") or "") != "general"
         and last_preprocess.get("reformed_query")
     ):
         re_query = str(last_preprocess["reformed_query"]).strip()
@@ -251,16 +250,26 @@ async def _resolve_more_results_context(
     )
 
 
-def _build_preprocess_from_history(user_message: str, last_preprocess: dict) -> dict:
+def _build_preprocess_from_history(
+    user_message: str,
+    last_preprocess: dict,
+    *,
+    override_intent: Optional[str] = None,
+) -> dict:
     """MORE_INFO 경로에서 히스토리의 전처리 결과를 재사용하여 preprocess_data를 구성."""
     try:
         kw = extract_nouns(user_message)
     except Exception:
         kw = []
+    resolved_intent = str(override_intent or last_preprocess.get("intent") or "general")
     return {
         "query": user_message,
-        "intent": last_preprocess["intent"],
-        "intent_reason": "reused_from_history_on_more_info",
+        "intent": resolved_intent,
+        "intent_reason": (
+            "forced_guide_recommend_on_more_info"
+            if resolved_intent == "guide_recommend"
+            else "reused_from_history_on_more_info"
+        ),
         "reformed_query": user_message,
         "expanded_queries": last_preprocess.get("expanded_queries") or [user_message],
         "keywords": kw,
@@ -445,10 +454,22 @@ async def _streaming_chat_flow(
         if more.detected and more.last_preprocess:
             user_message = more.last_preprocess["reformed_query"]
             await _update_user_message(chat_request.messages, user_message)
-            preprocess_data = _build_preprocess_from_history(user_message, more.last_preprocess)
+            reused_intent = (
+                "guide_recommend"
+                if not more.more_detail
+                else str(more.last_preprocess.get("intent") or "general")
+            )
+            preprocess_data = _build_preprocess_from_history(
+                user_message,
+                more.last_preprocess,
+                override_intent=reused_intent,
+            )
             logger.info(
-                "[MoreResults] conv_id=%s | 히스토리 재사용 intent=%s | reformed=%s",
-                chat_request.conv_id, more.last_preprocess["intent"], shorten_text(user_message, 80),
+                "[MoreResults] conv_id=%s | 히스토리 재사용 intent=%s (llm_more_detail=%s) | reformed=%s",
+                chat_request.conv_id,
+                preprocess_data.get("intent"),
+                more.more_detail,
+                shorten_text(user_message, 80),
             )
         elif more.blocked_followup and more.last_preprocess:
             # 직전 general 후속 — exclusion 없이 직전 reformed_query + intent 재사용
@@ -488,6 +509,23 @@ async def _streaming_chat_flow(
         keywords         = preprocess_data["keywords"]
         search_target    = preprocess_data.get("search_target")
         policy_priority_tag = preprocess_data.get("policy_priority_tag")
+
+        # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
+        # (MORE_DETAIL은 기존 축 유지)
+        if more.detected and not more.more_detail and user_intent != "guide_recommend":
+            prev_intent = user_intent
+            user_intent = "guide_recommend"
+            preprocess_data["intent"] = "guide_recommend"
+            prev_reason = (preprocess_data.get("intent_reason") or "").strip()
+            suffix = "forced_guide_recommend_on_more_info(no_history_fallback)"
+            preprocess_data["intent_reason"] = (
+                f"{prev_reason} | {suffix}" if prev_reason else suffix
+            )
+            logger.info(
+                "[MoreResults] conv_id=%s | MORE_INFO 강제 intent=guide_recommend (preprocess_intent_was=%s)",
+                chat_request.conv_id,
+                prev_intent,
+            )
 
         if llm_recommended_followup and user_intent != "guide_recommend":
             _unified_intent = user_intent
@@ -548,9 +586,10 @@ async def _streaming_chat_flow(
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,
-            more_detail=more.more_detail,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
+        if user_intent == "general":
+            _rag_kwargs["more_detail"] = more.more_detail
         rag_task = asyncio.create_task(rag_processor(**_rag_kwargs))
         if more.detected:
             logger.info(

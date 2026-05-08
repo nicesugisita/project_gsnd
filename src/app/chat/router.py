@@ -158,9 +158,9 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                     "[MoreResults/non-stream] 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
                     more_last_preprocess.get("intent"),
                 )
-            # 직전 preprocess가 general/없음이어도 base_user_query가 있으면 MORE_INFO 흐름을 유지한다.
-            # (이 경우 검색 질의는 base_user_query를 우선 사용)
-            if more_detected and (not more_last_preprocess or more_last_preprocess.get("intent") == "general"):
+            # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
+            # 직전 intent가 general이어도 more_last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
+            if more_detected and not more_last_preprocess:
                 can_recover_from_history = bool(
                     more_reusable_preprocess
                     and (llm_detected_more or _is_context_dependent_followup(user_message))
@@ -172,9 +172,8 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                         more_last_preprocess.get("intent"),
                     )
                 elif base_user_query:
-                    more_last_preprocess = None
                     logger.info(
-                        "[MoreResults/non-stream] 직전 general/메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                        "[MoreResults/non-stream] 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
                     )
                 else:
                     more_detected = False
@@ -184,7 +183,6 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 re_query = None
                 if (
                     more_last_preprocess
-                    and str(more_last_preprocess.get("intent") or "") != "general"
                     and more_last_preprocess.get("reformed_query")
                 ):
                     re_query = str(more_last_preprocess["reformed_query"]).strip()
@@ -312,21 +310,34 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
         if more_detected and more_last_preprocess:
+            reused_intent = (
+                "guide_recommend"
+                if not llm_detected_more_detail
+                else str(more_last_preprocess.get("intent") or "general")
+            )
             try:
                 reused_keywords = extract_nouns(user_message)
             except Exception:
                 reused_keywords = []
             preprocess = PreprocessResult(
                 query=user_message,
-                intent=str(more_last_preprocess.get("intent") or "general"),
-                intent_reason="reused_from_history_on_more_info",
+                intent=reused_intent,
+                intent_reason=(
+                    "forced_guide_recommend_on_more_info"
+                    if reused_intent == "guide_recommend"
+                    else "reused_from_history_on_more_info"
+                ),
                 reformed_query=user_message,
                 expanded_queries=more_last_preprocess.get("expanded_queries") or [user_message],
                 keywords=reused_keywords,
                 elapsed=0.0,
                 search_target=more_last_preprocess.get("search_target"),
             )
-            logger.info("[MoreResults/non-stream] 히스토리 전처리 재사용 intent=%s", preprocess.intent)
+            logger.info(
+                "[MoreResults/non-stream] 히스토리 전처리 재사용 intent=%s (llm_more_detail=%s)",
+                preprocess.intent,
+                llm_detected_more_detail,
+            )
         elif more_blocked_followup and more_last_preprocess:
             # 직전 general 후속 — exclusion 없이 직전 reformed_query + intent 재사용
             re_query = str(more_last_preprocess.get("reformed_query") or "").strip() or user_message
@@ -355,6 +366,20 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             preprocess = await run_unified_preprocess(
                 user_message, chat_request.messages, use_rag
             )
+
+        # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
+        # (MORE_DETAIL은 기존 축 유지)
+        if more_detected and not llm_detected_more_detail and preprocess.intent != "guide_recommend":
+            prev_intent = preprocess.intent
+            preprocess.intent = "guide_recommend"
+            prev_reason = (preprocess.intent_reason or "").strip()
+            suffix = "forced_guide_recommend_on_more_info(no_history_fallback)"
+            preprocess.intent_reason = f"{prev_reason} | {suffix}" if prev_reason else suffix
+            logger.info(
+                "[MoreResults/non-stream] MORE_INFO 강제 intent=guide_recommend (preprocess_intent_was=%s)",
+                prev_intent,
+            )
+
         user_message = preprocess.query
         await _update_user_message(chat_request.messages, user_message)
 
