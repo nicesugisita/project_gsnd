@@ -77,6 +77,7 @@ async def process_rag_with_documents_v2(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — comparison 전용
@@ -86,12 +87,14 @@ async def process_rag_with_documents_v2(
     """
 
     _ = precomputed_search_target
+    precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
         _COMP_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
+            policy_priority_tag=precomputed_policy_priority_tag,
+            policy_search_boost_enabled=not _skip_policy_boost,
         )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
@@ -236,6 +239,7 @@ async def process_rag_with_documents_v2(
         comp_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
             message=message,
             reformed_query=reformed_query,
+            policy_priority_tag=precomputed_policy_priority_tag,
             expanded_queries=expanded_queries,
             tri_built=tri_built,
             per_query_limit=_COMP_GA_PER_QUERY,
@@ -407,7 +411,7 @@ async def process_rag_with_documents_v2(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             top_docs,
             log_prefix="[RAG/comparison_v2]",
             apply_enabled=not _skip_policy_boost,
@@ -463,6 +467,7 @@ async def process_rag_with_documents_v2(
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent="comparison",
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][comparison] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)

@@ -204,28 +204,28 @@ def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _okms_dual_query_for_search(
-    user_message: str,
     vector_q: str,
     keyword_q: str,
     *,
+    policy_priority_tag: Optional[str],
     policy_search_boost_enabled: bool,
 ) -> Tuple[str, str]:
     """Group A (vector, keyword) 쌍. MORE_INFO 등에서는 정책 키워드 보강 없이 원질의만 사용."""
     if not policy_search_boost_enabled:
         return (vector_q or "").strip(), (keyword_q or "").strip()
-    return augment_okms_dual_query(user_message, vector_q, keyword_q or "")
+    return augment_okms_dual_query(policy_priority_tag, vector_q, keyword_q or "")
 
 
 def resolve_fallback_max_expanded_queries(
-    user_message: str,
     *,
+    policy_priority_tag: Optional[str],
     default_max: int = FALLBACK_MAX_EXPANDED_DEFAULT,
     policy_search_boost_enabled: bool = True,
 ) -> int:
     """질문군별 fallback 확장 쿼리 상한을 반환."""
     if not policy_search_boost_enabled:
         return default_max
-    tags, _ = resolve_policy_boost_keywords(user_message)
+    tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
     if "elderly_benefits" in tags:
         return FALLBACK_MAX_EXPANDED_ELDERLY
     return default_max
@@ -332,6 +332,7 @@ async def collect_okms_groupa_and_gov_docs(
     *,
     message: str,
     reformed_query: str,
+    policy_priority_tag: Optional[str],
     expanded_queries: List[str],
     tri_built: List[str],
     per_query_limit: int,
@@ -346,7 +347,7 @@ async def collect_okms_groupa_and_gov_docs(
     loop = asyncio.get_event_loop()
 
     policy_extra_pairs = (
-        policy_extra_okms_searches(message, reformed_query)
+        policy_extra_okms_searches(policy_priority_tag, reformed_query)
         if policy_search_boost_enabled
         else []
     )
@@ -355,7 +356,8 @@ async def collect_okms_groupa_and_gov_docs(
             None,
             run_group_a,
             *_okms_dual_query_for_search(
-                message, eq, sq if sq else "",
+                eq, sq if sq else "",
+                policy_priority_tag=policy_priority_tag,
                 policy_search_boost_enabled=policy_search_boost_enabled,
             ),
         )
@@ -431,6 +433,7 @@ async def collect_okms_groupa_fallback_docs(
     *,
     message: str,
     reformed_query: str,
+    policy_priority_tag: Optional[str],
     expanded_queries: List[str],
     tri_built: List[str],
     per_query_limit: int,
@@ -446,14 +449,15 @@ async def collect_okms_groupa_fallback_docs(
             None,
             run_group_a_fallback,
             *_okms_dual_query_for_search(
-                message, eq, sq if sq else "",
+                eq, sq if sq else "",
+                policy_priority_tag=policy_priority_tag,
                 policy_search_boost_enabled=policy_search_boost_enabled,
             ),
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
     fb_policy_pairs = (
-        policy_extra_okms_searches(message, reformed_query)[:max_policy_pairs]
+        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
         if policy_search_boost_enabled
         else []
     )
@@ -483,6 +487,7 @@ async def collect_okms_groupa_and_gov_fallback_docs(
     *,
     message: str,
     reformed_query: str,
+    policy_priority_tag: Optional[str],
     expanded_queries: List[str],
     tri_built: List[str],
     per_query_limit: int,
@@ -496,13 +501,14 @@ async def collect_okms_groupa_and_gov_fallback_docs(
 
     fb_pairs = [
         _okms_dual_query_for_search(
-            message, eq, sq if sq else "",
+            eq, sq if sq else "",
+            policy_priority_tag=policy_priority_tag,
             policy_search_boost_enabled=policy_search_boost_enabled,
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
     policy_pairs = (
-        policy_extra_okms_searches(message, reformed_query)[:max_policy_pairs]
+        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
         if policy_search_boost_enabled
         else []
     )
@@ -542,13 +548,13 @@ async def collect_okms_groupa_and_gov_fallback_docs(
 def build_welfare_search_queries(
     expanded_queries: List[str],
     search_queries: List[str],
-    user_message: str,
+    policy_priority_tag: Optional[str],
     max_policy_queries: int | None = None,
     policy_search_boost_enabled: bool = True,
 ) -> Tuple[List[str], List[str]]:
     """search 의도 CENTER/TEL 공통 질의 목록 구성 + 정책 보강 질의 반환."""
     policy_queries = (
-        policy_supplement_welfare_queries(user_message)
+        policy_supplement_welfare_queries(policy_priority_tag)
         if policy_search_boost_enabled
         else []
     )

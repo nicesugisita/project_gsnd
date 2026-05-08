@@ -80,6 +80,7 @@ async def process_rag_search(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
@@ -87,6 +88,8 @@ async def process_rag_search(
     `precomputed_search_target`: admin_local_office → OUR_REGION_TEL 만,
     welfare_facility → WELFARE_CENTER 만 Mariner 검색. ambiguous·미전달은 OUR_REGION_TEL.
     """
+
+    precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
         t_total = time.monotonic()
@@ -159,7 +162,7 @@ async def process_rag_search(
             all_queries, _welfare_policy_qs = build_welfare_search_queries(
                 expanded_queries=expanded_queries,
                 search_queries=search_queries,
-                user_message=message,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 policy_search_boost_enabled=not _skip_policy_boost,
             )
             if _welfare_policy_qs:
@@ -244,7 +247,7 @@ async def process_rag_search(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t_ref = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             top_docs,
             log_prefix="[RAG/search_v2]",
             apply_enabled=not _skip_policy_boost,
@@ -281,6 +284,7 @@ async def process_rag_search(
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][search] Step7 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
