@@ -191,12 +191,13 @@ def test_gsnd_applies_compli_dt_filter_by_default(monkeypatch: pytest.MonkeyPatc
 def test_gsnd_skips_compli_dt_filter_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_mariner(monkeypatch, rows=[])
 
-    queryset_gsnd.query_GSND_general_documents(
+    docs = queryset_gsnd.query_GSND_general_documents(
         "2026년 기초연금",
         collection=Config.RAG_COLLECTION,
         year_filters=["2026"],
         apply_year_filter=False,
     )
+    print(f"[test_gsnd_skips_compli_dt_filter_when_disabled] fetched_docs={docs}")
 
     cmd = _FakeCommandSearchRequest.last_instance
     assert cmd is not None
@@ -286,4 +287,49 @@ def test_gsnd_live_basic_search() -> None:
         sigun_filters=["경상남도 창원시"],
     )
 
+    print(f"[test_gsnd_live_basic_search] fetched_count={len(docs)}")
+    for idx, doc in enumerate(docs[:3], start=1):
+        print(
+            "[test_gsnd_live_basic_search] "
+            f"#{idx} CHUNK_ID={doc.get('CHUNK_ID', '')} "
+            f"NAME={doc.get('NAME', '')} "
+            f"SIGUN={doc.get('SIGUN', '')} "
+            f"COMPLI_DT={doc.get('COMPLI_DT', '')}"
+        )
+
     assert isinstance(docs, list)
+
+
+@pytest.mark.skipif(
+    os.environ.get("GSND_MARINER_TEST", "").strip().lower() not in ("1", "true", "yes"),
+    reason="실 Mariner 검색은 GSND_MARINER_TEST=1 일 때만 실행",
+)
+def test_gsnd_live_includes_chunk_path_content() -> None:
+    if not Config.RAG_ENABLED:
+        pytest.skip("RAG_ENABLED=False")
+
+    docs = queryset_gsnd.query_GSND_general_documents(
+        "2026년 기준 창원시 기초연금 신청 절차",
+        collection=Config.RAG_COLLECTION,
+        year_filters=["2026"],
+        sigun_filters=["경상남도 창원시"],
+    )
+
+    if not docs:
+        pytest.skip("실검색 결과가 없어 CHUNK_PATH 본문 확인을 건너뜁니다.")
+
+    non_empty_chunk_path_docs = [
+        doc for doc in docs if str(doc.get("CHUNK_PATH", "") or "").strip()
+    ]
+    assert non_empty_chunk_path_docs, "CHUNK_PATH가 비어있는 문서만 반환되었습니다."
+
+    sample_doc = non_empty_chunk_path_docs[0]
+    sample_text = str(sample_doc.get("CHUNK_PATH", "") or "")
+    sample_preview = sample_text.replace("\n", " ")[:200]
+    print(f"[test_gsnd_live_includes_chunk_path_content] fetched_count={len(docs)}")
+    print(
+        "[test_gsnd_live_includes_chunk_path_content] "
+        f"sample_chunk_id={sample_doc.get('CHUNK_ID', '')} "
+        f"chunk_path_len={len(sample_text)} "
+        f"chunk_path_preview={sample_preview}"
+    )
