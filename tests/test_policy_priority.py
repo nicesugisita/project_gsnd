@@ -11,35 +11,36 @@ from app.chat.infra.rag.policy_priority import (
 
 
 def test_resolve_implant_over_elderly():
-    msg = "우리 부모님 70대인데, 진주에 거주 중입니다. 임플란트 지원을 받을 수 있나요?"
-    tags, kws = resolve_policy_boost_keywords(msg)
+    tags, kws = resolve_policy_boost_keywords("implant")
     assert "implant" in tags
     assert "임플란트" in kws
 
 
 def test_resolve_low_income():
-    tags, kws = resolve_policy_boost_keywords("저소득 관련 지원은 무엇이 있나요?")
+    tags, kws = resolve_policy_boost_keywords("low_income")
     assert "low_income" in tags
     assert "생계급여" in kws and "의료급여" in kws
 
 
 def test_resolve_elderly_benefits():
-    msg = "우리 부모님 70대인데, 진주에 거주 중일 때 받을 수 있는 혜택은?"
-    tags, kws = resolve_policy_boost_keywords(msg)
+    tags, kws = resolve_policy_boost_keywords("elderly_benefits")
     assert "elderly_benefits" in tags
     assert "기초연금" in kws
 
 
 def test_resolve_elderly_benefits_age_65_plus():
-    msg = "만 65세인데 받을 수 있는 혜택이 뭐가 있나요?"
-    tags, kws = resolve_policy_boost_keywords(msg)
+    tags, kws = resolve_policy_boost_keywords("elderly_benefits")
     assert "elderly_benefits" in tags
     assert "기초연금" in kws
 
 
 def test_resolve_elderly_benefits_age_64_not_matched():
-    msg = "만 64세인데 받을 수 있는 혜택이 뭐가 있나요?"
-    tags, _kws = resolve_policy_boost_keywords(msg)
+    tags, _kws = resolve_policy_boost_keywords(None)
+    assert "elderly_benefits" not in tags
+
+
+def test_resolve_elderly_benefits_specific_topic_not_matched():
+    tags, _kws = resolve_policy_boost_keywords(None)
     assert "elderly_benefits" not in tags
 
 
@@ -55,7 +56,7 @@ def test_apply_policy_reorders_by_keyword_hits():
         {"CHUNK_ID": "1", "WEIGHT": 100, "NAME": "기타", "CONTENT": "일반"},
         {"CHUNK_ID": "2", "WEIGHT": 1, "NAME": "생계급여", "CONTENT": "생계급여 신청"},
     ]
-    out = apply_policy_priority_to_documents("저소득 지원", docs, log_prefix="test")
+    out = apply_policy_priority_to_documents("low_income", docs, log_prefix="test")
     assert out[0]["CHUNK_ID"] == "2"
     assert out[1]["CHUNK_ID"] == "1"
 
@@ -76,29 +77,26 @@ def test_apply_policy_apply_enabled_false_preserves_order():
         {"CHUNK_ID": "2", "WEIGHT": 1, "NAME": "생계급여", "CONTENT": "생계급여 신청"},
     ]
     out = apply_policy_priority_to_documents(
-        "저소득 지원", docs, log_prefix="test", apply_enabled=False
+        "low_income", docs, log_prefix="test", apply_enabled=False
     )
     assert [d["CHUNK_ID"] for d in out] == ["1", "2"]
 
 
 def test_augment_okms_dual_elderly_vector_only():
     """트리플이 비어도 벡터에 정책 앵커 추가."""
-    msg = "부모님 70대인데 받을 혜택이 있을까요?"
-    vec, kw = augment_okms_dual_query(msg, "진주 거주 복지", "")
+    vec, kw = augment_okms_dual_query("elderly_benefits", "진주 거주 복지", "")
     assert "기초연금" in vec and "노인맞춤돌봄" in vec
     assert kw == ""
 
 
 def test_augment_okms_dual_appends_kw_when_triple_present():
-    msg = "부모님 70대인데 받을 혜택이 있을까요?"
-    vec, kw = augment_okms_dual_query(msg, "진주", "복지 신청")
+    vec, kw = augment_okms_dual_query("elderly_benefits", "진주", "복지 신청")
     assert "기초연금" in vec
     assert "노인맞춤돌봄" in kw or "맞춤돌봄" in kw
 
 
 def test_policy_extra_okms_searches_pairs():
-    msg = "어르신 70 세 혜택"
-    pairs = policy_extra_okms_searches(msg, "진주 거주")
+    pairs = policy_extra_okms_searches("elderly_benefits", "진주 거주")
     assert len(pairs) == 2
     assert pairs[0][1] == "기초연금"
     assert "노인맞춤돌봄" in pairs[1][1]
@@ -106,13 +104,12 @@ def test_policy_extra_okms_searches_pairs():
 
 def test_policy_supplement_welfare_queries():
     assert "기초연금" in policy_supplement_welfare_queries(
-        "어르신에게 어떤 지원이 있나요?",
+        "elderly_benefits",
     )
 
 
 def test_elderly_basic_pension_before_dolbom_despite_weight():
     """맞춤돌봄 등 여러 부스트어가 걸린 문서라도 기초연금 문서를 앞에 둔다."""
-    msg = "부모님 70대인데 받을 혜택이 있을까요?"
     docs = [
         {
             "CHUNK_ID": "dolbom",
@@ -127,6 +124,6 @@ def test_elderly_basic_pension_before_dolbom_despite_weight():
             "CONTENT": "기초연금 신청 서류",
         },
     ]
-    out = apply_policy_priority_to_documents(msg, docs, log_prefix="test")
+    out = apply_policy_priority_to_documents("elderly_benefits", docs, log_prefix="test")
     assert out[0]["CHUNK_ID"] == "basic"
     assert out[1]["CHUNK_ID"] == "dolbom"
