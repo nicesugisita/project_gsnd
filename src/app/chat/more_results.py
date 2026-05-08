@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_ASSISTANT
+from app.shared.utils.keyword_extractor import extract_nouns
 
 
 def _assistant_more_info(msg: Dict[str, Any]) -> Optional[bool]:
@@ -101,8 +102,16 @@ def get_excluded_info_from_history(messages: list) -> Tuple[List[str], List[str]
             if not saw_assistant:
                 continue
             # latest_minfo is not True: False(첫 답변) 또는 None(메타 없는 구버전 메시지) 모두 체인 경계로 처리.
-            # is False 조건은 None을 걸러내지 못해 전체 히스토리를 순회하는 버그가 있었음.
-            if content and latest_minfo is not True:
+            # 단, 직전 assistant 턴에서 참조문서가 비어 있으면(예: 응답-문서 매칭 0건) 바로 끊지 않고
+            # 한 단계 더 거슬러 올라가 이전 assistant의 참조를 집계한다.
+            # 또한 more_info 플래그가 잘못 저장된 경우를 대비해, user 발화가 저정보 후속(예: "더 알려줘")이면
+            # 체인을 유지하고 더 과거 assistant를 탐색한다.
+            if (
+                content
+                and latest_minfo is not True
+                and (excluded_chunk_ids or excluded_service_names)
+                and not _is_context_dependent_followup(content)
+            ):
                 break
 
     return excluded_chunk_ids, excluded_service_names
@@ -139,7 +148,8 @@ def get_base_user_query_from_history(messages: list) -> str:
         if not saw_assistant:
             continue
         # latest_minfo is not True: False 또는 None(메타 없는 구버전) 모두 체인 경계로 처리.
-        if latest_minfo is not True:
+        # 단, 사용자 발화가 저정보 후속이면 경계로 보지 않고 더 과거 원질문을 탐색한다.
+        if latest_minfo is not True and not _is_context_dependent_followup(content):
             return content
     # fallback: more_info 메타가 누락된 경우
     # - user_candidates[0]: 가장 최근 user(대개 "더 알려줘")
@@ -151,8 +161,24 @@ def get_base_user_query_from_history(messages: list) -> str:
                 return candidate
         return user_candidates[1]
     if user_candidates:
-        return user_candidates[0]
+        # 후보가 1개뿐이면 직전 follow-up 본문일 가능성이 높아 기준 원질문으로 쓰지 않는다.
+        return ""
     return ""
+
+
+def _is_context_dependent_followup(content: str) -> bool:
+    """명시 주제가 부족한 짧은 후속 발화인지 추정한다."""
+    text = str(content or "").strip()
+    if not text:
+        return False
+    compact = "".join(text.split())
+    if len(compact) > 20:
+        return False
+    try:
+        nouns = [n.strip() for n in extract_nouns(text, use_bigram=False) if n and n.strip()]
+    except Exception:
+        nouns = []
+    return len(nouns) <= 1
 
 
 def _is_sigun_only_reply(content: str) -> bool:
@@ -180,8 +206,22 @@ def _is_sigun_only_reply(content: str) -> bool:
     return len(siguns) == 1
 
 
-def get_last_preprocess_from_history(messages: list) -> Optional[Dict[str, Any]]:
-    """히스토리에서 가장 최근 assistant의 전처리 메타를 반환."""
+def get_last_preprocess_from_history(
+    messages: list,
+    *,
+    allowed_intents: Optional[set[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """히스토리에서 가장 최근 assistant의 전처리 메타를 반환.
+
+    Args:
+        messages: 대화 이력
+        allowed_intents: 지정 시 해당 intent 집합에 포함되는 전처리만 반환
+    """
+    normalized_allowed = {
+        str(intent).strip()
+        for intent in (allowed_intents or set())
+        if str(intent).strip()
+    }
     for msg in reversed(messages or []):
         if msg.get("role") != ROLE_ASSISTANT:
             continue
@@ -193,6 +233,8 @@ def get_last_preprocess_from_history(messages: list) -> Optional[Dict[str, Any]]
         query = str(preprocess.get("query", "") or "").strip()
         expanded_queries = preprocess.get("expanded_queries")
         if not intent or not reformed_query:
+            continue
+        if normalized_allowed and intent not in normalized_allowed:
             continue
         if not isinstance(expanded_queries, list):
             expanded_queries = []
