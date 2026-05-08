@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def _search_pool_tag_from_target(precomputed_search_target: Optional[str]) -> str:
-    """전처리 search_target → 검색 블록 키 (welfare_center | our_region_tel)."""
+    """전처리 search_target → 검색 블록 키 (welfare_center | our_region_tel | both)."""
     hint = str(precomputed_search_target or "").strip().lower().replace("-", "_")
 
     if hint == "welfare_facility":
@@ -48,14 +48,14 @@ def _search_pool_tag_from_target(precomputed_search_target: Optional[str]) -> st
         return "our_region_tel"
     if hint in ("ambiguous", ""):
         logger.info(
-            "[RAG/search_v2] search_target 미전달·ambiguous → OUR_REGION_TEL 단일 Mariner 검색"
+            "[RAG/search_v2] search_target 미전달·ambiguous → WELFARE_CENTER+OUR_REGION_TEL 병행 검색"
         )
-        return "our_region_tel"
+        return "both"
     logger.warning(
-        "[RAG/search_v2] 알 수 없는 search_target=%r → OUR_REGION_TEL로 검색",
+        "[RAG/search_v2] 알 수 없는 search_target=%r → 양쪽 풀 병행 검색",
         precomputed_search_target,
     )
-    return "our_region_tel"
+    return "both"
 
 
 async def process_rag_search(
@@ -150,6 +150,7 @@ async def process_rag_search(
 
         with log_step_banner(logger, "RAG/search_v2 Step4 Mariner 단일 풀 검색"):
             _SEARCH_PER_QUERY = -1
+            _SEARCH_PER_QUERY_TEL = -1
             if status_callback:
                 await status_callback("시설 및 문의처를 검색하고 있습니다")
 
@@ -193,25 +194,35 @@ async def process_rag_search(
 
         _tel_only = search_pool_tag == "our_region_tel"
         _center_only = search_pool_tag == "welfare_center"
+        _both_pool = search_pool_tag == "both"
 
         _t = time.monotonic()
+        _SEARCH_STAGE_MAX_SEC = 15.0
         center_docs, tel_docs = await collect_welfare_center_tel_docs(
             queries=all_queries,
             per_query_limit=_SEARCH_PER_QUERY,
-            per_query_limit_tel=-1,
+            per_query_limit_tel=_SEARCH_PER_QUERY_TEL,
             run_center_query=_run_welfare_center_query,
             run_tel_query=_run_welfare_tel_query,
             log_prefix="RAG/search_v2",
-            center_enabled=_center_only,
-            tel_enabled=_tel_only,
+            center_enabled=(_center_only or _both_pool),
+            tel_enabled=(_tel_only or _both_pool),
+            stage_timeout_sec=_SEARCH_STAGE_MAX_SEC,
         )
         logger.info("[TIMING][search] Step4 Mariner 단일 풀: %.3fs", time.monotonic() - _t)
         if _tel_only:
             all_docs = tel_docs
             logger.info(f"[RAG/search_v2] OUR_REGION_TEL 전용 검색 완료: {len(all_docs)}건")
-        else:
+        elif _center_only:
             all_docs = center_docs
             logger.info(f"[RAG/search_v2] WELFARE_CENTER 전용 검색 완료: {len(all_docs)}건")
+        else:
+            all_docs = center_docs + tel_docs
+            logger.info(
+                "[RAG/search_v2] 양쪽 풀 병행 검색 완료: center=%d건 tel=%d건",
+                len(center_docs),
+                len(tel_docs),
+            )
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
         top_docs = sorted(
