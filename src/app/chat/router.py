@@ -30,6 +30,13 @@ from app.dependencies import (
     _validate_user_message,
     chat_user_id_requires_nologin_canonical,
 )
+from app.chat.more_results import (
+    get_last_preprocess_from_history,
+    get_base_user_query_from_history,
+    get_excluded_info_from_history,
+)
+from app.chat.routing import classify_next_intent
+from app.shared.utils.keyword_extractor import extract_nouns
 from ._stream_utils import _build_streaming_response, SSE_RESPONSE_HEADERS
 from ._conversation_ctx import _check_user_limit, _merge_and_init_conversation
 from ._helpers import (
@@ -39,6 +46,7 @@ from ._helpers import (
     _run_query_recreation,
 )
 from ._pipeline_steps import (
+    PreprocessResult,
     run_pre_check,
     run_early_sigun_check,
     run_out_of_scope_check,
@@ -52,6 +60,23 @@ from ._streaming import _streaming_chat_flow
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_MORE_INFO_REUSABLE_INTENTS = {"guide_recommend", "search", "comparison"}
+
+
+def _is_context_dependent_followup(text: str) -> bool:
+    """명시 주제가 부족해 직전 문맥 의존 가능성이 큰 짧은 후속 발화인지 판정."""
+    q = str(text or "").strip()
+    if not q:
+        return False
+    compact = "".join(q.split())
+    if len(compact) > 20:
+        return False
+    try:
+        nouns = [n.strip() for n in extract_nouns(q, use_bigram=False) if n and n.strip()]
+    except Exception:
+        nouns = []
+    return len(nouns) <= 1
 
 
 def _ensure_runtime_user_id(chat_request: ChatRequest) -> None:
@@ -100,6 +125,89 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
         original_user_message = user_message
         stream = data.get("stream", False)
+        use_more_results_router_path = (not stream) or llm_recommended_followup or (chat_request.mode == "guide_recommend")
+
+        more_detected = False
+        more_blocked_followup = False
+        more_final_user_message = None
+        more_excluded_chunk_ids = []
+        more_excluded_service_names = []
+        more_last_preprocess = None
+
+        if use_more_results_router_path:
+            more_last_preprocess = get_last_preprocess_from_history(chat_request.messages)
+            more_reusable_preprocess = get_last_preprocess_from_history(
+                chat_request.messages,
+                allowed_intents=_MORE_INFO_REUSABLE_INTENTS,
+            )
+            base_user_query = get_base_user_query_from_history(chat_request.messages)
+            if base_user_query and _is_context_dependent_followup(base_user_query):
+                base_user_query = ""
+            next_intent = await classify_next_intent(chat_request.messages, user_message)
+            llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
+            llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
+            more_detected = llm_detected_more
+            if (
+                not more_detected
+                and more_last_preprocess
+                and str(more_last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
+                and _is_context_dependent_followup(user_message)
+            ):
+                more_detected = True
+                logger.info(
+                    "[MoreResults/non-stream] 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
+                    more_last_preprocess.get("intent"),
+                )
+            # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
+            # 직전 intent가 general이어도 more_last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
+            if more_detected and not more_last_preprocess:
+                can_recover_from_history = bool(
+                    more_reusable_preprocess
+                    and (llm_detected_more or _is_context_dependent_followup(user_message))
+                )
+                if can_recover_from_history:
+                    more_last_preprocess = more_reusable_preprocess
+                    logger.info(
+                        "[MoreResults/non-stream] 직전 general/메타누락 감지 → 재사용 가능한 직전 intent로 복구 intent=%s",
+                        more_last_preprocess.get("intent"),
+                    )
+                elif base_user_query:
+                    logger.info(
+                        "[MoreResults/non-stream] 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                    )
+                else:
+                    more_detected = False
+                    more_blocked_followup = True
+                    logger.debug("[MoreResults/non-stream] 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화")
+            if more_detected:
+                re_query = None
+                if (
+                    more_last_preprocess
+                    and more_last_preprocess.get("reformed_query")
+                ):
+                    re_query = str(more_last_preprocess["reformed_query"]).strip()
+                elif base_user_query:
+                    re_query = str(base_user_query).strip()
+                else:
+                    fallback_rq = str(next_intent.get("re_query", "") or "").strip()
+                    if fallback_rq:
+                        re_query = fallback_rq
+
+                if re_query:
+                    user_message = re_query
+                    await _update_user_message(chat_request.messages, user_message)
+
+                (
+                    more_excluded_chunk_ids,
+                    more_excluded_service_names,
+                ) = get_excluded_info_from_history(chat_request.messages)
+                if llm_detected_more_detail:
+                    # MORE_DETAIL(general 세부 요청)은 제외 로직 적용 안 함
+                    more_excluded_chunk_ids, more_excluded_service_names = [], []
+                    logger.info("[MoreResults/non-stream] MORE_DETAIL → 검색 제외 목록 초기화")
+
+                llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
+                more_final_user_message = llm_rq or (original_user_message or "").strip() or None
 
         is_clarification = is_clarification_answer(chat_request.messages)
 
@@ -120,6 +228,11 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 stream,
                 intent="guide_recommend",
                 llm_recommended_followup=True,
+                reformed_query=user_message if more_detected else None,
+                excluded_chunk_ids=more_excluded_chunk_ids,
+                excluded_service_names=more_excluded_service_names,
+                final_user_message=more_final_user_message,
+                more_info=more_detected,
             )
 
         if chat_request.mode == "guide_recommend":
@@ -134,6 +247,11 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 stream,
                 intent="guide_recommend",
                 llm_recommended_followup=False,
+                reformed_query=user_message if more_detected else None,
+                excluded_chunk_ids=more_excluded_chunk_ids,
+                excluded_service_names=more_excluded_service_names,
+                final_user_message=more_final_user_message,
+                more_info=more_detected,
             )
 
         if stream:
@@ -169,8 +287,9 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             resolved_sigun_filters = early_sigun.filters
             logger.info("[SigunCheck/non-stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
-        # [3] 쿼리 재구성
-        user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
+        # [3] 쿼리 재구성 (MORE_INFO 또는 general 후속 경로는 reformed_query를 직접 사용하므로 생략)
+        if not more_detected and not more_blocked_followup:
+            user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
 
         # [4] 경상남도 외 지역 체크
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
@@ -190,7 +309,56 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[SigunCheck/non-stream] sigun_filters=%s", resolved_sigun_filters)
 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
-        if llm_recommended_followup:
+        if more_detected and more_last_preprocess:
+            reused_intent = (
+                "guide_recommend"
+                if not llm_detected_more_detail
+                else str(more_last_preprocess.get("intent") or "general")
+            )
+            try:
+                reused_keywords = extract_nouns(user_message)
+            except Exception:
+                reused_keywords = []
+            preprocess = PreprocessResult(
+                query=user_message,
+                intent=reused_intent,
+                intent_reason=(
+                    "forced_guide_recommend_on_more_info"
+                    if reused_intent == "guide_recommend"
+                    else "reused_from_history_on_more_info"
+                ),
+                reformed_query=user_message,
+                expanded_queries=more_last_preprocess.get("expanded_queries") or [user_message],
+                keywords=reused_keywords,
+                elapsed=0.0,
+                search_target=more_last_preprocess.get("search_target"),
+            )
+            logger.info(
+                "[MoreResults/non-stream] 히스토리 전처리 재사용 intent=%s (llm_more_detail=%s)",
+                preprocess.intent,
+                llm_detected_more_detail,
+            )
+        elif more_blocked_followup and more_last_preprocess:
+            # 직전 general 후속 — exclusion 없이 직전 reformed_query + intent 재사용
+            re_query = str(more_last_preprocess.get("reformed_query") or "").strip() or user_message
+            user_message = re_query
+            await _update_user_message(chat_request.messages, user_message)
+            try:
+                reused_keywords = extract_nouns(user_message)
+            except Exception:
+                reused_keywords = []
+            preprocess = PreprocessResult(
+                query=user_message,
+                intent=str(more_last_preprocess.get("intent") or "general"),
+                intent_reason="reused_from_history_general_followup",
+                reformed_query=user_message,
+                expanded_queries=more_last_preprocess.get("expanded_queries") or [user_message],
+                keywords=reused_keywords,
+                elapsed=0.0,
+                search_target=more_last_preprocess.get("search_target"),
+            )
+            logger.info("[MoreResults/non-stream] general 후속 → 히스토리 intent 재사용 intent=%s reformed=%s (exclusion 없음)", preprocess.intent, user_message[:60])
+        elif llm_recommended_followup:
             preprocess = build_preprocess_skip_unified_recommended_question(user_message)
             logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
         else:
@@ -198,6 +366,20 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             preprocess = await run_unified_preprocess(
                 user_message, chat_request.messages, use_rag
             )
+
+        # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
+        # (MORE_DETAIL은 기존 축 유지)
+        if more_detected and not llm_detected_more_detail and preprocess.intent != "guide_recommend":
+            prev_intent = preprocess.intent
+            preprocess.intent = "guide_recommend"
+            prev_reason = (preprocess.intent_reason or "").strip()
+            suffix = "forced_guide_recommend_on_more_info(no_history_fallback)"
+            preprocess.intent_reason = f"{prev_reason} | {suffix}" if prev_reason else suffix
+            logger.info(
+                "[MoreResults/non-stream] MORE_INFO 강제 intent=guide_recommend (preprocess_intent_was=%s)",
+                prev_intent,
+            )
+
         user_message = preprocess.query
         await _update_user_message(chat_request.messages, user_message)
 
@@ -219,6 +401,12 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             keywords=preprocess.keywords,
             llm_recommended_followup=llm_recommended_followup,
             search_target=getattr(preprocess, "search_target", None),
+            policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
+            excluded_chunk_ids=more_excluded_chunk_ids,
+            excluded_service_names=more_excluded_service_names,
+            final_user_message=more_final_user_message,
+            more_info=more_detected,
+            more_detail=llm_detected_more_detail,
         )
 
     except Exception as e:

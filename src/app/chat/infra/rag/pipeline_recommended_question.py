@@ -1,7 +1,7 @@
 """
 추천 후속 질문 전용 파이프라인 (/v1/chat/recommended-question).
 
-프론트 ``metadata.referenced_documents``의 사업명·문서명으로 Mariner(GSND_BIZ / GOV_OKMS) 검색 후,
+프론트 ``metadata.referenced_documents``의 사업명·문서명으로 Mariner(GOV_OKMS) 검색 후,
 ``retrieved_documents`` 본문과 함께 ``classification_llm_recommended_prompt`` 로 최종 LLM 답변을 생성한다.
 """
 
@@ -55,14 +55,24 @@ async def process_rag_recommended_question(
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
+    more_detail: bool = False,
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> Tuple[Any, List[Dict[str, str]]]:
     """
     호출 시그니처는 process_rag_guide_recommend와 동일하게 유지한다.
     (라우터/스트리밍에서 동일 kwargs로 호출 가능)
     """
-    _ = (precomputed_expanded_queries, precomputed_keywords, recommended_question_prompt, intent, precomputed_search_target)
+    _ = (
+        precomputed_expanded_queries,
+        precomputed_keywords,
+        more_detail,
+        recommended_question_prompt,
+        intent,
+        precomputed_search_target,
+        precomputed_policy_priority_tag,
+    )
 
     try:
         t_total = time.monotonic()

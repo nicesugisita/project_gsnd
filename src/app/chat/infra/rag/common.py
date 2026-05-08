@@ -96,13 +96,21 @@ def filter_excluded_docs(
     """
     if not excluded_chunk_ids and not excluded_service_names:
         return docs
-    excluded_chunk_set = set(excluded_chunk_ids or [])
-    excluded_name_set = set(n for n in (excluded_service_names or []) if n)
+    excluded_chunk_set = {
+        str(cid).strip()
+        for cid in (excluded_chunk_ids or [])
+        if str(cid).strip()
+    }
+    excluded_name_set = {
+        str(n).strip()
+        for n in (excluded_service_names or [])
+        if str(n).strip()
+    }
     result = []
     removed_chunk_ids: List[str] = []
     removed_names: List[str] = []
     for d in docs:
-        chunk_id = str(d.get("CHUNK_ID", ""))
+        chunk_id = str(d.get("CHUNK_ID", "") or "").strip()
         if chunk_id and chunk_id in excluded_chunk_set:
             if len(removed_chunk_ids) < 20:
                 removed_chunk_ids.append(chunk_id)

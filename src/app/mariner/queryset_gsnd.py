@@ -353,7 +353,27 @@ def query_GSND_general_documents(
             elif _uses_gsnd_v7_schema(collection):
                 if target_siguns:
                     doc_sigun = str(doc.get("SIGUN", "") or "").strip()
-                    if doc_sigun not in target_siguns:
+                    # 광역 정책 문서(SIGUN 빈값 / 전체 / 경남 / 경상남도)는 통과시켜
+                    # 기초연금 같은 광역 제도 문서가 시군 필터로 누락되는 것을 막는다.
+                    sigun_matched = (
+                        not doc_sigun
+                        or doc_sigun in ("전체", "경남", "경상남도")
+                    )
+                    if not sigun_matched:
+                        for ts in target_siguns:
+                            if doc_sigun == ts:
+                                sigun_matched = True
+                                break
+                            # "경상남도 창원시" → "창원시" 단축형 매칭, 양방향 부분 일치 허용
+                            short = ts.split(" ", 1)[1] if " " in ts else ts
+                            if short and (
+                                doc_sigun == short
+                                or short in doc_sigun
+                                or doc_sigun in short
+                            ):
+                                sigun_matched = True
+                                break
+                    if not sigun_matched:
                         continue
 
             elif _uses_welfare_center_schema(collection):

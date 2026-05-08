@@ -133,13 +133,12 @@ def fetch_mariner_docs_for_recommended_question_sync(
     excluded_chunk_ids: Optional[List[str]],
 ) -> List[Dict[str, Any]]:
     """
-    메타의 문서명마다 OKMS·GOV_OKMS 문서명 전용 Mariner 검색 후 병합.
+    메타의 문서명마다 GOV_OKMS 문서명 전용 Mariner 검색 후 병합.
 
     JVM 동기 호출 — asyncio.to_thread 등으로 이벤트 루프 밖에서 실행할 것.
     """
     from app.mariner.queryset_recommended_question import (
         query_gov_okms_documents_by_display_name,
-        query_okms_documents_by_display_name,
     )
     from app.chat.infra.rag.pipeline_utils import _deduplicate_documents
 
@@ -149,19 +148,6 @@ def fetch_mariner_docs_for_recommended_question_sync(
 
     all_docs: List[Dict[str, Any]] = []
     for q in query_strings:
-        try:
-            all_docs.extend(
-                query_okms_documents_by_display_name(
-                    q,
-                    year_filters=year_filters,
-                    sigun_filters=sigun_filters,
-                    lifecycle_filter=lifecycle or None,
-                    excluded_chunk_ids=excluded_chunk_ids,
-                    max_results=_MARINER_PER_NAME_LIMIT,
-                )
-            )
-        except Exception as e:
-            logger.warning("[recommended_question] OKMS 검색 실패 (%s): %s", q, e)
         try:
             all_docs.extend(
                 query_gov_okms_documents_by_display_name(

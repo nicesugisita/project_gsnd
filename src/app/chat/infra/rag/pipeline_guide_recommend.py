@@ -43,6 +43,7 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
+from .policy_priority import resolve_policy_boost_keywords
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
@@ -77,6 +78,7 @@ async def process_rag_guide_recommend(
     final_user_message: Optional[str] = None,
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — guide_recommend 전용
@@ -90,8 +92,13 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        policy_tags, _ = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
+        # guide_recommend에서 low_income 태그는 query-time 부스트를 끄고,
+        # elderly/implant 등은 기존 우선 정책을 유지한다.
+        _query_policy_boost_enabled = (not _skip_policy_boost) and ("low_income" not in policy_tags)
         _GR_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
+            policy_priority_tag=precomputed_policy_priority_tag,
+            policy_search_boost_enabled=_query_policy_boost_enabled,
         )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/guide_recommend_v2] 컬렉션: {selected_collection}")
@@ -197,7 +204,7 @@ async def process_rag_guide_recommend(
             await status_callback("질문을 분석하고 있습니다")
 
         def _group_a_run_okms_query(vector: str, keywords: str):
-            """Group A 검색: vector/keyword를 균등 가중치로 Mariner에 전송, (keyword_docs, vector_docs) 반환"""
+            """Group A 검색: 추천 질의는 탐색 폭 유지를 위해 사업명 앵커를 비활성화한다."""
             try:
                 return query_group_a_documents(
                     vector, keywords, selected_collection,
@@ -205,6 +212,7 @@ async def process_rag_guide_recommend(
                     sigun_filters=gr_sigun_filters,
                     lifecycle_filter=lifecycle or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    apply_business_anchor=False,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] Group A 쿼리 검색 실패: {e}")
@@ -231,6 +239,7 @@ async def process_rag_guide_recommend(
         gr_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
             message=message,
             reformed_query=reformed_query,
+            policy_priority_tag=precomputed_policy_priority_tag,
             expanded_queries=gr_expanded,
             tri_built=gr_tri_built,
             per_query_limit=_GR_GA_PER_QUERY,
@@ -239,7 +248,7 @@ async def process_rag_guide_recommend(
             log_prefix="RAG/guide_recommend_v2",
             status_callback=status_callback,
             log_skip_empty_triple=True,
-            policy_search_boost_enabled=not _skip_policy_boost,
+            policy_search_boost_enabled=_query_policy_boost_enabled,
         )
         logger.info("[TIMING][guide_recommend] StepB GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
 
@@ -377,13 +386,14 @@ async def process_rag_guide_recommend(
                 fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
                     message=message,
                     reformed_query=reformed_query,
+                    policy_priority_tag=precomputed_policy_priority_tag,
                     expanded_queries=fallback_expanded,
                     tri_built=fallback_tri,
                     per_query_limit=_GR_GA_PER_QUERY,
                     run_group_a=_group_a_run_okms_query,
                     run_gov=_run_gov_okms_query,
                     max_policy_pairs=1,
-                    policy_search_boost_enabled=not _skip_policy_boost,
+                    policy_search_boost_enabled=_query_policy_boost_enabled,
                 )
                 logger.info("[TIMING][guide_recommend] StepD-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
                 if fb_docs:
@@ -438,7 +448,7 @@ async def process_rag_guide_recommend(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         gr_top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             gr_top_docs,
             log_prefix="[RAG/guide_recommend_v2]",
             apply_enabled=not _skip_policy_boost,
@@ -470,6 +480,7 @@ async def process_rag_guide_recommend(
             intent=intent,
             lifecycle=lifecycle,
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
             user_region=user_region,
             user_birth_year=str(birth_year) if birth_year else "",
             more_info_mode=bool(excluded_chunk_ids or excluded_service_names),

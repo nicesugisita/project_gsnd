@@ -305,53 +305,35 @@ def _pick_distinct_keywords(keywords: Tuple[str, ...], *, n: int) -> List[str]:
     return picked
 
 
-def _elderly_benefits_heuristic(message: str) -> bool:
-    """노인·고령 대상 혜택/지원 질의 여부(키워드 휴리스틱)."""
-    m = message.strip()
-    if not m:
-        return False
-    age_values = [int(x) for x in re.findall(r"(?:만\s*)?(\d{1,3})\s*세", m)]
-    has_age_65_or_more = any(age >= 65 for age in age_values)
-    age_or_elder = any(
-        x in m
-        for x in ("70", "칠십", "노인", "어르신", "부모", "고령")
-    )
-    age_or_elder = age_or_elder or has_age_65_or_more
-    benefit_ctx = any(
-        x in m
-        for x in ("혜택", "지원", "돌봄", "연금", "급여", "복지")
-    )
-    return age_or_elder and benefit_ctx
+POLICY_PRIORITY_TAGS: FrozenSet[str] = frozenset({"implant", "low_income", "elderly_benefits"})
 
 
-def resolve_policy_boost_keywords(message: str) -> Tuple[FrozenSet[str], Tuple[str, ...]]:
-    """질문에 맞는 정책 태그와, 문서 매칭용 부스트 키워드 튜플을 반환한다.
+def _normalize_policy_priority_tags(raw: Any) -> FrozenSet[str]:
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        value = raw.strip().lower().replace("-", "_")
+        return frozenset({value}) if value in POLICY_PRIORITY_TAGS else frozenset()
+    if isinstance(raw, (set, frozenset, list, tuple)):
+        normalized = {
+            str(item).strip().lower().replace("-", "_")
+            for item in raw
+            if str(item or "").strip().lower().replace("-", "_") in POLICY_PRIORITY_TAGS
+        }
+        return frozenset(normalized)
+    return frozenset()
 
-    우선순위: 임플란트 > 저소득 > 노인혜택 (동시에 걸릴 때 고객 예시 기준).
-    """
-    msg = message.strip()
-    if not msg:
+
+def resolve_policy_boost_keywords(policy_priority_tag: Any) -> Tuple[FrozenSet[str], Tuple[str, ...]]:
+    """전처리에서 확정된 정책 태그와, 문서 매칭용 부스트 키워드 튜플을 반환한다."""
+    tags = _normalize_policy_priority_tags(policy_priority_tag)
+    if not tags:
         return frozenset(), ()
-
-    if "임플란트" in msg:
-        tags = frozenset({"implant"})
-        return tags, _resolve_keywords_for_tags(tags)
-
-    if any(k in msg for k in ("저소득", "생계급여", "의료급여")):
-        tags = frozenset({"low_income"})
-        return tags, _resolve_keywords_for_tags(tags)
-
-    if _elderly_benefits_heuristic(msg):
-        # 기초연금은 국가 기본 소득보장이라 노인 혜택 질의에서 다른 시군 사업.hwpx 들보다
-        # 먼저 설명되는 것이 자연스럽다. apply_policy 에서 별도 1티어로 올린다.
-        tags = frozenset({"elderly_benefits"})
-        return tags, _resolve_keywords_for_tags(tags)
-
-    return frozenset(), ()
+    return tags, _resolve_keywords_for_tags(tags)
 
 
 def augment_okms_dual_query(
-    user_message: str,
+    policy_priority_tag: Any,
     vector_q: str,
     keyword_q: str,
 ) -> Tuple[str, str]:
@@ -361,27 +343,21 @@ def augment_okms_dual_query(
     인덱스와 맞지 않아 키워드 결과가 버려질 수 있으므로, keyword 보강은 기존
     트리플 문자열이 있을 때만 한다. 빈 트리플 레그 보강은 `policy_extra_okms_searches`.
     """
-    tags, kws = resolve_policy_boost_keywords(user_message)
+    tags, kws = resolve_policy_boost_keywords(policy_priority_tag)
     vec = (vector_q or "").strip()
     kw = (keyword_q or "").strip()
     if not tags:
         return vec, kw
 
+    # 하드코딩 보강어를 쓰지 않고 DB 로딩 키워드만 사용한다.
+    if not kws:
+        return vec, kw
+
     low_vec = vec.casefold()
-    if "elderly_benefits" in tags:
-        for needle in ("기초연금", "노인맞춤돌봄"):
-            if needle.casefold() not in low_vec:
-                vec = f"{vec} {needle}".strip()
-                low_vec = vec.casefold()
-    elif "implant" in tags:
-        if "임플란트" not in low_vec:
-            vec = f"{vec} 임플란트".strip()
+    for needle in _pick_distinct_keywords(kws, n=2):
+        if needle.casefold() not in low_vec:
+            vec = f"{vec} {needle}".strip()
             low_vec = vec.casefold()
-    elif "low_income" in tags:
-        for needle in ("생계급여", "의료급여"):
-            if needle.casefold() not in low_vec:
-                vec = f"{vec} {needle}".strip()
-                low_vec = vec.casefold()
 
     if kw and kws:
         kw_cf = kw.casefold()
@@ -396,37 +372,45 @@ def augment_okms_dual_query(
     return vec, kw
 
 
-def policy_extra_okms_searches(user_message: str, reformed_query: str) -> List[Tuple[str, str]]:
+def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) -> List[Tuple[str, str]]:
     """정책 태그별 OKMS Group A 추가 검색 (vector, keyword) 쌍 — 빈 트리플·약한 검색 보강."""
-    tags, _ = resolve_policy_boost_keywords(user_message)
+    tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
     rq = (reformed_query or "").strip()
     tag_keywords = _get_tag_keywords_map()
     if not tags or not rq:
         return []
+
     if "elderly_benefits" in tags:
         elderly_kws = tag_keywords.get("elderly_benefits", ())
         anchors = _pick_distinct_keywords(elderly_kws, n=2)
-        anchor_1 = anchors[0] if len(anchors) >= 1 else "기초연금"
-        anchor_2 = anchors[1] if len(anchors) >= 2 else "노인맞춤돌봄"
-        return [
-            (f"{rq} {anchor_1} 안내", anchor_1),
-            (f"{rq} {anchor_2}", anchor_2),
-        ]
+        if not anchors:
+            return []
+        pairs: List[Tuple[str, str]] = []
+        for idx, anchor in enumerate(anchors):
+            suffix = " 안내" if idx == 0 else ""
+            pairs.append((f"{rq} {anchor}{suffix}".strip(), anchor))
+        return pairs
+
     if "implant" in tags:
-        implant_kws = tag_keywords.get("implant", ())
-        implant_kw = implant_kws[0] if implant_kws else "임플란트"
+        implant_kws = _pick_distinct_keywords(tag_keywords.get("implant", ()), n=1)
+        if not implant_kws:
+            return []
+        implant_kw = implant_kws[0]
         return [(f"{rq} {implant_kw} 지원", implant_kw)]
+
     if "low_income" in tags:
-        low_income_kws = tag_keywords.get("low_income", ())
-        key_1 = low_income_kws[0] if len(low_income_kws) >= 1 else "생계급여"
-        key_2 = low_income_kws[1] if len(low_income_kws) >= 2 else "의료급여"
-        return [(f"{rq} {key_1} {key_2}", f"{key_1} {key_2}")]
+        low_income_kws = _pick_distinct_keywords(tag_keywords.get("low_income", ()), n=2)
+        if not low_income_kws:
+            return []
+        joined = " ".join(low_income_kws)
+        return [(f"{rq} {joined}".strip(), joined)]
+
     return []
 
 
-def policy_supplement_welfare_queries(user_message: str) -> List[str]:
+def policy_supplement_welfare_queries(policy_priority_tag: Any) -> List[str]:
     """search 의도 WELFARE_CENTER/TEL 검색에 추가로 던질 짧은 쿼리."""
-    tags, _ = resolve_policy_boost_keywords(user_message)
+    tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
     tag_keywords = _get_tag_keywords_map()
     if "elderly_benefits" in tags:
         elderly = tag_keywords.get("elderly_benefits", ())
@@ -459,7 +443,7 @@ def _document_policy_match_blob(doc: Dict[str, Any]) -> str:
 
 
 def apply_policy_priority_to_documents(
-    user_message: str,
+    policy_priority_tag: Any,
     docs: List[Dict[str, Any]],
     *,
     log_prefix: str = "PolicyBoost",
@@ -477,7 +461,7 @@ def apply_policy_priority_to_documents(
     if not apply_enabled:
         return docs
 
-    tags, boost_keywords = resolve_policy_boost_keywords(user_message)
+    tags, boost_keywords = resolve_policy_boost_keywords(policy_priority_tag)
     if not boost_keywords:
         return docs
 
@@ -549,14 +533,14 @@ def apply_policy_priority_to_documents(
     return reordered
 
 
-def soft_priority_instruction_for_prompt(user_question: str) -> str:
+def soft_priority_instruction_for_prompt(policy_priority_tag: Any) -> str:
     """최종 LLM user 메시지에 붙일 짧은 우선순위 안내(문서 근거만).
 
     주의:
     - 특정 키워드 목록을 그대로 노출하면 모델이 '키워드 부재' 안내로 치우칠 수 있어
       태그만 전달하고, '있는 문서만 우선 설명'하도록 완화한다.
     """
-    tags, _kws = resolve_policy_boost_keywords(user_question)
+    tags, _kws = resolve_policy_boost_keywords(policy_priority_tag)
     if not tags:
         return ""
     return (

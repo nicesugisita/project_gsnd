@@ -118,6 +118,7 @@ async def generate_final_response_v2(
     messages: list = None,
     user_region: str = "",
     user_birth_year: str = "",
+    policy_priority_tag: Optional[str] = None,
     more_info_mode: bool = False,
     use_llm_recommended_prompt: bool = False,
 ) -> Any:
@@ -237,7 +238,33 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        if more_info_mode and intent != "recommended_question":
+        logger.info("[ResponseGen] more_info_mode=%s intent=%s → 추가규칙 주입=%s", more_info_mode, intent, more_info_mode and intent == "general")
+        if more_info_mode and intent == "general":
+            logger.info("[ResponseGen] [추가 규칙] 4단계 구조 주입 ✓")
+            user_message += (
+                "\n\n[추가 규칙]\n"
+                # "이번 응답은 사용자의 '더 자세히' 요청입니다. 아래 4단계 구조로 답변하십시오.\n"
+                # "출력 형식:\n"
+                # "{기준연도} 기준 {지역} {서비스/제도명} 사업 안내입니다.\n\n"
+                # "1. 사업 개요\n"
+                # "{사업 목적과 핵심 내용을 한두 문장으로}\n\n"
+                # "2. 상세 요건\n"
+                # "- {지원 대상 / 연령 요건 / 가구 유형}\n"
+                # "- {소득 기준 / 선정기준액}\n"
+                # "- {제외·예외·특례 조건}\n\n"
+                # "3. 지원 혜택\n"
+                # "- {지급 금액 / 기준연금액}\n"
+                # "- {지급 방식 / 지급 주기 / 지급일}\n"
+                # "- {감액 규정 등 부가 사항}\n\n"
+                # "4. 신청 안내\n"
+                # "- {신청 기간}\n"
+                # "- {신청 방법 — 온라인 / 방문 / 기관별}\n"
+                # "- {제출 서류}\n"
+                # "- {문의처 / 연락처}\n"
+                # "섹션 헤더는 마크다운 강조(#, **) 없이 '1. 사업 개요' 형태로만 작성합니다.\n"
+                "문서에 없는 내용은 '정보 없음'으로 명시합니다.\n"
+            )
+        elif more_info_mode and intent not in ("recommended_question",):
             user_message += (
                 "\n\n[추가 규칙]\n"
                 "- 이번 응답은 사용자의 '더 알려줘' 요청에 따른 추가 탐색 결과입니다.\n"
@@ -253,7 +280,7 @@ async def generate_final_response_v2(
                 f"\n        retrieved_facilities:\n        {facility_content}"
             )
         if not more_info_mode:
-            user_message += soft_priority_instruction_for_prompt(message)
+            user_message += soft_priority_instruction_for_prompt(policy_priority_tag)
         user_message += " "
 
         final_messages = [{"role": ROLE_USER, "content": user_message}]

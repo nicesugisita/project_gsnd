@@ -38,7 +38,6 @@ from app.chat.infra.rag import (
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
-from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
     expand_query,
     extract_triples,
@@ -49,8 +48,6 @@ from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
-    resolve_fallback_max_expanded_queries,
-    run_sufficiency_with_shortcut,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +75,8 @@ async def process_rag_general(
     excluded_service_names: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
+    precomputed_policy_priority_tag: Optional[str] = None,
+    more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — general 전용
@@ -91,9 +90,6 @@ async def process_rag_general(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
-        _GEN_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            message, policy_search_boost_enabled=not _skip_policy_boost
-        )
 
         # Step 1: 쿼리 확장 (Mariner 검색 전)
         if precomputed_expanded_queries:
@@ -228,28 +224,140 @@ async def process_rag_general(
                 logger.debug(f"[RAG/general_v2] [키워드검색어] #{i}: {sq}")
 
         # ====================================================================
-        # Step 5-A: OKMS Group A + GOV_OKMS 단일 검색 (동시 병렬)
+        # Step 5-A: OKMS Group A + GOV_OKMS + GSND_DATASET_V8 (동시 병렬)
+        #   - 기존엔 OKMS 적합성 LLM 판단 후 부족할 때만 GSND 보강
+        #   - 변경: general 의도에서는 GSND_DATASET_V8 을 항상 검색하고
+        #     OKMS 수집과 병렬로 실행해 wall-clock 손실을 최소화한다.
         # ====================================================================
         _GEN_GA_PER_QUERY = 5
-        _GEN_GA_TOP_N = 10
+        _GEN_GA_TOP_N = 20 if more_detail else 10
+        _GSND_PER_QUERY = 10
+        _GSND_STAGE_MAX_SEC = 15.0
+        _GSND_TIMEOUT_BREAK_THRESHOLD = 2
+        if more_detail:
+            logger.info(
+                "[RAG/general_v2] MORE_DETAIL 후속 — 동일 쿼리로 더 많은 문서 회수 모드 (GA_TOP_N=%d)",
+                _GEN_GA_TOP_N,
+            )
+
+        # GSND 시드 쿼리: 1차 expanded_queries + 키워드 검색쿼리
+        gsnd_seed_queries = list(expanded_queries)
+        gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
+        gsnd_year_filters = gen_year_filters
+        if gsnd_year_filters:
+            logger.info(f"[RAG/general_v2] GSND 연도 필터: {gsnd_year_filters}")
+        else:
+            logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
+
+        def _run_gsnd_query(query: str) -> Tuple[List[Dict[str, Any]], bool]:
+            for attempt in range(2):
+                try:
+                    use_year_filter = (attempt == 0)
+                    gsnd_search_mode = "hybrid" if attempt == 0 else "keyword_only"
+                    # GSND_DATASET_V8 은 광역 정책 문서(기초연금 등)의 SIGUN 메타가
+                    # 균일하지 않아 시군 필터를 적용하면 Mariner 서버 단계에서 통째로
+                    # 제외되는 문제가 있다. 진단/완화를 위해 시군 필터 미적용.
+                    docs = query_GSND_general_documents(
+                        query, Config.RAG_COLLECTION,
+                        sigun_filters=None,
+                        year_filters=gsnd_year_filters or None,
+                        excluded_chunk_ids=excluded_chunk_ids,
+                        apply_year_filter=use_year_filter,
+                        search_mode=gsnd_search_mode,
+                    )
+                    if docs:
+                        return sorted(
+                            docs,
+                            key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                            reverse=True,
+                        )[:_GSND_PER_QUERY], False
+                    return [], False
+                except Exception as e:
+                    if attempt == 0 and "-60004" in str(e):
+                        logger.warning(
+                            "[RAG/general_v2] GSND 쿼리 타임아웃(-60004) 재시도(연도필터 해제): %s",
+                            query[:80],
+                        )
+                        continue
+                    if "-60004" in str(e):
+                        logger.warning(
+                            "[RAG/general_v2] GSND 쿼리 타임아웃 누적 후보: %s",
+                            query[:80],
+                        )
+                        return [], True
+                    logger.warning(f"[RAG/general_v2] GSND 쿼리 검색 실패: {e}")
+                    return [], False
+            return [], False
+
+        async def _run_gsnd_supplement_search() -> List[Dict[str, Any]]:
+            """GSND_DATASET_V8 보강 검색 — 내부는 순차(동시성 폭증 방지),
+            외부에선 OKMS 수집과 병렬 실행."""
+            t_start = time.monotonic()
+            results: List[List[Dict[str, Any]]] = []
+            timeout_count = 0
+            for q in gsnd_all_queries:
+                elapsed = time.monotonic() - t_start
+                if elapsed > _GSND_STAGE_MAX_SEC:
+                    logger.warning(
+                        "[RAG/general_v2] GSND 시간 상한(%.0fs) 초과로 중단",
+                        _GSND_STAGE_MAX_SEC,
+                    )
+                    break
+                remaining = max(_GSND_STAGE_MAX_SEC - elapsed, 0.0)
+                try:
+                    docs, timed_out = await asyncio.wait_for(
+                        loop.run_in_executor(None, _run_gsnd_query, q),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[RAG/general_v2] GSND 단일 쿼리 시간 초과로 다음 단계 진행",
+                    )
+                    break
+                results.append(docs)
+                if timed_out:
+                    timeout_count += 1
+                    if timeout_count >= _GSND_TIMEOUT_BREAK_THRESHOLD:
+                        logger.warning(
+                            "[RAG/general_v2] GSND 타임아웃 누적 %d회로 보강 검색 조기 중단",
+                            timeout_count,
+                        )
+                        break
+            flat: List[Dict[str, Any]] = []
+            for i, (q, result) in enumerate(zip(gsnd_all_queries, results), 1):
+                if result:
+                    flat.extend(result)
+                logger.debug(f"[RAG/general_v2] GSND 쿼리 #{i}: {len(result)}개 문서")
+            return flat
+
         if status_callback:
             await status_callback("질문을 분석하고 있습니다")
 
         _t = time.monotonic()
-        okms_group_a_docs, gov_okms_docs = await collect_okms_groupa_and_gov_docs(
-            message=message,
-            reformed_query=reformed_query,
-            expanded_queries=expanded_queries,
-            tri_built=ga_tri_built,
-            per_query_limit=_GEN_GA_PER_QUERY,
-            run_group_a=_group_a_run_okms_query,
-            run_gov=_run_gov_okms_query,
-            log_prefix="RAG/general_v2",
-            status_callback=status_callback,
-            log_skip_empty_triple=True,
-            policy_search_boost_enabled=not _skip_policy_boost,
+        okms_task = asyncio.create_task(
+            collect_okms_groupa_and_gov_docs(
+                message=message,
+                reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
+                expanded_queries=expanded_queries,
+                tri_built=ga_tri_built,
+                per_query_limit=_GEN_GA_PER_QUERY,
+                run_group_a=_group_a_run_okms_query,
+                run_gov=_run_gov_okms_query,
+                log_prefix="RAG/general_v2",
+                status_callback=status_callback,
+                log_skip_empty_triple=True,
+                policy_search_boost_enabled=not _skip_policy_boost,
+            )
         )
-        logger.info("[TIMING][general] Step5-A OKMS GroupA+GOV_OKMS 병렬 검색: %.3fs", time.monotonic() - _t)
+        gsnd_task = asyncio.create_task(_run_gsnd_supplement_search())
+        (okms_group_a_docs, gov_okms_docs), gsnd_docs = await asyncio.gather(
+            okms_task, gsnd_task
+        )
+        logger.info(
+            "[TIMING][general] Step5-A OKMS+GOV_OKMS+GSND 병렬 검색: %.3fs",
+            time.monotonic() - _t,
+        )
 
         okms_group_a_top = sorted(
             _deduplicate_documents(okms_group_a_docs + gov_okms_docs),
@@ -271,9 +379,9 @@ async def process_rag_general(
             )
 
         # ====================================================================
-        # Step 6: OKMS GroupA → top 5
+        # Step 6: OKMS GroupA → top N
         # ====================================================================
-        _GEN_FINAL_TOP_N = 8
+        _GEN_FINAL_TOP_N = 15 if more_detail else 8
         _FALLBACK_THRESHOLD = 1
         okms_final = okms_group_a_top[:_GEN_FINAL_TOP_N]
         logger.info(f"[RAG/general_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(okms_group_a_top)}개)")
@@ -288,6 +396,7 @@ async def process_rag_general(
             okms_fb_a_docs = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=expanded_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -305,165 +414,17 @@ async def process_rag_general(
             logger.info(f"[RAG/general_v2] OKMS Fallback 후: {len(okms_final)}개 (FB-A {len(okms_fb_a_docs)}개 추가)")
 
         # ====================================================================
-        # Step 6-S: OKMS → GSND 전환 적합성 판단 (LLM)
+        # Step 7: GSND 결과 정리 (적합성 판단 없이 항상 합산)
         # ====================================================================
-        _t = time.monotonic()
-        okms_sufficiency = await run_sufficiency_with_shortcut(
-            judge_fn=retrieval_sufficiency_judgment,
-            user_question=message,
-            intent=intent,
-            collection_name=Config.RAG_OKMS_COLLECTION,
-            docs=okms_final,
-            sigun_filters=gen_sigun_filters,
-            log_prefix="RAG/general_v2",
-        )
-        logger.info("[TIMING][general] Step6-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
+        _GSND_SUPPLEMENT_COUNT = 7 if more_detail else 3
+        gsnd_top = sorted(
+            _deduplicate_documents(gsnd_docs),
+            key=lambda x: float(x.get("WEIGHT", 0) or 0),
+            reverse=True,
+        )[:_GSND_SUPPLEMENT_COUNT]
         logger.info(
-            f"[RAG/general_v2] OKMS 적합성: sufficient={okms_sufficiency['sufficient']}, "
-            f"reason={okms_sufficiency['reason']}"
+            f"[RAG/general_v2] GSND 검색 합계: {len(gsnd_docs)}개 → 상위 {len(gsnd_top)}개 보강"
         )
-
-        # 적합성 LLM 타임아웃 시에도 OKMS 상위 결과가 충분하면 GSND 보강 검색을 생략한다.
-        # (타임아웃 때문에 불필요한 Mariner GSND 요청이 추가로 발생하는 것을 방지)
-        if (
-            not okms_sufficiency.get("sufficient")
-            and okms_sufficiency.get("reason") == "judgment_timeout"
-            and len(okms_final) >= 5
-        ):
-            okms_sufficiency = {
-                "sufficient": True,
-                "reason": f"timeout_with_enough_okms_docs:{len(okms_final)}",
-            }
-            logger.info(
-                "[RAG/general_v2] 적합성 timeout 보정 적용: OKMS %d건 확보로 GSND 보강 생략",
-                len(okms_final),
-            )
-
-        # ====================================================================
-        # Step 7: GSND 보강 검색 (OKMS 부족 시)
-        # ====================================================================
-        gsnd_top: List[Dict[str, Any]] = []
-
-        fallback_expanded_queries: List[str] = []
-        if okms_sufficiency["sufficient"]:
-            logger.info("[RAG/general_v2] OKMS 결과 충분 — GSND 검색 생략")
-        else:
-            # 2차 fallback: 확장 쿼리 사용 (GSND 보강 검색 시드로 활용)
-            if status_callback:
-                await status_callback("검색을 보강하고 있습니다")
-            _t = time.monotonic()
-            if precomputed_expanded_queries:
-                _candidates = precomputed_expanded_queries
-                logger.info("[RAG/general_v2] fallback: 사전 계산 확장 쿼리 사용")
-            else:
-                _candidates = await expand_query(reformed_query)
-            logger.info("[TIMING][general] Step6-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            fallback_expanded_queries = dedupe_cap_expanded_queries(
-                _candidates or [], max_n=_GEN_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
-            )
-            if fallback_expanded_queries:
-                logger.info("[RAG/general_v2] fallback 확장 쿼리 적용: %d개", len(fallback_expanded_queries))
-            else:
-                logger.info("[RAG/general_v2] fallback 확장 쿼리 없음 — 정제 질의 유지")
-
-            logger.info("[RAG/general_v2] OKMS 결과 부족 → GSND 순차 검색")
-            _GSND_SUPPLEMENT_COUNT = 2
-            _GSND_PER_QUERY = 10
-            _GSND_STAGE_MAX_SEC = 15.0
-            _GSND_TIMEOUT_BREAK_THRESHOLD = 2
-            gsnd_seed_queries = fallback_expanded_queries or list(expanded_queries)
-            gsnd_all_queries = list(gsnd_seed_queries) + list(search_queries)
-
-            gsnd_year_filters = extract_year_filters(message)
-            if gsnd_year_filters:
-                logger.info(f"[RAG/general_v2] GSND 연도 필터: {gsnd_year_filters}")
-            else:
-                logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
-
-            def _run_gsnd_query(query: str) -> Tuple[List[Dict[str, Any]], bool]:
-                for attempt in range(2):
-                    try:
-                        use_year_filter = (attempt == 0)
-                        gsnd_search_mode = "hybrid" if attempt == 0 else "keyword_only"
-                        docs = query_GSND_general_documents(
-                            query, Config.RAG_COLLECTION,
-                            sigun_filters=gen_sigun_filters,
-                            year_filters=gsnd_year_filters or None,
-                            excluded_chunk_ids=excluded_chunk_ids,
-                            apply_year_filter=use_year_filter,
-                            search_mode=gsnd_search_mode,
-                        )
-                        if docs:
-                            return sorted(
-                                docs,
-                                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                                reverse=True,
-                            )[:_GSND_PER_QUERY], False
-                        return [], False
-                    except Exception as e:
-                        # Mariner timeout(-60004) 시에는 1회 재시도하되,
-                        # 2차에서는 COMPLI_DT 연도 필터를 제거해 엔진 부하를 완화한다.
-                        if attempt == 0 and "-60004" in str(e):
-                            logger.warning(
-                                "[RAG/general_v2] GSND 쿼리 타임아웃(-60004) 재시도(연도필터 해제): %s",
-                                query[:80],
-                            )
-                            continue
-                        if "-60004" in str(e):
-                            logger.warning(
-                                "[RAG/general_v2] GSND 쿼리 타임아웃 누적 후보: %s",
-                                query[:80],
-                            )
-                            return [], True
-                        logger.warning(f"[RAG/general_v2] GSND 쿼리 검색 실패: {e}")
-                        return [], False
-                return [], False
-
-            _t = time.monotonic()
-            gsnd_results: List[List[Dict[str, Any]]] = []
-            gsnd_timeout_count = 0
-            for q in gsnd_all_queries:
-                elapsed = time.monotonic() - _t
-                if elapsed > _GSND_STAGE_MAX_SEC:
-                    logger.warning(
-                        "[RAG/general_v2] GSND 보강 검색 시간 상한(%.0fs) 초과로 중단",
-                        _GSND_STAGE_MAX_SEC,
-                    )
-                    break
-                remaining = max(_GSND_STAGE_MAX_SEC - elapsed, 0.0)
-                try:
-                    docs, timed_out = await asyncio.wait_for(
-                        loop.run_in_executor(None, _run_gsnd_query, q),
-                        timeout=remaining,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[RAG/general_v2] GSND 보강 검색 15초 초과로 다음 단계 진행",
-                    )
-                    break
-                gsnd_results.append(docs)
-                if timed_out:
-                    gsnd_timeout_count += 1
-                    if gsnd_timeout_count >= _GSND_TIMEOUT_BREAK_THRESHOLD:
-                        logger.warning(
-                            "[RAG/general_v2] GSND 타임아웃 누적 %d회로 보강 검색 조기 중단",
-                            gsnd_timeout_count,
-                        )
-                        break
-            logger.info("[TIMING][general] Step7 GSND 보강 검색(순차): %.3fs", time.monotonic() - _t)
-
-            gsnd_docs: List[Dict[str, Any]] = []
-            for i, (q, result) in enumerate(zip(gsnd_all_queries, gsnd_results), 1):
-                if result:
-                    gsnd_docs.extend(result)
-                logger.debug(f"[RAG/general_v2] GSND 병렬쿼리 #{i}: {len(result)}개 문서")
-
-            gsnd_top = sorted(
-                _deduplicate_documents(gsnd_docs),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )[:_GSND_SUPPLEMENT_COUNT]
-            logger.info(f"[RAG/general_v2] GSND 검색 합계: {len(gsnd_docs)}개 → 상위 {len(gsnd_top)}개 보강")
 
         # ====================================================================
         # Step 7 합산: OKMS + GSND
@@ -485,12 +446,17 @@ async def process_rag_general(
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
         top_docs = apply_policy_priority_to_documents(
-            message,
+            precomputed_policy_priority_tag,
             top_docs,
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=gen_sigun_filters)
+        top_docs = await filter_irrelevant_docs(
+            reformed_query,
+            top_docs,
+            sigun_filters=gen_sigun_filters,
+            max_judgment_docs=20 if more_detail else None,
+        )
         logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
 
@@ -506,7 +472,7 @@ async def process_rag_general(
                 )
                 _t = time.monotonic()
                 lower_docs = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     lower_docs,
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
@@ -527,13 +493,14 @@ async def process_rag_general(
         if (not top_docs) or excluded_chunk_ids or excluded_service_names:
             logger.info("[RAG/general_v2] 재검색 시작 (0건 또는 제외문서 기반 추가 탐색)")
             _t = time.monotonic()
-            _raw_seed = fallback_expanded_queries or list(expanded_queries)
+            _raw_seed = list(expanded_queries)
             fallback_seed_queries = dedupe_cap_expanded_queries(
                 _raw_seed, reformed_query=reformed_query
             ) or [reformed_query]
             fb_results = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=fallback_seed_queries,
                 tri_built=ga_tri_built,
                 per_query_limit=_GEN_GA_PER_QUERY,
@@ -565,7 +532,7 @@ async def process_rag_general(
 
                 fb_pool = fb_pool[:_GEN_GA_TOP_N]
                 fb_pool = apply_policy_priority_to_documents(
-                    message,
+                    precomputed_policy_priority_tag,
                     fb_pool,
                     log_prefix="[RAG/general_v2][C4]",
                     apply_enabled=not _skip_policy_boost,
@@ -614,7 +581,7 @@ async def process_rag_general(
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
-            more_info_mode=bool(excluded_chunk_ids or excluded_service_names),
+            more_info_mode=more_detail or bool(excluded_chunk_ids or excluded_service_names),
         )
         logger.info("[TIMING][general] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][general] process_rag_general 전체: %.3fs", time.monotonic() - t_total)
