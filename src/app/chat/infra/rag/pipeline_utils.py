@@ -580,31 +580,98 @@ async def collect_welfare_center_tel_docs(
     per_query_limit_tel: Optional[int] = None,
     center_enabled: bool = True,
     tel_enabled: bool = True,
+    stage_timeout_sec: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """CENTER + TEL 병렬 검색 결과 수집.
 
     per_query_limit: 0 미만이면 CENTER는 쿼리별 반환 전량.
     per_query_limit_tel: None이면 TEL도 per_query_limit과 동일. 0 미만이면 TEL은 쿼리별 전량.
     center_enabled / tel_enabled: False이면 해당 풀은 검색 생략(빈 리스트).
+    stage_timeout_sec: 지정 시 전체 수집 단계 시간 상한(초). 초과 시 남은 쿼리는 건너뛰고
+        현재까지 수집된 부분 결과를 반환한다.
     """
     tel_cap = per_query_limit if per_query_limit_tel is None else per_query_limit_tel
     loop = asyncio.get_event_loop()
+    stage_started_at = asyncio.get_running_loop().time()
+    tel_results = [[] for _ in queries]
+    tel_futures: Dict[asyncio.Future, int] = {}
+
+    if tel_enabled and queries:
+        # CENTER 수집이 느릴 때도 TEL 검색은 동시에 진행되도록 먼저 시작한다.
+        tel_futures = {
+            loop.run_in_executor(None, run_tel_query, q): idx
+            for idx, q in enumerate(queries)
+        }
+
+    def _remaining_stage_sec() -> Optional[float]:
+        if stage_timeout_sec is None:
+            return None
+        return max(stage_timeout_sec - (asyncio.get_running_loop().time() - stage_started_at), 0.0)
+
     if center_enabled and queries:
         # WELFARE_CENTER는 벡터·다필드 OR가 무거워 동시 다발 요청 시 Mariner 타임아웃(-60004)이 잦음 → 순차 실행
-        center_results = [
-            await loop.run_in_executor(None, run_center_query, q) for q in queries
-        ]
+        center_results = [[] for _ in queries]
+        for i, q in enumerate(queries):
+            remaining = _remaining_stage_sec()
+            if remaining is not None and remaining <= 0:
+                logger.warning(
+                    "[%s] 수집 단계 시간 상한(%.1fs) 초과로 CENTER 조기 중단",
+                    log_prefix,
+                    stage_timeout_sec,
+                )
+                break
+            try:
+                if remaining is None:
+                    docs = await loop.run_in_executor(None, run_center_query, q)
+                else:
+                    docs = await asyncio.wait_for(
+                        loop.run_in_executor(None, run_center_query, q),
+                        timeout=remaining,
+                    )
+                center_results[i] = docs
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[%s] 수집 단계 시간 상한(%.1fs) 초과로 CENTER 조기 중단",
+                    log_prefix,
+                    stage_timeout_sec,
+                )
+                break
     else:
         center_results = [[] for _ in queries]
 
     if tel_enabled and queries:
-        tel_futures = [
-            loop.run_in_executor(None, run_tel_query, q)
-            for q in queries
-        ]
-        tel_results = list(await asyncio.gather(*tel_futures))
-    else:
-        tel_results = [[] for _ in queries]
+        pending = set(tel_futures.keys())
+        while pending:
+            remaining = _remaining_stage_sec()
+            if remaining is not None and remaining <= 0:
+                logger.warning(
+                    "[%s] 수집 단계 시간 상한(%.1fs) 초과로 TEL 조기 중단",
+                    log_prefix,
+                    stage_timeout_sec,
+                )
+                break
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                logger.warning(
+                    "[%s] 수집 단계 시간 상한(%.1fs) 초과로 TEL 조기 중단",
+                    log_prefix,
+                    stage_timeout_sec,
+                )
+                break
+            for fut in done:
+                idx = tel_futures.get(fut)
+                if idx is None:
+                    continue
+                try:
+                    tel_results[idx] = fut.result()
+                except Exception:
+                    tel_results[idx] = []
+        for fut in pending:
+            fut.cancel()
 
     center_docs: List[Dict[str, Any]] = []
     if center_enabled:

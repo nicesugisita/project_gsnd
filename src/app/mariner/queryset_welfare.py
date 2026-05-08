@@ -285,21 +285,7 @@ def query_welfare_center_documents(
                     )
                 where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
-            # 시 단위 입력에서 FIELD 매칭 누락 시, ADDRESS 시명 토큰을 보조 OR로 사용.
-            base_sigun = str(sigun_scriptlet_values[0]).strip()
-            parts = base_sigun.split()
-            if len(parts) >= 2 and parts[0].endswith("도") and parts[1].endswith("시"):
-                city_token = parts[1]
-                where_set_array.extend(
-                    [
-                        jpkg_query.WhereSet(OP_AND),
-                        jpkg_query.WhereSet(OP_BRACE_OPEN),
-                        jpkg_query.WhereSet("SIGUN", OP_HASALL, JString(base_sigun), _SCRIPTLET_WEIGHT_NONE),
-                        jpkg_query.WhereSet(OP_OR),
-                        jpkg_query.WhereSet("ADDRESS", OP_HASALL, JString(city_token), _SCRIPTLET_WEIGHT_NONE),
-                        jpkg_query.WhereSet(OP_BRACE_CLOSE),
-                    ],
-                )
+            # ADDRESS는 검색색인 대상이 아니므로 WHERE에 사용하지 않는다.
 
         query.setWhere(where_set_array)
 
