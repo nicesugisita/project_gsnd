@@ -60,7 +60,6 @@ def _build_assistant_preprocess_payload(
     reformed_query: str | None,
     expanded_queries: list | None,
     search_target: str | None,
-    policy_priority_tag: str | None,
     more_info: bool = False,
 ) -> dict:
     """히스토리 저장용 assistant preprocess 메타를 구성."""
@@ -72,7 +71,6 @@ def _build_assistant_preprocess_payload(
         "expanded_queries": expanded_queries or ([final_reformed] if final_reformed else []),
         "more_info": bool(more_info),
         "search_target": search_target,
-        "policy_priority_tag": policy_priority_tag,
     }
 
 
@@ -215,7 +213,6 @@ async def _handle_rag_mode(
     keywords: list = None,
     llm_recommended_followup: bool = False,
     search_target: str | None = None,
-    policy_priority_tag: str | None = None,
     excluded_chunk_ids: list | None = None,
     excluded_service_names: list | None = None,
     final_user_message: str | None = None,
@@ -298,7 +295,6 @@ async def _handle_rag_mode(
                 precomputed_expanded_queries=expanded_queries,
                 precomputed_keywords=keywords,
                 precomputed_search_target=search_target,
-                precomputed_policy_priority_tag=policy_priority_tag,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
                 final_user_message=final_user_message,
@@ -324,25 +320,14 @@ async def _handle_rag_mode(
 
             if isinstance(result, str):
                 assistant_content = result
-                raw_referenced_documents = list(referenced_documents or [])
-                filtered_referenced_documents = _filter_referenced_documents_by_response(
-                    assistant_content,
-                    referenced_documents,
-                )
-                persist_referenced_documents = raw_referenced_documents or filtered_referenced_documents
-                if raw_referenced_documents and not filtered_referenced_documents:
-                    logger.info(
-                        "[MoreResults/_handle_rag_mode] 응답 매칭 0건 → 히스토리 raw referenced_documents 보존(%d건)",
-                        len(raw_referenced_documents),
-                    )
-
+                referenced_documents = _filter_referenced_documents_by_response(assistant_content, referenced_documents)
                 async for chunk in _stream_delta_content(assistant_content):
                     yield chunk
-                if filtered_referenced_documents:
-                    logger.info(f"[RAG Referenced Documents] Count: {len(filtered_referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in filtered_referenced_documents]}")
+                if referenced_documents:
+                    logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
                     # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
                     # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
-                    yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
                     preprocess_payload = _build_assistant_preprocess_payload(
                         user_message=user_message,
@@ -350,7 +335,6 @@ async def _handle_rag_mode(
                         reformed_query=reformed_query,
                         expanded_queries=expanded_queries,
                         search_target=search_target,
-                        policy_priority_tag=policy_priority_tag,
                         more_info=more_info,
                     )
                     await asyncio.to_thread(
@@ -360,7 +344,7 @@ async def _handle_rag_mode(
                             assistant_content,
                             user_message,
                             preprocess=preprocess_payload,
-                            referenced_documents=persist_referenced_documents,
+                            referenced_documents=referenced_documents,
                         )
                     )
                 yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}, ensure_ascii=False)}\n\n"
@@ -370,21 +354,10 @@ async def _handle_rag_mode(
                     if isinstance(chunk, str) and chunk.startswith("data: "):
                         data_content = chunk[len("data: "):].strip()
                         if data_content in ("[DONE]", "[DONE]\n\n"):
-                            raw_referenced_documents = list(referenced_documents or [])
-                            filtered_referenced_documents = _filter_referenced_documents_by_response(
-                                assistant_content,
-                                referenced_documents,
-                            )
-                            persist_referenced_documents = raw_referenced_documents or filtered_referenced_documents
-                            if raw_referenced_documents and not filtered_referenced_documents:
-                                logger.info(
-                                    "[MoreResults/_handle_rag_mode] 응답 매칭 0건 → 히스토리 raw referenced_documents 보존(%d건)",
-                                    len(raw_referenced_documents),
-                                )
-
-                            if filtered_referenced_documents:
-                                logger.info(f"[RAG Referenced Documents] Count: {len(filtered_referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in filtered_referenced_documents]}")
-                                yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+                            referenced_documents = _filter_referenced_documents_by_response(assistant_content, referenced_documents)
+                            if referenced_documents:
+                                logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
+                                yield f"data: {json.dumps({'referenced_documents': referenced_documents}, ensure_ascii=False)}\n\n"
                             if intent == "guide_recommend" and assistant_content:
                                 preprocess_payload = _build_assistant_preprocess_payload(
                                     user_message=user_message,
@@ -392,7 +365,6 @@ async def _handle_rag_mode(
                                     reformed_query=reformed_query,
                                     expanded_queries=expanded_queries,
                                     search_target=search_target,
-                                    policy_priority_tag=policy_priority_tag,
                                     more_info=more_info,
                                 )
                                 await asyncio.to_thread(
@@ -402,7 +374,7 @@ async def _handle_rag_mode(
                                         assistant_content,
                                         user_message,
                                         preprocess=preprocess_payload,
-                                        referenced_documents=persist_referenced_documents,
+                                        referenced_documents=referenced_documents,
                                     )
                                 )
                             yield chunk
@@ -446,7 +418,6 @@ async def _handle_rag_mode(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
-            precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
             final_user_message=final_user_message,
@@ -455,17 +426,7 @@ async def _handle_rag_mode(
         response_message, referenced_documents = await rag_processor(**_rag_kw)
 
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
-        raw_referenced_documents = list(referenced_documents or [])
-        filtered_referenced_documents = _filter_referenced_documents_by_response(
-            response_message,
-            referenced_documents,
-        )
-        persist_referenced_documents = raw_referenced_documents or filtered_referenced_documents
-        if raw_referenced_documents and not filtered_referenced_documents:
-            logger.info(
-                "[MoreResults/_handle_rag_mode] 응답 매칭 0건 → 히스토리 raw referenced_documents 보존(%d건)",
-                len(raw_referenced_documents),
-            )
+        referenced_documents = _filter_referenced_documents_by_response(response_message, referenced_documents)
 
         preprocess_payload = _build_assistant_preprocess_payload(
             user_message=user_message,
@@ -473,7 +434,6 @@ async def _handle_rag_mode(
             reformed_query=reformed_query,
             expanded_queries=expanded_queries,
             search_target=search_target,
-            policy_priority_tag=policy_priority_tag,
             more_info=more_info,
         )
         conv_id = await asyncio.to_thread(
@@ -483,7 +443,7 @@ async def _handle_rag_mode(
                 response_message,
                 user_message,
                 preprocess=preprocess_payload,
-                referenced_documents=persist_referenced_documents,
+                referenced_documents=referenced_documents,
             )
         )
 
@@ -491,8 +451,8 @@ async def _handle_rag_mode(
             tts_result = await request_tts_stream(text=response_message)
             response_message = tts_result.get("text", response_message)
 
-        if filtered_referenced_documents:
-            logger.info(f"[RAG Referenced Documents] Count: {len(filtered_referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in filtered_referenced_documents]}")
+        if referenced_documents:
+            logger.info(f"[RAG Referenced Documents] Count: {len(referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in referenced_documents]}")
             # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
             # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
 
@@ -500,7 +460,7 @@ async def _handle_rag_mode(
             response_message=response_message,
             user_message=user_message,
             model_name=Config.MODEL_NAME,
-            referenced_documents=filtered_referenced_documents,
+            referenced_documents=referenced_documents,
             conv_id=conv_id,
         )
         return JSONResponse(content=response, status_code=200)

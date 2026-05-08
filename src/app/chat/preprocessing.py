@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 VALID_INTENTS = ("general", "comparison", "guide_recommend", "search")
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
-POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})
 
 
 def _raw_search_target_from_parsed(parsed: Dict[str, Any]) -> Any:
@@ -97,37 +96,6 @@ def _normalize_search_target(intent: str, raw: Any) -> Optional[str]:
     return "ambiguous"
 
 
-def _raw_policy_priority_tag_from_parsed(parsed: Dict[str, Any]) -> Any:
-    """LLM JSON에서 정책 우선순위 태그 읽기(스네이크/카멜·빈값·문자열 null 허용)."""
-    order = ("policy_priority_tag", "policyPriorityTag")
-    for key in order:
-        value = parsed.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                continue
-            low = stripped.lower().replace("-", "_")
-            if low in ("null", "none"):
-                continue
-            return low
-        return value
-    return None
-
-
-def _normalize_policy_priority_tag(raw: Any) -> Optional[str]:
-    if raw is None:
-        return None
-    value = str(raw).strip().lower().replace("-", "_")
-    if not value or value in ("null", "none"):
-        return None
-    if value in POLICY_PRIORITY_TAGS:
-        return value
-    logger.warning("[UnifiedPreprocess] 알 수 없는 policy_priority_tag=%r → None", raw)
-    return None
-
-
 async def unified_preprocess(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
@@ -144,7 +112,6 @@ async def unified_preprocess(
         expanded_queries: list[str]  (use_rag=False이면 [])
         keywords        : list[str]  (use_rag=False이면 [])
         search_target   : str | None (intent=search일 때만 admin_local_office | welfare_facility | ambiguous)
-        policy_priority_tag: str | None (implant | low_income | elderly_benefits)
     """
     prompt_template = load_unified_preprocessing_prompt()
     if not prompt_template:
@@ -224,7 +191,6 @@ async def unified_preprocess(
             keywords = []
 
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
-    policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
 
     result = {
         "query":            query,
@@ -234,12 +200,11 @@ async def unified_preprocess(
         "expanded_queries": expanded,
         "keywords":         keywords,
         "search_target":    search_target,
-        "policy_priority_tag": policy_priority_tag,
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | use_rag(input)=%s",
-        query[:50], intent, search_target, policy_priority_tag, use_rag,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, use_rag,
     )
     return result
 
@@ -253,5 +218,4 @@ def _make_fallback(user_query: str) -> Dict[str, Any]:
         "expanded_queries": [user_query],
         "keywords":         [],
         "search_target":    None,
-        "policy_priority_tag": None,
     }
