@@ -1,6 +1,7 @@
 """대화 세션 관리: 락, 히스토리 병합, 유저 제한, 메시지 전처리, 히스토리 저장"""
 
 import asyncio
+import threading
 import logging
 import uuid
 from typing import Dict, Optional
@@ -28,6 +29,20 @@ logger = logging.getLogger(__name__)
 # per-conv_id 락: 동시 요청으로 인한 히스토리 병합 Race Condition 방지
 _conv_locks: Dict[str, asyncio.Lock] = {}
 _CONV_LOCKS_MAX = Config.CONV_LOCKS_MAX
+
+# Thread-based per-conv locks to protect synchronous code paths (e.g. to_thread calls)
+_conv_thread_locks: Dict[str, threading.Lock] = {}
+
+
+def _get_thread_conv_lock(conv_id: str) -> threading.Lock:
+    """Return a threading.Lock for conv_id. Evict older locks when over limit."""
+    if conv_id not in _conv_thread_locks:
+        if len(_conv_thread_locks) > _CONV_LOCKS_MAX:
+            keys = list(_conv_thread_locks.keys())
+            for key in keys[: len(keys) // 2]:
+                _conv_thread_locks.pop(key, None)
+        _conv_thread_locks[conv_id] = threading.Lock()
+    return _conv_thread_locks[conv_id]
 
 
 def _get_conv_lock(conv_id: str) -> asyncio.Lock:
@@ -163,7 +178,7 @@ def _save_stream_history(
     assistant_content: str,
     preprocess: dict = None,
     referenced_documents: list = None,
-) -> None:
+) -> bool:
     """스트리밍 응답 완료 후 대화 히스토리를 저장합니다.
 
     merge 단계에서 채운 ``chat_request.messages``(전체 스레드)를 기준으로 저장한다.
@@ -171,24 +186,49 @@ def _save_stream_history(
     첫 턴이 사라지고 ``더 알려줘``(MORE_INFO) 직전 assistant/preprocess를 복구하지 못했다.
     """
     if not (original_user_message or assistant_content.strip()):
-        return
-    try:
-        extra: dict = {}
-        if isinstance(preprocess, dict) and preprocess:
-            extra["preprocess"] = preprocess
-        if referenced_documents is not None:
-            extra["referenced_documents"] = referenced_documents
-        _save_chat_history(
-            chat_request,
-            assistant_content,
-            processed_user_message=original_user_message,
-            user_message=original_user_message,
-            **extra,
-        )
+        return False
+    # Use a per-conv threading lock to serialize synchronous history saves
+    conv_id_key = str(chat_request.conv_id or "")
+    lock = _get_thread_conv_lock(conv_id_key)
+    with lock:
+        try:
+            extra: dict = {}
+            if isinstance(preprocess, dict) and preprocess:
+                extra["preprocess"] = preprocess
+            if referenced_documents is not None:
+                extra["referenced_documents"] = referenced_documents
+
+            # Ensure the in-memory messages list contains the assistant turn with
+            # preprocess and referenced_documents so history lookups (e.g. get_last_preprocess_from_history)
+            # can find recent preprocess metadata even if DB persistence is delayed.
+            try:
+                if isinstance(chat_request.messages, list):
+                    assistant_msg = {"role": "assistant", "content": assistant_content}
+                    if "preprocess" in extra:
+                        assistant_msg["preprocess"] = extra["preprocess"]
+                    # keep both legacy (metadata.referenced_documents) and top-level schema
+                    if "referenced_documents" in extra:
+                        assistant_msg.setdefault("metadata", {})["referenced_documents"] = extra["referenced_documents"]
+                        assistant_msg["referenced_documents"] = extra["referenced_documents"]
+                    chat_request.messages.append(assistant_msg)
+                    logger.debug("[History Save/stream] appended assistant message to chat_request.messages (conv_id=%s)", chat_request.conv_id)
+            except Exception:
+                logger.exception("[History Save/stream] failed to append assistant message to chat_request.messages")
+
+            _save_chat_history(
+                chat_request,
+                assistant_content,
+                processed_user_message=original_user_message,
+                user_message=original_user_message,
+                **extra,
+            )
+        except Exception as save_err:
+            logger.error("히스토리 저장 실패: %s", save_err, exc_info=True)
+            return False
         logger.info(
             "[History Saved/stream] user_id=%s, conv_id=%s",
             chat_request.user_id,
             chat_request.conv_id,
         )
-    except Exception as save_err:
-        logger.error(f"히스토리 저장 실패: {save_err}", exc_info=True)
+        return True
+    

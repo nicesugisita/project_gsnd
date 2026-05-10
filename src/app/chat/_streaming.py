@@ -135,6 +135,16 @@ async def _resolve_more_results_context(
         allowed_intents=_MORE_INFO_REUSABLE_INTENTS,
     )
     base_user_query = get_base_user_query_from_history(messages)
+
+    # Debug: 출력해 직전 assistant 메시지와 preprocess 후보 확인
+    try:
+        tail = (messages or [])[-8:]
+        logger.debug("[MoreResults debug] messages tail (len=%d): %s", len(messages or []), shorten_text(str(tail), 1000))
+        logger.debug("[MoreResults debug] last_preprocess raw: %s", shorten_text(str(last_preprocess), 500))
+        logger.debug("[MoreResults debug] reusable_preprocess raw: %s", shorten_text(str(reusable_preprocess), 500))
+        logger.debug("[MoreResults debug] base_user_query: %s", shorten_text(str(base_user_query or ""), 300))
+    except Exception:
+        logger.exception("[MoreResults debug] 로그 생성 중 오류 발생")
     if base_user_query and _is_context_dependent_followup(base_user_query):
         base_user_query = ""
     next_intent = await classify_next_intent(messages, user_message)
@@ -155,7 +165,7 @@ async def _resolve_more_results_context(
             last_preprocess.get("intent"),
         )
 
-    # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
+    # 직전 prep:rocess 메타가 없을 때만 history 복구를 시도한다.
     # 직전 intent가 general이어도 last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
     if detected and not last_preprocess:
         can_recover_from_history = bool(
@@ -170,10 +180,16 @@ async def _resolve_more_results_context(
                 last_preprocess.get("intent"),
             )
         elif base_user_query:
-            logger.info(
-                "[MoreResults] conv_id=%s | 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
-                conv_id,
-            )
+            if llm_detected_more_detail:
+                logger.info(
+                    "[MoreResults] conv_id=%s | 직전 메타누락 + base_query 존재 + MORE_DETAIL → 상세 질의 유지(next_intent re_query 사용)",
+                    conv_id,
+                )
+            else:
+                logger.info(
+                    "[MoreResults] conv_id=%s | 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                    conv_id,
+                )
         else:
             detected = False
             logger.debug(
@@ -194,7 +210,12 @@ async def _resolve_more_results_context(
         return _MoreResultsContext(last_preprocess=last_preprocess)
 
     re_query: Optional[str] = None
-    if (
+    if llm_detected_more_detail:
+        re_query = str(next_intent.get("re_query", "") or "").strip()
+        if not re_query:
+            re_query = (original_user_message or user_message or "").strip()
+        logger.debug("[MoreResults] conv_id=%s | MORE_DETAIL 검색질의 적용: %s", conv_id, shorten_text(re_query, 80))
+    elif (
         last_preprocess
         and last_preprocess.get("reformed_query")
     ):
@@ -255,6 +276,7 @@ def _build_preprocess_from_history(
     last_preprocess: dict,
     *,
     override_intent: Optional[str] = None,
+    intent_reason: Optional[str] = None,
 ) -> dict:
     """MORE_INFO 경로에서 히스토리의 전처리 결과를 재사용하여 preprocess_data를 구성."""
     try:
@@ -266,9 +288,12 @@ def _build_preprocess_from_history(
         "query": user_message,
         "intent": resolved_intent,
         "intent_reason": (
-            "forced_guide_recommend_on_more_info"
-            if resolved_intent == "guide_recommend"
-            else "reused_from_history_on_more_info"
+            intent_reason
+            or (
+                "forced_guide_recommend_on_more_info"
+                if resolved_intent == "guide_recommend"
+                else "reused_from_history_on_more_info"
+            )
         ),
         "reformed_query": user_message,
         "expanded_queries": last_preprocess.get("expanded_queries") or [user_message],
@@ -452,18 +477,29 @@ async def _streaming_chat_flow(
         # [6] 통합 전처리 (MORE_INFO면 히스토리 재사용 우선)
         preprocess_data = None
         if more.detected and more.last_preprocess:
-            user_message = more.last_preprocess["reformed_query"]
+            if more.more_detail:
+                user_message = (more.re_query or user_message or original_user_message).strip()
+            else:
+                user_message = more.last_preprocess["reformed_query"]
             await _update_user_message(chat_request.messages, user_message)
+            previous_intent = str(more.last_preprocess.get("intent") or "general")
             reused_intent = (
                 "guide_recommend"
                 if not more.more_detail
-                else str(more.last_preprocess.get("intent") or "general")
+                else ("search" if previous_intent == "search" else "general")
             )
             preprocess_data = _build_preprocess_from_history(
                 user_message,
                 more.last_preprocess,
                 override_intent=reused_intent,
+                intent_reason=(
+                    "reused_from_history_on_more_detail"
+                    if more.more_detail
+                    else None
+                ),
             )
+            if more.more_detail:
+                preprocess_data["expanded_queries"] = [user_message]
             logger.info(
                 "[MoreResults] conv_id=%s | 히스토리 재사용 intent=%s (llm_more_detail=%s) | reformed=%s",
                 chat_request.conv_id,
@@ -677,15 +713,20 @@ async def _streaming_chat_flow(
         # NOTE:
         # 클라이언트가 [DONE] 직후 연결을 닫으면 finally 블록의 await 저장이 취소될 수 있다.
         # 따라서 [DONE] 전 선저장을 시도하고, finally는 보조 저장으로만 동작한다.
-        await asyncio.to_thread(
-            _save_stream_history,
-            chat_request,
-            original_user_message,
-            assistant_content,
-            _preprocess_to_persist or None,
-            _persist_referenced_documents,
-        )
-        _history_saved = True
+        try:
+            _history_saved = await asyncio.shield(
+                asyncio.to_thread(
+                    _save_stream_history,
+                    chat_request,
+                    original_user_message,
+                    assistant_content,
+                    _preprocess_to_persist or None,
+                    _persist_referenced_documents,
+                )
+            )
+        except Exception as save_err:
+            logger.error("[History Save/stream] 실패: %s", save_err, exc_info=True)
+            _history_saved = False
 
         yield "data: [DONE]\n\n"
 
@@ -704,12 +745,17 @@ async def _streaming_chat_flow(
         except Exception as e:
             logger.warning("[TIMING CSV] 기록 실패 (파일 잠금?): %s", e)
         if not _history_saved:
-            await asyncio.to_thread(
-                _save_stream_history,
-                chat_request,
-                original_user_message,
-                assistant_content,
-                _preprocess_to_persist or None,
-                _persist_referenced_documents,
-            )
+            try:
+                await asyncio.shield(
+                    asyncio.to_thread(
+                        _save_stream_history,
+                        chat_request,
+                        original_user_message,
+                        assistant_content,
+                        _preprocess_to_persist or None,
+                        _persist_referenced_documents,
+                    )
+                )
+            except Exception as save_err:
+                logger.error("[History Save/stream/finally] 실패: %s", save_err, exc_info=True)
         reset_log_context(_log_context_tokens)

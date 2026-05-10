@@ -156,7 +156,6 @@ async def save_message_feedback(request: Request):
 
     raw_user_id = data.get("user_id")
     user_id = raw_user_id.strip() if isinstance(raw_user_id, str) and raw_user_id.strip() else None
-    persist_user_id = _resolve_chat_history_user_id(user_id, conv_id)
     conv_id = (data.get("conv_id") or "").strip()
     action = (data.get("action") or "").strip().lower()
     message_index = data.get("message_index")
@@ -173,6 +172,8 @@ async def save_message_feedback(request: Request):
             },
             status_code=400,
         )
+
+    persist_user_id = _resolve_chat_history_user_id(user_id, conv_id)
 
     if not isinstance(message_index, int) or message_index < 0:
         return JSONResponse(
@@ -196,17 +197,52 @@ async def save_message_feedback(request: Request):
     history_service = get_chat_history_service(Config)
     # 기존 히스토리를 가져와서 message_index에 해당하는 assistant 메시지에 feedback 반영 후 전체 히스토리 업데이트
     messages = history_service.get_history(conv_id=conv_id, user_id=persist_user_id)
+    if not messages:
+        return JSONResponse(
+            content={
+                "detail": [create_error_detail(
+                    loc=["body", "conv_id"],
+                    msg="해당 conv_id의 대화 이력이 없습니다",
+                    type_="not_found",
+                )]
+            },
+            status_code=404,
+        )
 
     # 사용자가 찍은 인덱스를 찾아서 수정
     if 0 <= message_index < len(messages):
         target_message = messages[message_index]
 
         if target_message.get("role") == "assistant":
-            target_message["action"] = {"type":"feedback", "reaction":action}
+            feedback = {"type": "feedback", "reaction": action}
+            target_message["action"] = feedback
             messages[message_index] = target_message
+        else:
+            return JSONResponse(
+                content={
+                    "detail": [create_error_detail(
+                        loc=["body", "message_index"],
+                        msg="message_index must point to an assistant message",
+                        type_="value_error",
+                    )]
+                },
+                status_code=400,
+            )
+    else:
+        return JSONResponse(
+            content={
+                "detail": [create_error_detail(
+                    loc=["body", "message_index"],
+                    msg="message_index is out of range",
+                    type_="value_error",
+                )]
+            },
+            status_code=400,
+        )
 
     # 수정된 전체리스트를 overwrite=True 로 통쨰로 덮어씌우기
     history_service.upsert_history(user_id=persist_user_id, conv_id=conv_id, messages=messages, overwrite=True)
+    history_updated = True
 
     # 별도 피드백 테이블 전송 (통계용)
     feedback_service = get_message_feedback_service(Config)

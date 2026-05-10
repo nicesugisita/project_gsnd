@@ -104,8 +104,28 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         if not is_valid:
             return error_response
 
+        raw_user_id = data.get("user_id")
+        raw_conv_id = data.get("conv_id")
+        logger.info(
+            "[Chat Request Raw] endpoint=%s user_id=%s conv_id=%s stream=%s mode=%s",
+            ep,
+            raw_user_id,
+            raw_conv_id,
+            data.get("stream"),
+            data.get("mode", ""),
+        )
+
         chat_request = ChatRequest(**data)
         _ensure_runtime_user_id(chat_request)
+        if raw_conv_id != chat_request.conv_id or raw_user_id != chat_request.user_id:
+            logger.info(
+                "[Chat Request Normalized] endpoint=%s raw_user_id=%s raw_conv_id=%s -> user_id=%s conv_id=%s",
+                ep,
+                raw_user_id,
+                raw_conv_id,
+                chat_request.user_id,
+                chat_request.conv_id,
+            )
         log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         first_msg_preview = chat_request.messages[0].get('content', '')[:50] if chat_request.messages else 'None'
         logger.info(
@@ -117,7 +137,18 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             getattr(chat_request, "mode", ""),
         )
         logger.debug("[Chat Request] first_message_preview=%s", first_msg_preview)
+        before_merge_conv_id = chat_request.conv_id
+        before_merge_user_id = chat_request.user_id
         await _merge_and_init_conversation(chat_request)
+        if before_merge_conv_id != chat_request.conv_id or before_merge_user_id != chat_request.user_id:
+            logger.info(
+                "[Chat Request Merge Normalized] endpoint=%s user_id=%s conv_id=%s -> user_id=%s conv_id=%s",
+                ep,
+                before_merge_user_id,
+                before_merge_conv_id,
+                chat_request.user_id,
+                chat_request.conv_id,
+            )
 
         is_valid, error_response, user_message = _validate_user_message(chat_request.messages)
         if not is_valid:
@@ -172,16 +203,25 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                         more_last_preprocess.get("intent"),
                     )
                 elif base_user_query:
-                    logger.info(
-                        "[MoreResults/non-stream] 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
-                    )
+                    if llm_detected_more_detail:
+                        logger.info(
+                            "[MoreResults/non-stream] 직전 메타누락 + base_query 존재 + MORE_DETAIL → 상세 질의 유지(next_intent re_query 사용)",
+                        )
+                    else:
+                        logger.info(
+                            "[MoreResults/non-stream] 직전 메타누락 + base_query 존재 → MORE_INFO 유지(base_query 재사용)",
+                        )
                 else:
                     more_detected = False
                     more_blocked_followup = True
                     logger.debug("[MoreResults/non-stream] 직전 intent=general 또는 메타 없음 → MORE_INFO 비활성화")
             if more_detected:
                 re_query = None
-                if (
+                if llm_detected_more_detail:
+                    re_query = str(next_intent.get("re_query", "") or "").strip()
+                    if not re_query:
+                        re_query = (original_user_message or user_message or "").strip()
+                elif (
                     more_last_preprocess
                     and more_last_preprocess.get("reformed_query")
                 ):
@@ -310,10 +350,11 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
         if more_detected and more_last_preprocess:
+            previous_intent = str(more_last_preprocess.get("intent") or "general")
             reused_intent = (
                 "guide_recommend"
                 if not llm_detected_more_detail
-                else str(more_last_preprocess.get("intent") or "general")
+                else ("search" if previous_intent == "search" else "general")
             )
             try:
                 reused_keywords = extract_nouns(user_message)
@@ -323,12 +364,20 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 query=user_message,
                 intent=reused_intent,
                 intent_reason=(
-                    "forced_guide_recommend_on_more_info"
-                    if reused_intent == "guide_recommend"
-                    else "reused_from_history_on_more_info"
+                    "reused_from_history_on_more_detail"
+                    if llm_detected_more_detail
+                    else (
+                        "forced_guide_recommend_on_more_info"
+                        if reused_intent == "guide_recommend"
+                        else "reused_from_history_on_more_info"
+                    )
                 ),
                 reformed_query=user_message,
-                expanded_queries=more_last_preprocess.get("expanded_queries") or [user_message],
+                expanded_queries=(
+                    [user_message]
+                    if llm_detected_more_detail
+                    else more_last_preprocess.get("expanded_queries") or [user_message]
+                ),
                 keywords=reused_keywords,
                 elapsed=0.0,
                 search_target=more_last_preprocess.get("search_target"),
