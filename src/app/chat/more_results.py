@@ -1,6 +1,7 @@
 """MORE_INFO 히스토리 기반으로 제외 chunk/service 정보를 추출합니다."""
 
 import re
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.constants import ROLE_ASSISTANT
@@ -226,6 +227,29 @@ def get_last_preprocess_from_history(
         if msg.get("role") != ROLE_ASSISTANT:
             continue
         preprocess = msg.get("preprocess")
+        # backward-compat: some codepaths stored preprocess under metadata or as separate keys
+        if not isinstance(preprocess, dict):
+            metadata = msg.get("metadata")
+            if isinstance(metadata, dict):
+                # full preprocess dict stored in metadata
+                maybe = metadata.get("preprocess")
+                if isinstance(maybe, dict):
+                    preprocess = maybe
+                else:
+                    # legacy flattened fields
+                    intent = str(metadata.get("chat_intent", "") or "").strip()
+                    reformed = str(metadata.get("reformed_query", "") or "").strip()
+                    query = str(metadata.get("query", "") or "").strip()
+                    expanded = metadata.get("expanded_queries")
+                    if intent and reformed:
+                        preprocess = {
+                            "intent": intent,
+                            "reformed_query": reformed,
+                            "query": query,
+                            "expanded_queries": expanded if isinstance(expanded, list) else [],
+                            "search_target": metadata.get("search_target"),
+                            "policy_priority_tag": metadata.get("policy_priority_tag"),
+                        }
         if not isinstance(preprocess, dict):
             continue
         intent = str(preprocess.get("intent", "") or "").strip()
@@ -246,4 +270,22 @@ def get_last_preprocess_from_history(
             "search_target": preprocess.get("search_target"),
             "policy_priority_tag": preprocess.get("policy_priority_tag"),
         }
+    # debug: when no preprocess found, log a brief tail of recent messages (max 20)
+    try:
+        logger = logging.getLogger(__name__)
+        tail = list((messages or [])[-20:])
+        brief = []
+        for m in tail:
+            try:
+                role = m.get("role")
+                content = str(m.get("content", "") or "")
+                has_pre = isinstance(m.get("preprocess"), dict) or (
+                    isinstance(m.get("metadata"), dict) and "preprocess" in m.get("metadata")
+                )
+                brief.append({"role": role, "has_preprocess": bool(has_pre), "content_preview": content[:200]})
+            except Exception:
+                brief.append({"role": None, "has_preprocess": False, "content_preview": "<serializing error>"})
+        logger.debug("[MoreResults debug] get_last_preprocess_from_history -> no preprocess found; messages_tail=%s", brief)
+    except Exception:
+        logging.exception("Failed to log messages tail in get_last_preprocess_from_history")
     return None
