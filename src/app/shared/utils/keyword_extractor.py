@@ -9,15 +9,17 @@ _BIGRAM_SKIP = {"등", "및", "것", "때", "분", "곳", "중", "내", "외", "
 _COUNTER_FORMS = {"대", "세", "살", "년", "명", "월", "일", "개", "회", "차"}
 
 
-def extract_nouns(text: str, min_length: int = 2, use_bigram: bool = True) -> list[str]:
+def extract_nouns(text: str, min_length: int = 2, use_bigram: bool = False) -> list[str]:
     """
     kiwipiepy로 명사를 추출합니다.
 
     Args:
         text: 분석할 텍스트
         min_length: 최소 명사 길이 (기본 2)
-        use_bigram: True이면 연속 명사 bigram도 생성 (기본 True).
-                    False이면 개별 명사만 추출 — 키워드 검색어 생성에 적합.
+        use_bigram: True이면 연속 명사 bigram도 생성.
+                    기본값은 False — 개별 명사만 추출 (키워드 검색어 생성에 적합).
+                    True 로 켜면 인접 명사를 결합한 바이그램이 추가된다
+                    (예: 아이/돌봄 → 아이돌봄, 돌봄서비스 등).
     """
     result = _kiwi.analyze(text)
     tokens = result[0][0]

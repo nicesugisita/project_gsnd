@@ -1,0 +1,67 @@
+suite: unified_preprocess · context preservation
+runner: unified_preprocess
+
+cases:
+  - name: region_carryover_from_prior_turn
+    tags: [region, followup]
+    notes: |
+      직전 대화에 양산이 있고 현재 user_query에 지역이 없으면
+      reformed_query 앞쪽에 양산이 유지되어야 한다.
+    inputs:
+      user_query: "노인교실 운영 지원알려줘"
+      messages:
+        - { role: user, content: "장애수당에 대해 알려줘" }
+        - { role: assistant, content: "어느 시군에 거주하고 계신가요?" }
+        - { role: user, content: "양산" }
+        - { role: assistant, content: "2026년 양산시 장애수당은 ..." }
+        - { role: user, content: "노인복지 추천해줘" }
+        - { role: assistant, content: "[양산시 노인복지 안내] ..." }
+        - { role: user, content: "노인교실 운영 지원알려줘" }
+    asserts:
+      - { op: contains, field: reformed_query, value: "양산" }
+      - { op: contains, field: reformed_query, value: "노인교실" }
+      - { op: any_contains, field: expanded_queries, value: "양산" }
+
+  - name: distinct_keyword_preservation_joint
+    tags: [keyword, followup]
+    notes: |
+      "관절"처럼 변별 키워드는 "노인 복지 추천" 같은 일반어로 흡수되면 안 된다.
+    inputs:
+      user_query: "노인 관절관련 서비스 있어"
+      messages:
+        - { role: user, content: "양산" }
+        - { role: assistant, content: "양산시 장애수당 안내 ..." }
+        - { role: user, content: "노인복지 추천해줘" }
+        - { role: assistant, content: "[양산시 노인복지 6건] ..." }
+        - { role: user, content: "더 알려줘" }
+        - { role: assistant, content: "[노인복지 추가 6건] ..." }
+        - { role: user, content: "노인 관절관련 서비스 있어" }
+    asserts:
+      - { op: contains, field: reformed_query, value: "관절" }
+
+  - name: new_region_overrides_prior
+    tags: [region, override]
+    notes: |
+      이전 대화에 양산이 있더라도 현재 질문에 새 지역(김해)이 명시되면 그것을 우선.
+    inputs:
+      user_query: "김해 청년 월세 지원"
+      messages:
+        - { role: user, content: "양산 노인 복지 추천" }
+        - { role: assistant, content: "[양산시 노인복지] ..." }
+        - { role: user, content: "김해 청년 월세 지원" }
+    asserts:
+      - { op: contains, field: reformed_query, value: "김해" }
+      - { op: not_contains, field: reformed_query, value: "양산" }
+
+  - name: more_detail_preserves_region
+    tags: [region, more_detail]
+    notes: |
+      "더 자세히 알려줘" 후속에서도 직전 대화의 지역(창원)이 보존되어야 한다.
+    inputs:
+      user_query: "더 자세히 알려줘"
+      messages:
+        - { role: user, content: "창원 청년 월세 지원 알려줘" }
+        - { role: assistant, content: "2026년 창원시 청년월세 지원사업은 ..." }
+        - { role: user, content: "더 자세히 알려줘" }
+    asserts:
+      - { op: contains, field: reformed_query, value: "창원" }

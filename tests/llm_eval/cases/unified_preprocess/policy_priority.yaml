@@ -1,0 +1,69 @@
+suite: unified_preprocess · policy_priority_tag
+runner: unified_preprocess
+
+cases:
+  - name: dementia_should_be_null
+    tags: [policy_priority, distinct_keyword]
+    notes: |
+      "치매" 같은 구체 변별 키워드가 핵심이면 노인 질문이라도 elderly_benefits를 부여하면 안 된다.
+      → policy_priority_tag는 null이어야 한다.
+    inputs:
+      user_query: "창원 노인 치매관련 복지서비스 알려줘"
+    asserts:
+      - { op: is_falsy, field: policy_priority_tag }
+      - { op: contains, field: reformed_query, value: "치매" }
+
+  - name: depression_should_be_null
+    tags: [policy_priority, distinct_keyword]
+    notes: |
+      "우울증" 같은 정신건강 변별 키워드도 동일하게 null이어야 한다.
+    inputs:
+      user_query: "양산 노인 우울증 복지 있어?"
+    asserts:
+      - { op: is_falsy, field: policy_priority_tag }
+
+  - name: cognitive_decline_should_be_null
+    tags: [policy_priority, distinct_keyword]
+    notes: |
+      "인지저하" 같은 기능 변별 키워드도 null.
+    inputs:
+      user_query: "김해 노인 인지저하 프로그램 알려줘"
+    asserts:
+      - { op: is_falsy, field: policy_priority_tag }
+
+  - name: knee_should_be_null
+    tags: [policy_priority, distinct_keyword]
+    notes: |
+      신체 부위 변별 키워드(무릎)도 null.
+    inputs:
+      user_query: "창원 노인 무릎 통증 관련 복지"
+    asserts:
+      - { op: is_falsy, field: policy_priority_tag }
+
+  - name: elderly_general_should_be_elderly_benefits
+    tags: [policy_priority, positive]
+    notes: |
+      변별 키워드 없이 "노인 복지 추천" 같은 포괄적 탐색이면 elderly_benefits.
+      (회귀 방지)
+    inputs:
+      user_query: "창원시 노인 복지 추천해줘"
+    asserts:
+      - { op: equals, field: policy_priority_tag, value: "elderly_benefits" }
+
+  - name: implant_should_be_implant
+    tags: [policy_priority, positive]
+    notes: |
+      "임플란트 지원"은 implant 태그. (회귀 방지)
+    inputs:
+      user_query: "임플란트 지원 대상 알려줘"
+    asserts:
+      - { op: equals, field: policy_priority_tag, value: "implant" }
+
+  - name: low_income_should_be_low_income
+    tags: [policy_priority, positive]
+    notes: |
+      의료급여/저소득 계열은 low_income. (회귀 방지)
+    inputs:
+      user_query: "저소득 한부모 의료급여 지원이 뭐가 있어?"
+    asserts:
+      - { op: equals, field: policy_priority_tag, value: "low_income" }

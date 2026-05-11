@@ -207,6 +207,41 @@ def _is_sigun_only_reply(content: str) -> bool:
     return len(siguns) == 1
 
 
+def collect_prior_service_names(messages: list, *, max_items: int = 12) -> List[str]:
+    """가장 최근 assistant 응답에서 안내된 사업명 목록(중복 제거).
+
+    next_intent 분류기에 prior_service_names 컨텍스트로 주입하는 용도.
+    `referenced_service_names`(직접 키) 또는 `metadata.referenced_documents[].name` 중 어디에 저장돼도
+    하나로 합치고, 등장 순서를 유지한다.
+    """
+    if not messages:
+        return []
+    for msg in reversed(messages):
+        if msg.get("role") != ROLE_ASSISTANT:
+            continue
+        names: List[str] = []
+        seen: set[str] = set()
+        for name in msg.get("referenced_service_names") or []:
+            value = str(name or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                names.append(value)
+        metadata = msg.get("metadata")
+        docs = metadata.get("referenced_documents", []) if isinstance(metadata, dict) else []
+        if isinstance(docs, list):
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                value = str(doc.get("name", "") or "").strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    names.append(value)
+        if names:
+            return names[:max_items]
+        return []
+    return []
+
+
 def get_last_preprocess_from_history(
     messages: list,
     *,

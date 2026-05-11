@@ -40,6 +40,15 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REFRESH_STOP_EVENT = threading.Event()
 _REFRESH_THREAD: threading.Thread | None = None
 
+# 정책 태그 강제 무력화용 변별 키워드(질환·신체부위·기능 등).
+# 질문에 부분일치하면 LLM이 부여한 태그를 None으로 되돌린다.
+_EXCLUDES_TABLE_DEFAULT = "gsnd_policy_priority_excludes"
+_EXCLUDE_KEYWORDS_CACHE: Dict[str, Tuple[str, ...]] = {}
+_EXCLUDE_KEYWORDS_CACHE_AT = 0.0
+_EXCLUDE_KEYWORDS_LAST_CHECK_AT = 0.0
+_EXCLUDE_KEYWORDS_LAST_VERSION: str = ""
+_EXCLUDE_KEYWORDS_CACHE_READY = False
+
 
 def _safe_table_name_or_none(name: str) -> str | None:
     raw = (name or "").strip()
@@ -216,12 +225,198 @@ def _get_tag_keywords_map() -> Dict[str, Tuple[str, ...]]:
         return _TAG_KEYWORDS_CACHE
 
 
+def _excludes_table_name_or_none() -> str | None:
+    """exclude 테이블명. POLICY_PRIORITY_TABLE 옆에 _excludes 접미사로 추정.
+
+    Config에 별도 키가 없으므로 기본 테이블명을 쓰되, 보안상 식별자 검증을 수행한다.
+    """
+    raw = _EXCLUDES_TABLE_DEFAULT
+    if not _SAFE_IDENT_RE.fullmatch(raw):
+        return None
+    return raw
+
+
+def _load_policy_excludes_from_db() -> Dict[str, Tuple[str, ...]]:
+    """DB에서 정책 태그별 무력화 키워드를 읽어온다."""
+    if not Config.POLICY_PRIORITY_DB_ENABLED:
+        return {}
+
+    table = _excludes_table_name_or_none()
+    if not table:
+        return {}
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            f"""
+            SELECT policy_tag, keyword
+            FROM {table}
+            WHERE is_active = 1
+            ORDER BY policy_tag ASC, keyword ASC
+            """
+        )
+        rows = cur.fetchall() or []
+    except Exception as e:
+        logger.warning("[PolicyExclude] db load failed: %s", e)
+        return {}
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+    by_tag: Dict[str, List[str]] = {}
+    for row in rows:
+        tag = str(row.get("policy_tag", "") or "").strip().lower().replace("-", "_")
+        kw = str(row.get("keyword", "") or "").strip()
+        if not tag or not kw:
+            continue
+        by_tag.setdefault(tag, []).append(kw)
+
+    resolved: Dict[str, Tuple[str, ...]] = {}
+    for tag, kws in by_tag.items():
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for kw in kws:
+            kcf = kw.casefold()
+            if kcf in seen:
+                continue
+            seen.add(kcf)
+            ordered.append(kw)
+        if ordered:
+            resolved[tag] = tuple(ordered)
+    return resolved
+
+
+def _load_policy_excludes_version_from_db() -> str:
+    """exclude 테이블의 최신 버전(MAX(updated_at))."""
+    if not Config.POLICY_PRIORITY_DB_ENABLED:
+        return ""
+    table = _excludes_table_name_or_none()
+    if not table:
+        return ""
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT COALESCE(DATE_FORMAT(MAX(updated_at), '%Y-%m-%d %H:%i:%s'), '')
+            FROM {table}
+            WHERE is_active = 1
+            """
+        )
+        row = cur.fetchone()
+        return str(row[0] or "").strip() if row else ""
+    except Exception as e:
+        logger.warning("[PolicyExclude] version check failed: %s", e)
+        return ""
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _get_exclude_keywords_map() -> Dict[str, Tuple[str, ...]]:
+    """태그별 exclude 키워드 맵 (boost 캐시와 동일한 TTL·변경체크 규칙)."""
+    ttl = max(int(Config.POLICY_PRIORITY_CACHE_TTL_SEC or 0), 0)
+    check_interval = max(int(Config.POLICY_PRIORITY_CHANGE_CHECK_SEC or 0), 0)
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        global _EXCLUDE_KEYWORDS_CACHE, _EXCLUDE_KEYWORDS_CACHE_AT
+        global _EXCLUDE_KEYWORDS_LAST_CHECK_AT, _EXCLUDE_KEYWORDS_LAST_VERSION
+        global _EXCLUDE_KEYWORDS_CACHE_READY
+
+        has_cache = _EXCLUDE_KEYWORDS_CACHE_READY
+        if has_cache and check_interval > 0 and _EXCLUDE_KEYWORDS_LAST_CHECK_AT:
+            if (now - _EXCLUDE_KEYWORDS_LAST_CHECK_AT) < check_interval:
+                return _EXCLUDE_KEYWORDS_CACHE
+
+        if not has_cache and ttl > 0 and _EXCLUDE_KEYWORDS_CACHE_AT and (now - _EXCLUDE_KEYWORDS_CACHE_AT) < ttl:
+            return _EXCLUDE_KEYWORDS_CACHE
+
+        if has_cache and check_interval > 0:
+            current_version = _load_policy_excludes_version_from_db()
+            _EXCLUDE_KEYWORDS_LAST_CHECK_AT = now
+            if current_version and current_version == _EXCLUDE_KEYWORDS_LAST_VERSION:
+                return _EXCLUDE_KEYWORDS_CACHE
+
+        db_map = _load_policy_excludes_from_db()
+        _EXCLUDE_KEYWORDS_CACHE = db_map
+        _EXCLUDE_KEYWORDS_CACHE_AT = now
+        _EXCLUDE_KEYWORDS_LAST_CHECK_AT = now
+        _EXCLUDE_KEYWORDS_LAST_VERSION = _load_policy_excludes_version_from_db()
+        _EXCLUDE_KEYWORDS_CACHE_READY = True
+        logger.info(
+            "[PolicyExclude] cache refreshed: tags=%d version=%s",
+            len(_EXCLUDE_KEYWORDS_CACHE),
+            _EXCLUDE_KEYWORDS_LAST_VERSION or "(empty)",
+        )
+        return _EXCLUDE_KEYWORDS_CACHE
+
+
+def strip_tag_by_exclusions(query: str, tag: Any) -> str | None:
+    """LLM이 부여한 policy_priority_tag을 DB 기반 변별 키워드로 사후 무력화.
+
+    - query에 해당 태그의 exclude 키워드가 부분일치(대소문자 무시)하면 None 반환.
+    - tag이 None이거나 매칭이 없으면 그대로 반환.
+    """
+    if tag is None:
+        return None
+    normalized = str(tag).strip().lower().replace("-", "_")
+    if not normalized or normalized in ("null", "none"):
+        return None
+    if normalized not in POLICY_PRIORITY_TAGS:
+        return normalized  # 알 수 없는 태그는 그대로 (상위에서 None 처리)
+
+    q = (query or "").strip()
+    if not q:
+        return normalized
+    q_cf = q.casefold()
+    excludes = _get_exclude_keywords_map().get(normalized, ())
+    for kw in excludes:
+        k = (kw or "").strip()
+        if not k:
+            continue
+        if k.casefold() in q_cf:
+            logger.info(
+                "[PolicyExclude] tag=%s 무력화: matched_keyword=%r in query=%r",
+                normalized,
+                k,
+                q[:80],
+            )
+            return None
+    return normalized
+
+
 def preload_policy_priority_cache() -> None:
-    """앱 시작 시 정책 키워드 캐시를 즉시 채운다."""
+    """앱 시작 시 정책 키워드(boost+exclude) 캐시를 즉시 채운다."""
     try:
         _get_tag_keywords_map()
     except Exception as e:
         logger.warning("[PolicyBoost] preload failed: %s", e)
+    try:
+        _get_exclude_keywords_map()
+    except Exception as e:
+        logger.warning("[PolicyExclude] preload failed: %s", e)
 
 
 def start_policy_priority_refresh_worker() -> None:
@@ -248,6 +443,10 @@ def start_policy_priority_refresh_worker() -> None:
                 _get_tag_keywords_map()
             except Exception as e:
                 logger.warning("[PolicyBoost] refresh worker error: %s", e)
+            try:
+                _get_exclude_keywords_map()
+            except Exception as e:
+                logger.warning("[PolicyExclude] refresh worker error: %s", e)
         logger.info("[PolicyBoost] refresh worker stopped")
 
     _REFRESH_THREAD = threading.Thread(

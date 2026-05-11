@@ -13,7 +13,7 @@ Router Service - Query Routing and Classification
 import json
 import logging
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Sequence
 
 from app.core.config import Config
 from app.core.constants import ROLE_USER, ROLE_ASSISTANT
@@ -105,6 +105,9 @@ def build_next_intent_fallback(messages: list, current_query: str) -> tuple[dict
     )
 
 
+_VALID_NEXT_INTENTS = ("MORE_INFO", "MORE_DETAIL", "NEW_SEARCH", "REFINE_SEARCH", "CLARIFY_REPLY")
+
+
 def _prior_nonempty_assistant_exists(messages: list) -> bool:
     """마지막 메시지 직전까지의 이력에 비어 있지 않은 assistant 턴이 있는지.
 
@@ -121,15 +124,28 @@ def _prior_nonempty_assistant_exists(messages: list) -> bool:
     return False
 
 
-async def classify_next_intent(messages: list, current_query: str) -> dict:
+async def classify_next_intent(
+    messages: list,
+    current_query: str,
+    *,
+    prior_intent: Optional[str] = None,
+    prior_service_names: Optional[Sequence[str]] = None,
+    is_clarification_question: bool = False,
+) -> dict:
     """
     이전 대화 + 현재 질문 기반 후속 의도 분류.
 
+    Args:
+        prior_intent: 직전 assistant 응답의 unified_preprocess intent.
+        prior_service_names: 직전 답변에서 안내된 사업명 목록(중복 제거).
+        is_clarification_question: 직전 챗봇 발화가 되묻기 질문인지 여부.
+
     Returns:
         {
-            "intent": "MORE_INFO" | "OTHER",
+            "intent": "MORE_INFO" | "MORE_DETAIL" | "NEW_SEARCH"
+                    | "REFINE_SEARCH" | "CLARIFY_REPLY" | "OTHER",
             "re_query": str,
-            "llm_re_query": str,  # 분류 LLM이 생성한 re_query(검색용 re_query와 별도)
+            "llm_re_query": str,
         }
     """
     from app.shared.utils.prompt_loader import load_next_intent_prompt
@@ -164,11 +180,19 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
             if before_user and before_assistant:
                 break
 
+        prior_intent_str = (prior_intent or "").strip() or "unknown"
+        service_names = [s for s in (prior_service_names or []) if s]
+        prior_service_names_str = ", ".join(service_names) if service_names else "(없음)"
+        is_clarify_str = "true" if is_clarification_question else "false"
+
         formatted_prompt = (
             prompt
             .replace("{before_user_input}", before_user)
             .replace("{before_answer}", before_assistant)
             .replace("{user_input}", current_query)
+            .replace("{prior_intent}", prior_intent_str)
+            .replace("{prior_service_names}", prior_service_names_str)
+            .replace("{is_clarification_question}", is_clarify_str)
         )
 
         response = await call_llm_api(
@@ -191,10 +215,8 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
         parsed = json.loads(match.group(0) if match else text)
 
         raw_intent = str(parsed.get("intent", "OTHER")).upper()
-        if raw_intent == "MORE_INFO":
-            mapped_intent = "MORE_INFO"
-        elif raw_intent == "MORE_DETAIL":
-            mapped_intent = "MORE_DETAIL"
+        if raw_intent in _VALID_NEXT_INTENTS:
+            mapped_intent = raw_intent
         else:
             mapped_intent = "OTHER"
         llm_re_query = str(parsed.get("re_query", "") or "").strip()

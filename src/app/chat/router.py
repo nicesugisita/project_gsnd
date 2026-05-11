@@ -34,6 +34,7 @@ from app.chat.more_results import (
     get_last_preprocess_from_history,
     get_base_user_query_from_history,
     get_excluded_info_from_history,
+    collect_prior_service_names,
 )
 from app.chat.routing import classify_next_intent
 from app.shared.utils.keyword_extractor import extract_nouns
@@ -158,8 +159,11 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         stream = data.get("stream", False)
         use_more_results_router_path = (not stream) or llm_recommended_followup or (chat_request.mode == "guide_recommend")
 
+        is_clarification = is_clarification_answer(chat_request.messages)
+
         more_detected = False
         more_blocked_followup = False
+        more_topic_switch = False
         more_final_user_message = None
         more_excluded_chunk_ids = []
         more_excluded_service_names = []
@@ -174,21 +178,21 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             base_user_query = get_base_user_query_from_history(chat_request.messages)
             if base_user_query and _is_context_dependent_followup(base_user_query):
                 base_user_query = ""
-            next_intent = await classify_next_intent(chat_request.messages, user_message)
-            llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
-            llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
+            prior_intent_value = str((more_last_preprocess or {}).get("intent") or "")
+            prior_service_names = collect_prior_service_names(chat_request.messages)
+            next_intent = await classify_next_intent(
+                chat_request.messages,
+                user_message,
+                prior_intent=prior_intent_value,
+                prior_service_names=prior_service_names,
+                is_clarification_question=is_clarification,
+            )
+            intent_label = next_intent.get("intent")
+            llm_detected_more = intent_label in ("MORE_INFO", "MORE_DETAIL")
+            llm_detected_more_detail = intent_label == "MORE_DETAIL"
+            more_topic_switch = intent_label in ("NEW_SEARCH", "REFINE_SEARCH")
+            # CLARIFY_REPLY는 query_recreation 흐름에서 원질문과 합성하므로 더알려줘 분기 비활성.
             more_detected = llm_detected_more
-            if (
-                not more_detected
-                and more_last_preprocess
-                and str(more_last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
-                and _is_context_dependent_followup(user_message)
-            ):
-                more_detected = True
-                logger.info(
-                    "[MoreResults/non-stream] 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
-                    more_last_preprocess.get("intent"),
-                )
             # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
             # 직전 intent가 general이어도 more_last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
             if more_detected and not more_last_preprocess:
@@ -248,8 +252,6 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
                 llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
                 more_final_user_message = llm_rq or (original_user_message or "").strip() or None
-
-        is_clarification = is_clarification_answer(chat_request.messages)
 
         if not is_clarification:
             limit_response = _check_user_limit(user_message, chat_request, stream)
@@ -328,8 +330,14 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[SigunCheck/non-stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
         # [3] 쿼리 재구성 (MORE_INFO 또는 general 후속 경로는 reformed_query를 직접 사용하므로 생략)
-        if not more_detected and not more_blocked_followup:
+        # NEW_SEARCH/REFINE_SEARCH(주제 전환)도 스킵 — 직전 주제로 오염 방지
+        if not more_detected and not more_blocked_followup and not more_topic_switch:
             user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
+        elif more_topic_switch:
+            logger.info(
+                "[Query Recreation/non-stream] conv_id=%s | next_intent=NEW_SEARCH/REFINE_SEARCH → 재구성 스킵",
+                chat_request.conv_id,
+            )
 
         # [4] 경상남도 외 지역 체크
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
@@ -455,7 +463,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             excluded_service_names=more_excluded_service_names,
             final_user_message=more_final_user_message,
             more_info=more_detected,
-            more_detail=llm_detected_more_detail,
+            more_detail=llm_detected_more_detail or getattr(preprocess, "detail_requested", False),
         )
 
     except Exception as e:

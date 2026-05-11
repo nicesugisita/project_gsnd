@@ -1,0 +1,109 @@
+{
+  "passed": true,
+  "suites": [
+    {
+      "suite": "unified_preprocess · policy_priority_tag",
+      "passed": true,
+      "cases": [
+        {
+          "name": "dementia_should_be_null",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "distinct_keyword"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 11.34399999998277,
+          "failures": []
+        },
+        {
+          "name": "depression_should_be_null",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "distinct_keyword"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 8.422000000020489,
+          "failures": []
+        },
+        {
+          "name": "cognitive_decline_should_be_null",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "distinct_keyword"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 9.5,
+          "failures": []
+        },
+        {
+          "name": "knee_should_be_null",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "distinct_keyword"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 8.796999999962281,
+          "failures": []
+        },
+        {
+          "name": "elderly_general_should_be_elderly_benefits",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "positive"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 8.5,
+          "failures": []
+        },
+        {
+          "name": "implant_should_be_implant",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "positive"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 7.592999999993481,
+          "failures": []
+        },
+        {
+          "name": "low_income_should_be_low_income",
+          "runner": "unified_preprocess",
+          "tags": [
+            "policy_priority",
+            "positive"
+          ],
+          "runs": 1,
+          "pass_count": 1,
+          "pass_rate": 1.0,
+          "passed": true,
+          "mean_duration_seconds": 9.5,
+          "failures": []
+        }
+      ]
+    }
+  ]
+}
