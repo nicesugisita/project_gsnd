@@ -225,6 +225,18 @@ async def unified_preprocess(
 
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
     policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
+    # DB 변별 키워드로 사후 무력화 (예: "치매"가 포함되면 elderly_benefits를 None으로 강제)
+    try:
+        from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
+        before_tag = policy_priority_tag
+        policy_priority_tag = strip_tag_by_exclusions(query, policy_priority_tag)
+        if before_tag and policy_priority_tag is None:
+            logger.info(
+                "[UnifiedPreprocess] policy_priority_tag 무력화: %s → None (DB excludes)",
+                before_tag,
+            )
+    except Exception as e:
+        logger.warning("[UnifiedPreprocess] exclude check failed: %s", e)
 
     result = {
         "query":            query,

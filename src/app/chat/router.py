@@ -34,6 +34,7 @@ from app.chat.more_results import (
     get_last_preprocess_from_history,
     get_base_user_query_from_history,
     get_excluded_info_from_history,
+    collect_prior_service_names,
 )
 from app.chat.routing import classify_next_intent
 from app.shared.utils.keyword_extractor import extract_nouns
@@ -158,9 +159,6 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         stream = data.get("stream", False)
         use_more_results_router_path = (not stream) or llm_recommended_followup or (chat_request.mode == "guide_recommend")
 
-        # 되묻기 답변에서는 next_intent 분류기가 한두 단어 답변(예: "양산")을
-        # NEW_SEARCH/REFINE_SEARCH로 오분류하면 query_recreation이 스킵되거나
-        # re_query가 덮어써져 원질문 컨텍스트가 유실되므로, more_results 분기 자체를 건넌다.
         is_clarification = is_clarification_answer(chat_request.messages)
 
         more_detected = False
@@ -171,7 +169,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         more_excluded_service_names = []
         more_last_preprocess = None
 
-        if use_more_results_router_path and not is_clarification:
+        if use_more_results_router_path:
             more_last_preprocess = get_last_preprocess_from_history(chat_request.messages)
             more_reusable_preprocess = get_last_preprocess_from_history(
                 chat_request.messages,
@@ -180,22 +178,21 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             base_user_query = get_base_user_query_from_history(chat_request.messages)
             if base_user_query and _is_context_dependent_followup(base_user_query):
                 base_user_query = ""
-            next_intent = await classify_next_intent(chat_request.messages, user_message)
-            llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
-            llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
-            more_topic_switch = next_intent.get("intent") in ("NEW_SEARCH", "REFINE_SEARCH")
+            prior_intent_value = str((more_last_preprocess or {}).get("intent") or "")
+            prior_service_names = collect_prior_service_names(chat_request.messages)
+            next_intent = await classify_next_intent(
+                chat_request.messages,
+                user_message,
+                prior_intent=prior_intent_value,
+                prior_service_names=prior_service_names,
+                is_clarification_question=is_clarification,
+            )
+            intent_label = next_intent.get("intent")
+            llm_detected_more = intent_label in ("MORE_INFO", "MORE_DETAIL")
+            llm_detected_more_detail = intent_label == "MORE_DETAIL"
+            more_topic_switch = intent_label in ("NEW_SEARCH", "REFINE_SEARCH")
+            # CLARIFY_REPLY는 query_recreation 흐름에서 원질문과 합성하므로 더알려줘 분기 비활성.
             more_detected = llm_detected_more
-            if (
-                not more_detected
-                and more_last_preprocess
-                and str(more_last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
-                and _is_context_dependent_followup(user_message)
-            ):
-                more_detected = True
-                logger.info(
-                    "[MoreResults/non-stream] 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
-                    more_last_preprocess.get("intent"),
-                )
             # 직전 preprocess 메타가 없을 때만 history 복구를 시도한다.
             # 직전 intent가 general이어도 more_last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
             if more_detected and not more_last_preprocess:

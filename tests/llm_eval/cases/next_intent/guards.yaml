@@ -1,0 +1,108 @@
+suite: next_intent · guards
+runner: next_intent
+defaults:
+  is_clarification_question: false
+
+cases:
+  - name: guard_A_clarify_reply_short_sigun
+    tags: [guard_a, clarify_reply]
+    notes: |
+      되묻기 직후 단답(시군명)은 NEW_SEARCH로 흘러가면 원질문 컨텍스트가 유실.
+      is_clarification_question=true 신호를 LLM이 따라 CLARIFY_REPLY로 분류해야 함.
+    inputs:
+      is_clarification_question: true
+      prior_intent: ""
+      prior_service_names: []
+      user_query: "양산"
+      messages:
+        - { role: user, content: "장애수당에 대해 알려줘" }
+        - { role: assistant, content: "어느 시군에 거주하고 계신가요?" }
+        - { role: user, content: "양산" }
+    asserts:
+      - { op: equals, field: intent, value: CLARIFY_REPLY }
+      - { op: contains, field: re_query, value: "양산" }
+
+  - name: guard_B_single_service_more_detail
+    tags: [guard_b, more_detail]
+    notes: |
+      prior_service_names 길이 1 + "더 자세히" → MORE_DETAIL 허용 (B형 답변 OK).
+    inputs:
+      prior_intent: general
+      prior_service_names: ["2026_양산시_장애수당.hwpx"]
+      user_query: "더 자세히 알려줘"
+      messages:
+        - { role: user, content: "양산 장애수당" }
+        - { role: assistant, content: "2026년 양산시 장애수당은 ..." }
+        - { role: user, content: "더 자세히 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_DETAIL }
+
+  - name: guard_B_multi_service_application_blocked
+    tags: [guard_b, more_detail_block]
+    notes: |
+      이번 세션의 핵심 회귀: 다수 항목 추천 후 "신청 방법은?"이
+      MORE_DETAIL(B형 답변)로 빠지면 잘못. 단일 사업명 명시 없으므로 MORE_DETAIL 금지.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names:
+        - "기초연금 지원"
+        - "노인맞춤돌봄서비스 지원"
+        - "노인일자리 및 사회활동 지원사업"
+      user_query: "신청 방법은?"
+      messages:
+        - { role: user, content: "양산 노인복지" }
+        - { role: assistant, content: "[양산시 노인복지 3건] 기초연금/노인맞춤돌봄/노인일자리" }
+        - { role: user, content: "신청 방법은?" }
+    asserts:
+      - { op: intent_not_in, field: intent, value: [MORE_DETAIL] }
+
+  - name: guard_B_multi_service_named_more_detail
+    tags: [guard_b, more_detail]
+    notes: |
+      prior_service_names 길이 2 이상이어도 현재 질문에 사업명이 명시되면 MORE_DETAIL 허용.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names:
+        - "기초연금 지원"
+        - "노인맞춤돌봄서비스 지원"
+      user_query: "기초연금 신청 방법은?"
+      messages:
+        - { role: user, content: "양산 노인복지" }
+        - { role: assistant, content: "[양산시 노인복지] 기초연금/노인맞춤돌봄" }
+        - { role: user, content: "기초연금 신청 방법은?" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_DETAIL }
+
+  - name: guard_C_what_business_after_recommend
+    tags: [guard_c, more_info]
+    notes: |
+      "어떤 사업 알려줘" 같은 의문형은 단일 대상이 특정되지 않은 신호.
+      guide_recommend 직후라면 MORE_INFO.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names:
+        - "기초연금 지원"
+        - "노인맞춤돌봄서비스 지원"
+        - "노인일자리 및 사회활동 지원사업"
+      user_query: "어떤 사업 알려줘"
+      messages:
+        - { role: user, content: "양산 노인복지 추천해줘" }
+        - { role: assistant, content: "양산 노인복지: 기초연금/노인맞춤돌봄/노인일자리" }
+        - { role: user, content: "어떤 사업 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_INFO }
+
+  - name: guard_D_short_followup_more_info
+    tags: [guard_d, more_info]
+    notes: |
+      "더 알려줘" 같은 짧은 추가 요청 + guide_recommend → MORE_INFO 회귀.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names: ["기초연금 지원", "노인맞춤돌봄서비스 지원"]
+      user_query: "더 알려줘"
+      messages:
+        - { role: user, content: "양산 노인복지 추천해줘" }
+        - { role: assistant, content: "[양산시 노인복지 5건] ..." }
+        - { role: user, content: "더 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_INFO }

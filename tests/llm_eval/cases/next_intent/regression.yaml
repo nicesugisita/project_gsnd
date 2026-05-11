@@ -1,0 +1,50 @@
+suite: next_intent · regression
+runner: next_intent
+defaults:
+  is_clarification_question: false
+
+cases:
+  - name: regression_general_application_detail
+    tags: [regression, more_detail]
+    notes: |
+      general 단일 사업 + "신청 방법은?" → MORE_DETAIL.
+    inputs:
+      prior_intent: general
+      prior_service_names: ["2026_창원시_청년월세 지원사업.hwpx"]
+      user_query: "신청 방법은?"
+      messages:
+        - { role: user, content: "창원 청년 월세 지원" }
+        - { role: assistant, content: "2026년 창원시 청년월세 지원사업은 ..." }
+        - { role: user, content: "신청 방법은?" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_DETAIL }
+
+  - name: regression_new_search_facility_lookup
+    tags: [regression, new_search]
+    notes: |
+      행정복지센터 연락처 같은 시설 조회는 직전 intent와 무관하게 NEW_SEARCH.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names: ["기초연금 지원", "노인맞춤돌봄서비스 지원"]
+      user_query: "진주 행정복지센터 연락처 알려줘"
+      messages:
+        - { role: user, content: "양산 노인복지" }
+        - { role: assistant, content: "[노인복지 안내] ..." }
+        - { role: user, content: "진주 행정복지센터 연락처 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: NEW_SEARCH }
+
+  - name: regression_refine_search_region_change
+    tags: [regression, refine_search]
+    notes: |
+      "김해는?" 같은 지역 변경은 조건만 바뀐 REFINE_SEARCH.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names: ["기초연금 지원", "노인맞춤돌봄서비스 지원"]
+      user_query: "김해는?"
+      messages:
+        - { role: user, content: "양산 노인복지 추천" }
+        - { role: assistant, content: "[양산시 노인복지] ..." }
+        - { role: user, content: "김해는?" }
+    asserts:
+      - { op: equals, field: intent, value: REFINE_SEARCH }

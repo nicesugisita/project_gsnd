@@ -51,6 +51,7 @@ from app.chat.more_results import (
     get_excluded_info_from_history,
     get_base_user_query_from_history,
     get_last_preprocess_from_history,
+    collect_prior_service_names,
 )
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.rag import filter_okms_keywords
@@ -128,6 +129,8 @@ async def _resolve_more_results_context(
     messages: list,
     user_message: str,
     original_user_message: str,
+    *,
+    is_clarification_question: bool = False,
 ) -> _MoreResultsContext:
     """'더 알려줘' 의도를 감지하고 재검색에 필요한 컨텍스트를 반환."""
     last_preprocess = get_last_preprocess_from_history(messages)
@@ -148,24 +151,21 @@ async def _resolve_more_results_context(
         logger.exception("[MoreResults debug] 로그 생성 중 오류 발생")
     if base_user_query and _is_context_dependent_followup(base_user_query):
         base_user_query = ""
-    next_intent = await classify_next_intent(messages, user_message)
-    llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
-    llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
-    topic_switch = next_intent.get("intent") in ("NEW_SEARCH", "REFINE_SEARCH")
+    prior_intent_value = str((last_preprocess or {}).get("intent") or "")
+    prior_service_names = collect_prior_service_names(messages)
+    next_intent = await classify_next_intent(
+        messages,
+        user_message,
+        prior_intent=prior_intent_value,
+        prior_service_names=prior_service_names,
+        is_clarification_question=is_clarification_question,
+    )
+    intent_label = next_intent.get("intent")
+    llm_detected_more = intent_label in ("MORE_INFO", "MORE_DETAIL")
+    llm_detected_more_detail = intent_label == "MORE_DETAIL"
+    topic_switch = intent_label in ("NEW_SEARCH", "REFINE_SEARCH")
+    # CLARIFY_REPLY: 되묻기 응답이므로 query_recreation으로 원질문과 합성. 더알려줘 분기는 비활성.
     detected = llm_detected_more
-
-    if (
-        not detected
-        and last_preprocess
-        and str(last_preprocess.get("intent") or "") in _MORE_INFO_REUSABLE_INTENTS
-        and _is_context_dependent_followup(user_message)
-    ):
-        detected = True
-        logger.info(
-            "[MoreResults] conv_id=%s | 저정보 후속 발화 감지 → MORE_INFO 승격 intent=%s",
-            conv_id,
-            last_preprocess.get("intent"),
-        )
 
     # 직전 prep:rocess 메타가 없을 때만 history 복구를 시도한다.
     # 직전 intent가 general이어도 last_preprocess가 있으면 해당 intent 축을 그대로 재사용한다.
@@ -362,21 +362,20 @@ async def _streaming_chat_flow(
         search_target = None
 
         # ── "더 알려줘" 감지 ──────────────────────────────────────────────────
-        # 되묻기 답변은 정의상 주제 전환·MORE_INFO가 아니므로 더알려줘 분기를 건너뛰고
-        # query_recreation으로 원질문과 결합한다. (next_intent LLM이 한두 단어 답변을
-        # NEW_SEARCH/REFINE_SEARCH로 오분류해 원질문 컨텍스트가 유실되는 문제 방지)
-        if is_clarification:
-            more = _MoreResultsContext()
-        else:
-            more = await _resolve_more_results_context(
-                chat_request.conv_id, chat_request.messages, user_message, original_user_message
+        # 되묻기 응답은 next_intent 분류기가 CLARIFY_REPLY로 식별해 더알려줘 분기 비활성.
+        more = await _resolve_more_results_context(
+            chat_request.conv_id,
+            chat_request.messages,
+            user_message,
+            original_user_message,
+            is_clarification_question=is_clarification,
+        )
+        if more.re_query:
+            user_message = more.re_query
+            logger.debug(
+                "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
+                chat_request.conv_id, shorten_text(user_message, 100),
             )
-            if more.re_query:
-                user_message = more.re_query
-                logger.debug(
-                    "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
-                    chat_request.conv_id, shorten_text(user_message, 100),
-                )
 
         # [1] PreCheck
         if not is_clarification:
