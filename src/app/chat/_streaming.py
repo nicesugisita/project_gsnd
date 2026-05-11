@@ -120,6 +120,7 @@ class _MoreResultsContext:
     excluded_service_names: List[str] = field(default_factory=list)
     last_preprocess: Optional[dict] = None
     more_detail: bool = False  # general intent일 때 "더 자세" 키워드 감지
+    topic_switch: bool = False  # next_intent=NEW_SEARCH/REFINE_SEARCH — query_recreation 스킵용
 
 
 async def _resolve_more_results_context(
@@ -150,6 +151,7 @@ async def _resolve_more_results_context(
     next_intent = await classify_next_intent(messages, user_message)
     llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
     llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
+    topic_switch = next_intent.get("intent") in ("NEW_SEARCH", "REFINE_SEARCH")
     detected = llm_detected_more
 
     if (
@@ -197,7 +199,11 @@ async def _resolve_more_results_context(
                 conv_id,
             )
             # 후속 발화임을 보존: exclusion 없이 직전 intent만 재사용하도록 blocked_followup 설정
-            return _MoreResultsContext(last_preprocess=last_preprocess, blocked_followup=True)
+            return _MoreResultsContext(
+                last_preprocess=last_preprocess,
+                blocked_followup=True,
+                topic_switch=topic_switch,
+            )
 
     logger.debug(
         "[MoreResults] conv_id=%s | 보조분류 next_intent=%s | re_query=%s",
@@ -207,7 +213,7 @@ async def _resolve_more_results_context(
     )
 
     if not detected:
-        return _MoreResultsContext(last_preprocess=last_preprocess)
+        return _MoreResultsContext(last_preprocess=last_preprocess, topic_switch=topic_switch)
 
     re_query: Optional[str] = None
     if llm_detected_more_detail:
@@ -268,6 +274,7 @@ async def _resolve_more_results_context(
         excluded_service_names=excluded_service_names,
         last_preprocess=last_preprocess,
         more_detail=more_detail,
+        topic_switch=topic_switch,
     )
 
 
@@ -355,15 +362,21 @@ async def _streaming_chat_flow(
         search_target = None
 
         # ── "더 알려줘" 감지 ──────────────────────────────────────────────────
-        more = await _resolve_more_results_context(
-            chat_request.conv_id, chat_request.messages, user_message, original_user_message
-        )
-        if more.re_query:
-            user_message = more.re_query
-            logger.debug(
-                "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
-                chat_request.conv_id, shorten_text(user_message, 100),
+        # 되묻기 답변은 정의상 주제 전환·MORE_INFO가 아니므로 더알려줘 분기를 건너뛰고
+        # query_recreation으로 원질문과 결합한다. (next_intent LLM이 한두 단어 답변을
+        # NEW_SEARCH/REFINE_SEARCH로 오분류해 원질문 컨텍스트가 유실되는 문제 방지)
+        if is_clarification:
+            more = _MoreResultsContext()
+        else:
+            more = await _resolve_more_results_context(
+                chat_request.conv_id, chat_request.messages, user_message, original_user_message
             )
+            if more.re_query:
+                user_message = more.re_query
+                logger.debug(
+                    "[MoreResults] conv_id=%s | 검색 전 질의 치환 완료 user_message=%s",
+                    chat_request.conv_id, shorten_text(user_message, 100),
+                )
 
         # [1] PreCheck
         if not is_clarification:
@@ -435,13 +448,19 @@ async def _streaming_chat_flow(
             resolved_sigun_filters = early_sigun.filters
             logger.info("[SigunCheck/stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
-        # [3] 쿼리 재구성
-        if is_clarification:
-            yield build_status_message(STATUS_QUERY_RECREATION)
-        _t = time.monotonic()
-        user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
-        _timings["t_query_recreation"] = round(time.monotonic() - _t, 3)
-        logger.info("[TIMING] 쿼리 재구성: %.3fs", _timings["t_query_recreation"])
+        # [3] 쿼리 재구성 (NEW_SEARCH/REFINE_SEARCH면 직전 주제로 오염되지 않도록 스킵)
+        if more.topic_switch:
+            logger.info(
+                "[Query Recreation] conv_id=%s | next_intent=NEW_SEARCH/REFINE_SEARCH → 재구성 스킵",
+                chat_request.conv_id,
+            )
+        else:
+            if is_clarification:
+                yield build_status_message(STATUS_QUERY_RECREATION)
+            _t = time.monotonic()
+            user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
+            _timings["t_query_recreation"] = round(time.monotonic() - _t, 3)
+            logger.info("[TIMING] 쿼리 재구성: %.3fs", _timings["t_query_recreation"])
 
         # [4] 경상남도 외 지역 체크
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)

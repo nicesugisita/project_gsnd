@@ -195,6 +195,9 @@ async def classify_next_intent(messages: list, current_query: str) -> dict:
             mapped_intent = "MORE_INFO"
         elif raw_intent == "MORE_DETAIL":
             mapped_intent = "MORE_DETAIL"
+        elif raw_intent in ("NEW_SEARCH", "REFINE_SEARCH"):
+            # 주제 전환 신호 보존 — 다운스트림에서 query_recreation 스킵 판단에 사용
+            mapped_intent = raw_intent
         else:
             mapped_intent = "OTHER"
         llm_re_query = str(parsed.get("re_query", "") or "").strip()

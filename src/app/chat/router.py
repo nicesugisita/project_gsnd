@@ -158,14 +158,20 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         stream = data.get("stream", False)
         use_more_results_router_path = (not stream) or llm_recommended_followup or (chat_request.mode == "guide_recommend")
 
+        # 되묻기 답변에서는 next_intent 분류기가 한두 단어 답변(예: "양산")을
+        # NEW_SEARCH/REFINE_SEARCH로 오분류하면 query_recreation이 스킵되거나
+        # re_query가 덮어써져 원질문 컨텍스트가 유실되므로, more_results 분기 자체를 건넌다.
+        is_clarification = is_clarification_answer(chat_request.messages)
+
         more_detected = False
         more_blocked_followup = False
+        more_topic_switch = False
         more_final_user_message = None
         more_excluded_chunk_ids = []
         more_excluded_service_names = []
         more_last_preprocess = None
 
-        if use_more_results_router_path:
+        if use_more_results_router_path and not is_clarification:
             more_last_preprocess = get_last_preprocess_from_history(chat_request.messages)
             more_reusable_preprocess = get_last_preprocess_from_history(
                 chat_request.messages,
@@ -177,6 +183,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             next_intent = await classify_next_intent(chat_request.messages, user_message)
             llm_detected_more = next_intent.get("intent") in ("MORE_INFO", "MORE_DETAIL")
             llm_detected_more_detail = next_intent.get("intent") == "MORE_DETAIL"
+            more_topic_switch = next_intent.get("intent") in ("NEW_SEARCH", "REFINE_SEARCH")
             more_detected = llm_detected_more
             if (
                 not more_detected
@@ -248,8 +255,6 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
                 llm_rq = str((next_intent or {}).get("llm_re_query", "") or "").strip()
                 more_final_user_message = llm_rq or (original_user_message or "").strip() or None
-
-        is_clarification = is_clarification_answer(chat_request.messages)
 
         if not is_clarification:
             limit_response = _check_user_limit(user_message, chat_request, stream)
@@ -328,8 +333,14 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[SigunCheck/non-stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
         # [3] 쿼리 재구성 (MORE_INFO 또는 general 후속 경로는 reformed_query를 직접 사용하므로 생략)
-        if not more_detected and not more_blocked_followup:
+        # NEW_SEARCH/REFINE_SEARCH(주제 전환)도 스킵 — 직전 주제로 오염 방지
+        if not more_detected and not more_blocked_followup and not more_topic_switch:
             user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
+        elif more_topic_switch:
+            logger.info(
+                "[Query Recreation/non-stream] conv_id=%s | next_intent=NEW_SEARCH/REFINE_SEARCH → 재구성 스킵",
+                chat_request.conv_id,
+            )
 
         # [4] 경상남도 외 지역 체크
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
