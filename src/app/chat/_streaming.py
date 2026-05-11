@@ -555,6 +555,7 @@ async def _streaming_chat_flow(
                 "keywords": pp.keywords,
                 "search_target": pp.search_target,
                 "policy_priority_tag": pp.policy_priority_tag,
+                "detail_requested": pp.detail_requested,
             }
 
         user_intent      = preprocess_data["intent"]
@@ -643,7 +644,14 @@ async def _streaming_chat_flow(
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
         if user_intent == "general":
-            _rag_kwargs["more_detail"] = more.more_detail
+            # MORE_DETAIL 후속(이전 대화 기반) 또는 unified_preprocess의 detail_requested(첫 메시지에서 자세히 요청) 중 하나라도 True면 form B 강제
+            effective_more_detail = bool(more.more_detail) or bool(preprocess_data.get("detail_requested"))
+            if effective_more_detail and not more.more_detail:
+                logger.info(
+                    "[MoreResults] conv_id=%s | detail_requested=True from unified_preprocess → more_detail 활성화",
+                    chat_request.conv_id,
+                )
+            _rag_kwargs["more_detail"] = effective_more_detail
         rag_task = asyncio.create_task(rag_processor(**_rag_kwargs))
         if more.detected:
             logger.info(

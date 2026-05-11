@@ -463,7 +463,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             excluded_service_names=more_excluded_service_names,
             final_user_message=more_final_user_message,
             more_info=more_detected,
-            more_detail=llm_detected_more_detail,
+            more_detail=llm_detected_more_detail or getattr(preprocess, "detail_requested", False),
         )
 
     except Exception as e:

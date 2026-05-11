@@ -582,6 +582,7 @@ async def process_rag_general(
             lifecycle=gen_lifecycle,
             messages=messages,
             more_info_mode=more_detail or bool(excluded_chunk_ids or excluded_service_names),
+            detail_requested=bool(more_detail),
         )
         logger.info("[TIMING][general] Step9 최종 응답 생성 [32b/luxia]: %.3fs", time.monotonic() - _t)
         logger.info("[TIMING][general] process_rag_general 전체: %.3fs", time.monotonic() - t_total)

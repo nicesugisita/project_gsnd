@@ -43,6 +43,7 @@ class PreprocessResult:
     elapsed: float = 0.0
     search_target: Optional[str] = None
     policy_priority_tag: Optional[str] = None
+    detail_requested: bool = False
 
 
 async def run_pre_check(
@@ -142,6 +143,7 @@ async def run_unified_preprocess(
         elapsed=elapsed,
         search_target=result.get("search_target"),
         policy_priority_tag=result.get("policy_priority_tag"),
+        detail_requested=bool(result.get("detail_requested", False)),
     )
 
 

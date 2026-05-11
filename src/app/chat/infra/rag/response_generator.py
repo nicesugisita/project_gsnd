@@ -40,6 +40,7 @@ from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_pro
 logger = logging.getLogger(__name__)
 
 
+
 # ============================================================
 # 문서 포맷터 v2 (사전 조회된 WELFARE_TEL 참조)
 # ============================================================
@@ -121,6 +122,7 @@ async def generate_final_response_v2(
     policy_priority_tag: Optional[str] = None,
     more_info_mode: bool = False,
     use_llm_recommended_prompt: bool = False,
+    detail_requested: bool = False,
 ) -> Any:
     """
     v2 최종 응답 생성 (모든 의도 공통)
@@ -134,6 +136,9 @@ async def generate_final_response_v2(
         user_region: 사용자 지역 (guide_recommend용, v2 Step 0에서 추출)
         user_birth_year: 사용자 출생연도 (guide_recommend용, v2 Step 0에서 추출)
         more_info_mode: True면 '더 알려줘'용 [추가 규칙]을 붙이고 DB 정책 우선순위 프롬프트는 생략.
+            (`detail_requested` 또는 MORE_INFO 후속(excluded 존재) 중 하나로 set.)
+        detail_requested: True면 형식 B(4단계 구조) 답변을 강제. unified_preprocess의
+            detail_requested 또는 NextIntent의 MORE_DETAIL 분류로 set.
         use_llm_recommended_prompt: guide_recommend일 때 True면 classification_llm_recommended 프롬프트 사용.
     """
     try:
@@ -238,12 +243,22 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        logger.info("[ResponseGen] more_info_mode=%s intent=%s → 추가규칙 주입=%s", more_info_mode, intent, more_info_mode and intent == "general")
-        if more_info_mode and intent == "general":
-            logger.info("[ResponseGen] [추가 규칙] 4단계 구조 주입 ✓")
+        # 형식 B(4단계 구조) 강제 여부는 detail_requested 단일 신호로만 판단한다.
+        # detail_requested는 두 경로로 set된다:
+        #   1) unified_preprocess의 detail_requested 필드 (첫 메시지의 "자세히" 요청 등)
+        #   2) NextIntent의 MORE_DETAIL 분류 (이전 대화 기반 후속 상세 요청)
+        # 둘 다 LLM이 의미 기반으로 판단하므로, 코드에서 추가 키워드 검사를 하지 않는다.
+        force_form_b = intent == "general" and bool(detail_requested)
+
+        logger.info(
+            "[ResponseGen] more_info_mode=%s intent=%s detail_requested=%s → force_form_b=%s",
+            more_info_mode, intent, detail_requested, force_form_b,
+        )
+        if force_form_b:
+            logger.info("[ResponseGen] [추가 규칙] 4단계 구조(형식 B) 주입 ✓")
             user_message += (
                 "\n\n[추가 규칙]\n"
-                "이번 응답은 사용자의 '더 자세히' 요청입니다. 반드시 형식 B(4단계 구조)로 자세히 답변하십시오.\n"
+                "이번 응답은 사용자의 '자세히' 요청입니다. 반드시 형식 B(4단계 구조)로 자세히 답변하십시오.\n"
                 "출력 형식:\n"
                 "{기준연도} 기준 {지역} {서비스/제도명} 사업 안내입니다.\n\n"
                 "1. 사업 개요\n"
@@ -263,6 +278,7 @@ async def generate_final_response_v2(
                 "- {문의처 / 연락처}\n\n"
                 "섹션 헤더는 마크다운 강조(#, **) 없이 '1. 사업 개요' 형태로만 작성합니다.\n"
                 "문서에 없는 내용은 '정보 없음'으로 명시합니다.\n"
+                "답변 말미에 '자세히 알려줘'를 다시 안내하지 마십시오 (이미 자세한 답변입니다).\n"
             )
         elif more_info_mode and intent not in ("recommended_question",):
             user_message += (
@@ -273,6 +289,20 @@ async def generate_final_response_v2(
                 "- 이전 답변과의 중복 여부는 추정하지 말고, 문서에 적힌 내용으로 안내 가능하면 포함합니다.\n"
                 "- 문서를 검토한 뒤 안내할 근거가 없을 때에만 짧은 안내를 덧붙일 수 있으며, "
                 "그 경우에도 답변 전체를 한 줄·한 문장으로만 제한하지 마세요.\n"
+            )
+        elif intent == "general":
+            logger.info("[ResponseGen] [추가 규칙] 형식 A 강제 주입 ✓")
+            user_message += (
+                "\n\n[추가 규칙]\n"
+                "- 반드시 형식 A(간결한 한두 문장 또는 단순 나열)로 답변하십시오.\n"
+                "- '1. 사업 개요', '2. 상세 요건', '3. 지원 혜택', '4. 신청 안내' 같은 번호 섹션을 절대 사용하지 마십시오.\n"
+                "- '{연도}년 기준 ... 사업 안내입니다' 형태의 도입부를 절대 쓰지 마십시오.\n"
+                "- 사용자 질문에 '사업', '지원', '안내' 단어가 있더라도 형식 B로 전환하지 마십시오. 이 요청은 일반 설명 요청입니다.\n"
+                "- 답변 마지막에 'retrieved_documents의 문의처'(전화번호·기관명)를 그대로 인용해 한 줄로 안내하십시오. "
+                "예: '자세한 사항은 {문서에 적힌 기관명}({문서에 적힌 전화번호})으로 문의해 주세요.'\n"
+                "- 문서에 문의처가 여러 개면 가장 직접 담당으로 보이는 1개만 인용합니다.\n"
+                "- 문서에 문의처가 전혀 없으면 마지막 안내 줄을 생략합니다. 문의처를 임의로 생성·추측하지 마십시오.\n"
+                "- '자세히 알려줘라고 말씀해 주세요' 같은 안내는 절대 덧붙이지 마십시오.\n"
             )
 
         if facility_content:

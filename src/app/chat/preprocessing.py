@@ -116,6 +116,27 @@ def _raw_policy_priority_tag_from_parsed(parsed: Dict[str, Any]) -> Any:
     return None
 
 
+def _normalize_detail_requested(parsed: Dict[str, Any]) -> bool:
+    """LLM JSON에서 detail_requested 읽기. True/False 외 표현(문자열 'true'/'1' 등)도 허용.
+
+    누락·파싱불가 시 False로 보수적으로 처리.
+    """
+    for key in ("detail_requested", "detailRequested"):
+        if key in parsed:
+            raw = parsed[key]
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                v = raw.strip().lower()
+                if v in ("true", "1", "yes", "y"):
+                    return True
+                if v in ("false", "0", "no", "n", "null", ""):
+                    return False
+            if isinstance(raw, (int, float)):
+                return bool(raw)
+    return False
+
+
 def _normalize_policy_priority_tag(raw: Any) -> Optional[str]:
     if raw is None:
         return None
@@ -225,6 +246,7 @@ async def unified_preprocess(
 
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
     policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
+    detail_requested = _normalize_detail_requested(parsed)
     # DB 변별 키워드로 사후 무력화 (예: "치매"가 포함되면 elderly_benefits를 None으로 강제)
     try:
         from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
@@ -247,11 +269,12 @@ async def unified_preprocess(
         "keywords":         keywords,
         "search_target":    search_target,
         "policy_priority_tag": policy_priority_tag,
+        "detail_requested": detail_requested,
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | use_rag(input)=%s",
-        query[:50], intent, search_target, policy_priority_tag, use_rag,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, policy_priority_tag, detail_requested, use_rag,
     )
     return result
 
