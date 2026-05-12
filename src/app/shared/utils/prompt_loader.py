@@ -2,11 +2,13 @@
 Prompt loader utility module.
 
 Handles loading prompt templates from files with caching and error handling.
+mtime 기반 캐시 무효화: 디스크의 파일이 변경되면 재로딩한다.
+uvicorn --reload는 .py만 감시하므로, .txt 변경 시 lru_cache가 옛 내용을 고정하는 문제를 방지.
 """
 
 import os
 import logging
-from functools import lru_cache
+from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +18,13 @@ _PROMPT_BASE_DIR = os.path.normpath(os.path.join(
     '..', '..', '..', '..', 'prompts'
 ))
 
+# 캐시 엔트리: filename → (mtime_ns, content)
+_PROMPT_CACHE: Dict[str, Tuple[int, str]] = {}
 
-@lru_cache(maxsize=32)
+
 def _load_prompt_file(filename: str, default: str = "") -> str:
     """
-    Load prompt from file with caching.
+    Load prompt from file with mtime-based cache invalidation.
 
     Args:
         filename: Name of the prompt file
@@ -35,10 +39,16 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
         if not os.path.exists(prompt_file):
             return default
 
+        mtime_ns = os.stat(prompt_file).st_mtime_ns
+        cached = _PROMPT_CACHE.get(filename)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+
         with open(prompt_file, 'r', encoding='utf-8') as f:
             content = f.read().strip()
-            logger.debug(f"Loaded prompt: {filename}")
-            return content
+        _PROMPT_CACHE[filename] = (mtime_ns, content)
+        logger.info(f"Loaded prompt (mtime={mtime_ns}): {filename}")
+        return content
 
     except Exception as e:
         logger.error(f"Error loading prompt {filename}: {e}")

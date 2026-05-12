@@ -504,6 +504,20 @@ def _pick_distinct_keywords(keywords: Tuple[str, ...], *, n: int) -> List[str]:
     return picked
 
 
+# OP_VECTOR_SEARCH는 검색어로부터 임베딩을 생성하므로 동일 키워드를 N회 반복하면
+# 임베딩 중심이 해당 키워드 방향으로 이동한다. OP_HASANY 계열은 토큰 집합 매칭이라
+# 반복 자체로는 가중치가 늘지 않으므로, 반복 부스트는 벡터 검색용 문자열에만 적용한다.
+_POLICY_BOOST_VECTOR_REPEAT: int = 3
+
+
+def _repeat_for_vector_boost(keyword: str, n: int = _POLICY_BOOST_VECTOR_REPEAT) -> str:
+    """벡터 임베딩 방향을 부스트 키워드 쪽으로 옮기기 위해 N회 반복한 문자열을 반환."""
+    k = (keyword or "").strip()
+    if not k or n <= 1:
+        return k
+    return " ".join([k] * n)
+
+
 POLICY_PRIORITY_TAGS: FrozenSet[str] = frozenset({"implant", "low_income", "elderly_benefits"})
 
 
@@ -538,6 +552,12 @@ def augment_okms_dual_query(
 ) -> Tuple[str, str]:
     """Mariner Group A 검색 직전 (vector, keyword) 보강.
 
+    부스트 전략:
+    - vector(vec): OP_VECTOR_SEARCH로 흘러가므로 정책 키워드를 N회 반복 삽입해
+      임베딩 중심을 해당 방향으로 이동시킨다. 단순 추가(1회)보다 강한 의미적 부스트.
+    - keyword(kw): OP_HASANY/OP_HASALL 토큰 매칭이라 반복은 무효(내부 dedup 가능).
+      누락된 정책 키워드를 1회씩 추가해 매칭 커버리지만 보강.
+
     트리플이 비어 있던 행을 건드리며 keyword 레그만 채우면, 수집 루프의 tri_built
     인덱스와 맞지 않아 키워드 결과가 버려질 수 있으므로, keyword 보강은 기존
     트리플 문자열이 있을 때만 한다. 빈 트리플 레그 보강은 `policy_extra_okms_searches`.
@@ -552,12 +572,14 @@ def augment_okms_dual_query(
     if not kws:
         return vec, kw
 
+    # vector: 반복 삽입으로 임베딩 부스트
     low_vec = vec.casefold()
     for needle in _pick_distinct_keywords(kws, n=2):
         if needle.casefold() not in low_vec:
-            vec = f"{vec} {needle}".strip()
+            vec = f"{vec} {_repeat_for_vector_boost(needle)}".strip()
             low_vec = vec.casefold()
 
+    # keyword: 토큰 커버리지 보강 (반복 무효 → 1회 추가)
     if kw and kws:
         kw_cf = kw.casefold()
         extra = [
@@ -572,7 +594,11 @@ def augment_okms_dual_query(
 
 
 def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) -> List[Tuple[str, str]]:
-    """정책 태그별 OKMS Group A 추가 검색 (vector, keyword) 쌍 — 빈 트리플·약한 검색 보강."""
+    """정책 태그별 OKMS Group A 추가 검색 (vector, keyword) 쌍 — 빈 트리플·약한 검색 보강.
+
+    vector 컴포넌트는 임베딩 부스트를 위해 anchor를 N회 반복 삽입한다.
+    keyword 컴포넌트는 OP_HASANY 토큰 매칭이라 anchor 1회만 유지한다.
+    """
     tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
     rq = (reformed_query or "").strip()
     tag_keywords = _get_tag_keywords_map()
@@ -587,7 +613,8 @@ def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) ->
         pairs: List[Tuple[str, str]] = []
         for idx, anchor in enumerate(anchors):
             suffix = " 안내" if idx == 0 else ""
-            pairs.append((f"{rq} {anchor}{suffix}".strip(), anchor))
+            boosted = _repeat_for_vector_boost(anchor)
+            pairs.append((f"{rq} {boosted}{suffix}".strip(), anchor))
         return pairs
 
     if "implant" in tags:
@@ -595,14 +622,16 @@ def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) ->
         if not implant_kws:
             return []
         implant_kw = implant_kws[0]
-        return [(f"{rq} {implant_kw} 지원", implant_kw)]
+        boosted = _repeat_for_vector_boost(implant_kw)
+        return [(f"{rq} {boosted} 지원", implant_kw)]
 
     if "low_income" in tags:
         low_income_kws = _pick_distinct_keywords(tag_keywords.get("low_income", ()), n=2)
         if not low_income_kws:
             return []
+        boosted = " ".join(_repeat_for_vector_boost(k) for k in low_income_kws)
         joined = " ".join(low_income_kws)
-        return [(f"{rq} {joined}".strip(), joined)]
+        return [(f"{rq} {boosted}".strip(), joined)]
 
     return []
 
@@ -736,18 +765,17 @@ def soft_priority_instruction_for_prompt(policy_priority_tag: Any) -> str:
     """최종 LLM user 메시지에 붙일 짧은 우선순위 안내(문서 근거만).
 
     주의:
-    - 특정 키워드 목록을 그대로 노출하면 모델이 '키워드 부재' 안내로 치우칠 수 있어
-      태그만 전달하고, '있는 문서만 우선 설명'하도록 완화한다.
+    - 본 지시는 **출력 순서**에만 영향을 준다. retrieved_documents의 문서를
+      태그와 직접 관련이 적다는 이유로 제외해서는 안 된다.
+    - 시스템 프롬프트의 "중복 외 모든 문서 출력" 규칙이 항상 우선이다.
     """
     tags, _kws = resolve_policy_boost_keywords(policy_priority_tag)
     if not tags:
         return ""
     return (
-        "\n        [답변 우선순위]\n"
-        "        아래 질문군에 해당합니다. retrieved_documents에서 관련성이 높은 문서를 "
-        "기존 출력 규칙을 유지한 채 먼저 안내하세요.\n"
-        "        관련 문서가 일부만 있으면 있는 것만 설명하고, "
-        "키워드 부재 안내 문구로 답변을 대체하지 마세요.\n"
-        "        문서에 없는 내용은 작성하지 마세요.\n"
+        "\n        [출력 순서 힌트 — 제외 사유 아님]\n"
+        "        아래 질문군 태그와 직접 관련된 문서가 있으면 [서비스 1]에 가깝게 먼저 배치하세요.\n"
+        "        단, 태그와 관련이 적다고 해서 retrieved_documents의 어떤 문서도 제외하지 마십시오.\n"
+        "        중복 병합 외의 사유로 사업을 누락하면 안 됩니다. 모든 사업을 [서비스 N] 블록으로 출력합니다.\n"
         f"        - 태그: {', '.join(sorted(tags))}\n"
     )

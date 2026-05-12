@@ -453,6 +453,8 @@ async def process_rag_guide_recommend(
             log_prefix="[RAG/guide_recommend_v2]",
             apply_enabled=not _skip_policy_boost,
         )
+        # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
+        _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")]
         gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
         logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         logger.info(f"[RAG/guide_recommend_v2] 관련성 필터 후: {len(gr_top_docs)}개 문서")
@@ -460,6 +462,179 @@ async def process_rag_guide_recommend(
         if excluded_chunk_ids or excluded_service_names:
             gr_top_docs = filter_excluded_docs(gr_top_docs, excluded_chunk_ids or [], excluded_service_names)
             logger.info(f"[MoreResults][guide_recommend] 제외 필터 후: {len(gr_top_docs)}개 문서")
+
+        # 관련성 필터에서 거절된 chunk_id (재귀에서 재평가 방지)
+        _survived_after_filter = {d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")}
+        rejected_chunk_ids: List[str] = [
+            cid for cid in _pre_filter_chunk_ids if cid and cid not in _survived_after_filter
+        ]
+        if rejected_chunk_ids:
+            logger.debug(
+                f"[RAG/guide_recommend_v2] 관련성 필터 거절 chunk_id {len(rejected_chunk_ids)}건 추적"
+            )
+
+        # ====================================================================
+        # Step D-1.5: 재귀 보강 (관련성 필터 후 8건 미달 시, 최대 3회 추가 검색)
+        # 반복마다 필터를 점진적으로 완화하고, 거절된 chunk_id를 누적 제외해
+        # 같은 문서가 재평가되지 않도록 한다.
+        # ====================================================================
+        _GR_TARGET_TOTAL = _GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N  # 5 + 3 = 8
+        _GR_RECURSIVE_MAX_ITERS = 3
+        if len(gr_top_docs) < _GR_TARGET_TOTAL:
+            logger.info(
+                f"[RAG/guide_recommend_v2] 관련성 필터 후 {len(gr_top_docs)}건 "
+                f"< {_GR_TARGET_TOTAL}건 → 재귀 보강 시작 (최대 {_GR_RECURSIVE_MAX_ITERS}회)"
+            )
+
+            # 재귀는 전체 확장 쿼리를 사용 (cap 미적용 → 검색 다양성 확보)
+            _recur_candidates = precomputed_expanded_queries or gr_expanded
+            recur_expanded = dedupe_cap_expanded_queries(
+                _recur_candidates or [],
+                reformed_query=gr_expand_base,
+            )
+            recur_tri = [
+                " ".join(
+                    k.strip()
+                    for k in filter_okms_keywords(extract_nouns(eq, use_bigram=False))
+                    if k and k.strip()
+                )
+                for eq in recur_expanded
+            ]
+
+            # 반복별 필터 완화 전략: (lifecycle, year, boost)
+            _RELAX_PLAN = [
+                {"lifecycle": False, "year": True,  "boost": _query_policy_boost_enabled},   # iter1: lifecycle off
+                {"lifecycle": False, "year": True,  "boost": False},                          # iter2: boost off
+                {"lifecycle": False, "year": False, "boost": False},                          # iter3: year off
+            ]
+
+            for _iter in range(1, _GR_RECURSIVE_MAX_ITERS + 1):
+                if len(gr_top_docs) >= _GR_TARGET_TOTAL:
+                    break
+
+                relax = _RELAX_PLAN[_iter - 1]
+                _lc = (lifecycle or None) if relax["lifecycle"] else None
+                _yr = (gr_year_filters or None) if relax["year"] else None
+                _boost_on = relax["boost"]
+
+                # 누적 제외: 외부 제외 + 보유 중인 문서 + 관련성에서 거절된 문서
+                accumulated_excluded = (
+                    list(excluded_chunk_ids or [])
+                    + [d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")]
+                    + list(rejected_chunk_ids)
+                )
+                logger.info(
+                    f"[RAG/guide_recommend_v2] 재귀 #{_iter} 시작 — lifecycle={_lc!r}, "
+                    f"year={_yr!r}, boost={_boost_on}, 제외={len(accumulated_excluded)}건"
+                )
+
+                def _recur_group_a(vector: str, keywords: str, _excl=accumulated_excluded, _lc_v=_lc, _yr_v=_yr, _i=_iter):
+                    try:
+                        return query_group_a_documents(
+                            vector, keywords, selected_collection,
+                            year_filters=_yr_v,
+                            sigun_filters=gr_sigun_filters,
+                            lifecycle_filter=_lc_v,
+                            excluded_chunk_ids=_excl,
+                            apply_business_anchor=False,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RAG/guide_recommend_v2] 재귀 #{_i} Group A 실패: {e}")
+                        return [], []
+
+                def _recur_gov(search_str: str, _excl=accumulated_excluded, _lc_v=_lc, _i=_iter):
+                    try:
+                        return query_gov_okms_documents(
+                            search_str,
+                            collection=Config.RAG_GOV_OKMS_COLLECTION,
+                            lifecycle_filter=_lc_v,
+                            sigun_filters=gr_sigun_filters,
+                            excluded_chunk_ids=_excl,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RAG/guide_recommend_v2] 재귀 #{_i} GOV_OKMS 실패: {e}")
+                        return []
+
+                _t_recur = time.monotonic()
+                recur_docs = await collect_okms_groupa_and_gov_fallback_docs(
+                    message=message,
+                    reformed_query=reformed_query,
+                    policy_priority_tag=precomputed_policy_priority_tag,
+                    expanded_queries=recur_expanded,
+                    tri_built=recur_tri,
+                    per_query_limit=_GR_GA_PER_QUERY,
+                    run_group_a=_recur_group_a,
+                    run_gov=_recur_gov,
+                    max_policy_pairs=1,
+                    policy_search_boost_enabled=_boost_on,
+                )
+                logger.info(
+                    "[TIMING][guide_recommend] StepD-1.5 재귀 #%d 보강검색: %.3fs",
+                    _iter, time.monotonic() - _t_recur,
+                )
+
+                # 이미 보유/거절된 chunk_id 제외 + 중복 제거
+                exclude_set = set(accumulated_excluded)
+                new_docs = _deduplicate_documents([
+                    d for d in recur_docs
+                    if d.get("CHUNK_ID") and d.get("CHUNK_ID") not in exclude_set
+                ])
+                logger.info(
+                    f"[RAG/guide_recommend_v2] 재귀 #{_iter} 신규 후보: {len(new_docs)}건 "
+                    f"(수집 {len(recur_docs)}건)"
+                )
+                if not new_docs:
+                    logger.info(f"[RAG/guide_recommend_v2] 재귀 #{_iter}: 신규 문서 없음 → 다음 반복")
+                    continue
+
+                # 신규 문서에만 관련성 필터 적용
+                _t_filter = time.monotonic()
+                filtered_new = await filter_irrelevant_docs(
+                    reformed_query, new_docs, sigun_filters=gr_sigun_filters
+                )
+                logger.info(
+                    "[TIMING][guide_recommend] StepD-1.5 재귀 #%d 관련성 필터: %.3fs",
+                    _iter, time.monotonic() - _t_filter,
+                )
+
+                if excluded_chunk_ids or excluded_service_names:
+                    filtered_new = filter_excluded_docs(
+                        filtered_new, excluded_chunk_ids or [], excluded_service_names
+                    )
+
+                # 이번 반복에서 거절된 chunk_id를 다음 반복에 전달
+                _new_survived = {d.get("CHUNK_ID") for d in filtered_new if d.get("CHUNK_ID")}
+                for d in new_docs:
+                    cid = d.get("CHUNK_ID")
+                    if cid and cid not in _new_survived:
+                        rejected_chunk_ids.append(cid)
+
+                if not filtered_new:
+                    logger.info(f"[RAG/guide_recommend_v2] 재귀 #{_iter}: 관련성 필터 후 신규 0건")
+                    continue
+
+                filtered_new = apply_policy_priority_to_documents(
+                    precomputed_policy_priority_tag,
+                    filtered_new,
+                    log_prefix=f"[RAG/guide_recommend_v2/recur#{_iter}]",
+                    apply_enabled=not _skip_policy_boost,
+                )
+                gr_top_docs = list(gr_top_docs) + filtered_new
+                logger.info(
+                    f"[RAG/guide_recommend_v2] 재귀 #{_iter} 합산 후: {len(gr_top_docs)}건 "
+                    f"(신규 {len(filtered_new)}건 추가)"
+                )
+
+            # 8건 초과 시 WEIGHT 기준 상위 8건만 유지
+            if len(gr_top_docs) > _GR_TARGET_TOTAL:
+                gr_top_docs = sorted(
+                    gr_top_docs,
+                    key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                    reverse=True,
+                )[:_GR_TARGET_TOTAL]
+                logger.info(f"[RAG/guide_recommend_v2] 재귀 후 상위 {_GR_TARGET_TOTAL}건 캡: {len(gr_top_docs)}건")
+            else:
+                logger.info(f"[RAG/guide_recommend_v2] 재귀 종료: 최종 {len(gr_top_docs)}건")
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순
         gr_top_docs = sort_weight_top30_then_year(gr_top_docs)
