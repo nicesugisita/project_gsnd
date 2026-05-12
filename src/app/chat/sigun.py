@@ -280,10 +280,24 @@ def extract_ambiguous_location(query: str) -> Tuple[Optional[str], List[str]]:
     if not _location_dict:
         return None, []
 
+    matched: List[Tuple[str, List[str]]] = []
     for key, candidates in _location_dict.items():
         if _match_location_key(key, query):
-            logger.info(f"[SigunService] 위치명 '{key}' 감지 → 후보 시군: {candidates}")
-            return key, list(candidates)
+            matched.append((key, list(candidates)))
+
+    if matched:
+        # 부분일치 충돌(예: '상북면' vs '북면') 시 더 구체적인 항목을 우선 선택.
+        best_key, best_candidates = min(
+            matched,
+            key=lambda item: (query.find(item[0]), -len(item[0]), item[0]),
+        )
+        logger.info(
+            "[SigunService] 위치명 '%s' 감지 → 후보 시군: %s (candidates=%s)",
+            best_key,
+            best_candidates,
+            [k for k, _ in matched],
+        )
+        return best_key, best_candidates
 
     return None, []
 
@@ -339,12 +353,19 @@ def extract_eupmyeondong_from_message(user_message: str) -> Optional[str]:
         m = re.search(r'([가-힣]{2,6}(?:읍|면|동))', user_message)
         return m.group(1) if m else None
 
+    # 부분 일치(예: '상북면' 안의 '북면')가 동시에 잡히는 경우를 방지하기 위해
+    # 모든 후보를 수집한 뒤 "문장 내 시작 위치가 앞선 것, 길이가 긴 것"을 우선한다.
+    matched_keys: List[str] = []
     for key in _location_dict:
-        if not key.endswith(('읍', '면', '동')):
+        if not key.endswith(("읍", "면", "동")):
             continue
         if _match_location_key(key, user_message):
-            logger.info(f"[SigunService] 읍면동 감지: '{key}'")
-            return key
+            matched_keys.append(key)
+
+    if matched_keys:
+        best_key = min(matched_keys, key=lambda k: (user_message.find(k), -len(k), k))
+        logger.info(f"[SigunService] 읍면동 감지: '{best_key}' (candidates={matched_keys})")
+        return best_key
 
     # location_dict 미매칭 시 정규식 fallback
     m = re.search(r'([가-힣]{2,6}(?:읍|면|동))', user_message)

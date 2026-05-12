@@ -67,6 +67,39 @@ def test_extract_eupmyeondong_matches_pipeline_for_hoewon() -> None:
     assert got == "회원동", f"expected 회원동, got {got!r}"
 
 
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "양산 상북면행정복지센터 연락처",
+        "양산 상북면 행정복지센터 연락처",
+        "양산 상북면사무소 연락처",
+        "양산 상북면 면사무소 연락처",
+    ],
+)
+def test_extract_eupmyeondong_prefers_sangbukmyeon_over_bukmyeon(msg: str) -> None:
+    from app.chat.sigun import extract_eupmyeondong_from_message
+
+    got = extract_eupmyeondong_from_message(msg)
+    assert got == "상북면", f"expected 상북면, got {got!r} for msg={msg!r}"
+
+
+def test_check_sigun_first_turn_sangbukmyeon_does_not_fall_back_to_changwon() -> None:
+    from app.chat.sigun import check_sigun
+
+    query = "상북면 동사무소 연락처"
+    messages = [
+        {
+            "role": "assistant",
+            "content": "안녕하세요 경상남도청 복지챗봇입니다. 살고 계시는 지역과 함께 궁금한 복지서비스가 있다면 질문해 주세요.",
+        },
+        {"role": "user", "content": query},
+    ]
+
+    sigun_filters, need_clarify, _ = check_sigun(query, messages)
+    assert need_clarify is False
+    assert sigun_filters == ["경상남도 양산시"], f"unexpected sigun_filters: {sigun_filters!r}"
+
+
 @pytest.mark.skipif(
     os.environ.get("WELFARE_TEL_MARINER_TEST", "").strip().lower() not in ("1", "true", "yes"),
     reason="실 Mariner 검색은 WELFARE_TEL_MARINER_TEST=1 일 때만 실행",
