@@ -94,7 +94,7 @@ def _format_facility_for_prompt(doc: Dict[str, Any], index: int) -> str:
 
 
 def _format_our_region_tel_for_prompt(doc: Dict[str, Any], index: int) -> str:
-    """OUR_REGION_TEL 포맷 — classification_search_prompt §5-2·§8 [행복복지센터 연락처 정보] 형식"""
+    """OUR_REGION_TEL 포맷 — classification_search_prompt §5-2·§8 [행정복지센터 연락처 정보] 형식"""
     sigun = str(doc.get("SIGUN", "") or "").strip() or "정보 없음"
     center = str(doc.get("CENTER", "") or "").strip() or "정보 없음"
     eup = str(doc.get("EUPMYEONDONG", "") or "").strip() or "정보 없음"
@@ -102,7 +102,7 @@ def _format_our_region_tel_for_prompt(doc: Dict[str, Any], index: int) -> str:
     tel = str(doc.get("TEL", "") or "").strip() or "정보 없음"
 
     return (
-        f"[행복복지센터 연락처 정보]\n"
+        f"[행정복지센터 연락처 정보]\n"
         f"{index}. {center}\n"
         f"- 시군: {sigun}\n"
         f"- 읍면동: {eup}\n"
