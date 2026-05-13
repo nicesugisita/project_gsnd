@@ -280,6 +280,7 @@ async def process_rag_with_documents_v2(
             fb_a_docs = await collect_okms_groupa_fallback_docs(
                 message=message,
                 reformed_query=reformed_query,
+                policy_priority_tag=precomputed_policy_priority_tag,
                 expanded_queries=expanded_queries,
                 tri_built=tri_built,
                 per_query_limit=_COMP_GA_PER_QUERY,

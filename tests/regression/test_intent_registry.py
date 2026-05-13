@@ -86,8 +86,10 @@ def test_recommended_question_spec_resolves():
         ("comparison",      False, "guide_recommend"),
         ("guide_recommend", False, "guide_recommend"),
         (None,              False, "guide_recommend"),
-        # MORE_DETAIL: search 유지 / 나머지는 general 로 좁힘
-        ("search",          True,  "search"),
+        # MORE_DETAIL: search 는 사용자 발화에 연락처/주소 keyword 가 있을 때만 유지,
+        # 그 외(빈 발화 포함)는 모두 general 로 좁힘.
+        # search 정책: 시설 + 위치/연락처 류 전용 (운영시간/서비스 디테일은 general).
+        ("search",          True,  "general"),  # user_message 빈 경우 → general 폴백
         ("general",         True,  "general"),
         ("guide_recommend", True,  "general"),
         ("comparison",      True,  "general"),
@@ -99,6 +101,22 @@ def test_resolve_reused_intent_on_more(prior_intent, more_detail, expected):
     from app.chat.intent_registry import resolve_reused_intent_on_more
 
     assert resolve_reused_intent_on_more(prior_intent, more_detail=more_detail) == expected
+
+
+def test_resolve_reused_intent_on_more_search_with_contact_keyword():
+    """user_message 에 연락처/주소 keyword 가 있을 때만 search 유지."""
+    from app.chat.intent_registry import resolve_reused_intent_on_more
+
+    # 연락처 keyword 있음 → search 유지
+    assert resolve_reused_intent_on_more(
+        "search", more_detail=True,
+        user_message="가야읍 행정복지센터 전화번호",
+    ) == "search"
+    # 연락처 keyword 없음 (사업 디테일 요청) → general
+    assert resolve_reused_intent_on_more(
+        "search", more_detail=True,
+        user_message="장애아동수당 자세히",
+    ) == "general"
 
 
 # ---------------------------------------------------------------------------

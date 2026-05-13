@@ -151,7 +151,39 @@ def normalize_intent(intent: str | None) -> str:
     return lookup(intent).name
 
 
-def resolve_reused_intent_on_more(prior_intent: str | None, *, more_detail: bool) -> str:
+# search 정의(unified_preprocessing_prompt.txt): 시설/기관 + 위치·주소·전화·연락처·홈페이지·길찾기.
+# MORE_DETAIL 시 prior=search 였더라도 사용자 발화에 아래 연락처류 키워드가 없으면
+# 사업/제도 디테일 요청으로 보고 general 로 좁힌다.
+_FACILITY_CONTACT_KEYWORDS: tuple[str, ...] = (
+    "연락처",
+    "전화",
+    "전화번호",
+    "폰",
+    "주소",
+    "위치",
+    "홈페이지",
+    "길찾기",
+    "찾아가는",
+    "찾아가기",
+    "오는길",
+    "오는 길",
+)
+
+
+def _is_facility_contact_query(text: str) -> bool:
+    """시설 자체의 위치/연락처를 묻는 query 인지 — search 의 정의 그대로."""
+    if not text:
+        return False
+    haystack = str(text)
+    return any(kw in haystack for kw in _FACILITY_CONTACT_KEYWORDS)
+
+
+def resolve_reused_intent_on_more(
+    prior_intent: str | None,
+    *,
+    more_detail: bool,
+    user_message: str = "",
+) -> str:
     """MORE_INFO/MORE_DETAIL 후속 발화 시 RAG 처리에 사용할 intent 라벨.
 
     기존 코드 (`_streaming.py:497~518`, `router.py:354~365`) 의 분기 로직을
@@ -160,11 +192,17 @@ def resolve_reused_intent_on_more(prior_intent: str | None, *, more_detail: bool
     - more_detail=False (MORE_INFO):
         guide_recommend 로 묶어 처리 (현재 디자인)
     - more_detail=True (MORE_DETAIL):
-        prior_intent 가 search 면 그대로 유지, 아니면 general 로 좁힌다
+        prior_intent 가 search 이고 **현재 발화에 연락처/주소류 키워드가 있을 때만** search 유지.
+        그 외(사업·제도 디테일 요청)는 general 로 좁힌다.
+
+        배경: 이전엔 prior=search 면 무조건 search 유지였으나, 사용자가 직전 turn 이 아닌
+        그 이전 turn 의 사업명을 명시해 디테일을 요청해도 search 로 가서 시설 검색을 돌리는
+        버그가 있었음(예: 직전이 "행정복지센터 연락처" search, 현재가 "장애아동수당 자세히").
+        search 의 정의는 시설/기관 + 위치·연락처 류이므로 그 외 디테일은 모두 general.
     """
     if not more_detail:
         return INTENT_REGISTRY["guide_recommend"].name
     prior = normalize_intent(prior_intent) if prior_intent else DEFAULT_INTENT_NAME
-    if prior == "search":
+    if prior == "search" and _is_facility_contact_query(user_message):
         return "search"
     return DEFAULT_INTENT_NAME

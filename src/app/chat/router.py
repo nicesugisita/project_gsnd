@@ -361,7 +361,9 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         if more_detected and more_last_preprocess:
             previous_intent = str(more_last_preprocess.get("intent") or "general")
             reused_intent = resolve_reused_intent_on_more(
-                previous_intent, more_detail=llm_detected_more_detail
+                previous_intent,
+                more_detail=llm_detected_more_detail,
+                user_message=user_message,
             )
             try:
                 reused_keywords = extract_nouns(user_message)

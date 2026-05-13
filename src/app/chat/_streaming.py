@@ -506,7 +506,9 @@ async def _streaming_chat_flow(
             await _update_user_message(chat_request.messages, user_message)
             previous_intent = str(more.last_preprocess.get("intent") or "general")
             reused_intent = resolve_reused_intent_on_more(
-                previous_intent, more_detail=more.more_detail
+                previous_intent,
+                more_detail=more.more_detail,
+                user_message=user_message,
             )
             preprocess_data = _build_preprocess_from_history(
                 user_message,
