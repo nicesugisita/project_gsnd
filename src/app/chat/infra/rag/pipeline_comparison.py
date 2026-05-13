@@ -34,7 +34,6 @@ from app.chat.infra.rag import (
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
-from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.routing import (
     expand_query,
     extract_triples,
@@ -47,9 +46,6 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
-    resolve_fallback_max_expanded_queries,
-    run_sufficiency_with_shortcut,
-    should_rerun_sufficiency_judgment,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,10 +88,6 @@ async def process_rag_with_documents_v2(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
-        _COMP_FALLBACK_MAX_EXPANDED = resolve_fallback_max_expanded_queries(
-            policy_priority_tag=precomputed_policy_priority_tag,
-            policy_search_boost_enabled=not _skip_policy_boost,
-        )
         selected_collection = Config.RAG_OKMS_COLLECTION
         logger.debug(f"[RAG/comparison_v2] 컬렉션: {selected_collection}")
 
@@ -302,97 +294,6 @@ async def process_rag_with_documents_v2(
                 reverse=True,
             )[:_COMP_FINAL_TOP_N]
             logger.info(f"[RAG/comparison_v2] Fallback 후: {len(okms_final)}개 (FB-A {len(fb_a_docs)}개)")
-
-        # ====================================================================
-        # Step 5-S: OKMS 적합성 판단 (LLM)
-        # ====================================================================
-        _t = time.monotonic()
-        okms_sufficiency = await run_sufficiency_with_shortcut(
-            judge_fn=retrieval_sufficiency_judgment,
-            user_question=message,
-            intent=intent,
-            collection_name=Config.RAG_OKMS_COLLECTION,
-            docs=okms_final,
-            sigun_filters=comp_sigun_filters,
-            log_prefix="RAG/comparison_v2",
-        )
-        logger.info("[TIMING][comparison] Step5-S OKMS 적합성 판단 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(
-            f"[RAG/comparison_v2] OKMS 적합성: sufficient={okms_sufficiency['sufficient']}, "
-            f"reason={okms_sufficiency['reason']}"
-        )
-
-        # ====================================================================
-        # Step 6: OKMS 2차 Fallback (확장쿼리 기반 보강 검색, OKMS 부족 시)
-        # ====================================================================
-        if okms_sufficiency["sufficient"]:
-            logger.info("[RAG/comparison_v2] OKMS 결과 충분 — 2차 Fallback 생략")
-        else:
-            if status_callback:
-                await status_callback("검색을 보강하고 있습니다")
-            _t = time.monotonic()
-            if precomputed_expanded_queries:
-                _candidates = precomputed_expanded_queries
-                logger.info("[RAG/comparison_v2] fallback: 사전 계산 확장 쿼리 사용")
-            else:
-                _candidates = await expand_query(reformed_query)
-            logger.info("[TIMING][comparison] Step5-S2 fallback 쿼리확장: %.3fs", time.monotonic() - _t)
-            fallback_expanded_queries = dedupe_cap_expanded_queries(
-                _candidates or [], max_n=_COMP_FALLBACK_MAX_EXPANDED, reformed_query=reformed_query
-            )
-            if fallback_expanded_queries:
-                _t = time.monotonic()
-                fallback_triples = await asyncio.gather(*[extract_triples(eq) for eq in fallback_expanded_queries])
-                fallback_tri_built = [
-                    " ".join(k.strip() for k in filter_okms_keywords(kws) if k and k.strip())
-                    for kws in fallback_triples
-                ]
-                _prev_okms_docs = list(okms_final)
-                fb_docs = await collect_okms_groupa_and_gov_fallback_docs(
-                    message=message,
-                    reformed_query=reformed_query,
-                    policy_priority_tag=precomputed_policy_priority_tag,
-                    expanded_queries=fallback_expanded_queries,
-                    tri_built=fallback_tri_built,
-                    per_query_limit=_COMP_GA_PER_QUERY,
-                    run_group_a=_group_a_run,
-                    run_gov=_run_gov_okms_query,
-                    max_policy_pairs=1,
-                    policy_search_boost_enabled=not _skip_policy_boost,
-                )
-                logger.info("[TIMING][comparison] Step5-S2 fallback 보강검색: %.3fs", time.monotonic() - _t)
-                if fb_docs:
-                    okms_final = sorted(
-                        _deduplicate_documents(okms_final + fb_docs),
-                        key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                        reverse=True,
-                    )[:_COMP_FINAL_TOP_N]
-                    logger.info("[RAG/comparison_v2] fallback 보강 후 OKMS: %d개", len(okms_final))
-                    if should_rerun_sufficiency_judgment(
-                        before_docs=_prev_okms_docs,
-                        after_docs=okms_final,
-                    ) and not (excluded_chunk_ids or excluded_service_names):
-                        _t = time.monotonic()
-                        okms_sufficiency = await run_sufficiency_with_shortcut(
-                            judge_fn=retrieval_sufficiency_judgment,
-                            user_question=message,
-                            intent=intent,
-                            collection_name=Config.RAG_OKMS_COLLECTION,
-                            docs=okms_final,
-                            sigun_filters=comp_sigun_filters,
-                            log_prefix="RAG/comparison_v2",
-                        )
-                        logger.info("[TIMING][comparison] Step5-S3 fallback 재판단: %.3fs", time.monotonic() - _t)
-                        logger.info(
-                            "[RAG/comparison_v2] fallback 재판단: sufficient=%s, reason=%s",
-                            okms_sufficiency["sufficient"],
-                            okms_sufficiency["reason"],
-                        )
-                    else:
-                        if excluded_chunk_ids or excluded_service_names:
-                            logger.info("[RAG/comparison_v2] fallback 재판단 스킵: more_info 모드")
-                        else:
-                            logger.info("[RAG/comparison_v2] fallback 재판단 스킵: 개선 폭 미미")
 
         # OKMS 결과 정렬
         top_docs = sorted(

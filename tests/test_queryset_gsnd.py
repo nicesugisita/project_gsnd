@@ -205,6 +205,38 @@ def test_gsnd_skips_compli_dt_filter_when_disabled(monkeypatch: pytest.MonkeyPat
     assert cmd._queryset.query.filter_set is None
 
 
+def test_gsnd_caps_search_time_exclusion_not_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """제외 ID 가 cap 초과면 검색단 WhereSet 에는 cap 개수만 NOT pair 로 들어가야 한다.
+
+    배경: NOT pair 가 많아지면 Mariner 쿼리 트리가 폭증해 -60004(타임아웃)이 난다.
+    잔여분은 호출부의 filter_excluded_docs(post-filter)가 처리한다.
+    """
+    _install_fake_mariner(monkeypatch, rows=[])
+
+    cap = queryset_gsnd._MARINER_SEARCH_EXCLUSION_CAP
+    excluded = [f"EX{idx:04d}" for idx in range(cap + 5)]  # cap + 5 개
+
+    queryset_gsnd.query_GSND_general_documents(
+        "창원시 연금",
+        collection=Config.RAG_COLLECTION,
+        excluded_chunk_ids=excluded,
+        apply_year_filter=False,
+    )
+
+    cmd = _FakeCommandSearchRequest.last_instance
+    assert cmd is not None and cmd._queryset is not None and cmd._queryset.query is not None
+    where_set = cmd._queryset.query.where_set_array or []
+    # NOT + EXACT 쌍 카운트 — EXACT 측 args[0] 가 ID/CHUNK_ID 인 WhereSet 만 센다
+    id_field = "CHUNK_ID"
+    not_id_pairs = sum(
+        1 for ws in where_set
+        if ws.args and ws.args[0] == id_field
+    )
+    assert not_id_pairs == cap, (
+        f"cap={cap} 만큼만 검색단 NOT pair 로 들어가야 하는데 실제={not_id_pairs}"
+    )
+
+
 def test_gsnd_returns_rows_and_excludes_chunk_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [
         {

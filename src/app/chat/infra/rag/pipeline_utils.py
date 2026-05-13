@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 from contextlib import contextmanager
 from itertools import zip_longest
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -19,101 +18,6 @@ from app.chat.infra.rag.policy_priority import (
 from .document import _get_document_snippet, _get_document_name
 
 logger = logging.getLogger(__name__)
-
-
-FALLBACK_MAX_EXPANDED_DEFAULT = 2
-FALLBACK_MAX_EXPANDED_ELDERLY = 1
-FALLBACK_REJUDGE_MIN_DOC_GAIN = 1
-FALLBACK_REJUDGE_MIN_TOP_WEIGHT_GAIN = 0.03
-SUFFICIENCY_JUDGMENT_TIMEOUT_SEC = 4.0
-SUFFICIENCY_JUDGMENT_MAX_DOCS = 8
-
-# ---- 적합성 판정 휴리스틱 단축 ----
-# 검색 결과가 명확히 충분한 케이스(상위 문서 BUSINESS_NAME에 사용자 핵심어가 그대로 들어있는 경우)는
-# LLM 판정을 생략한다. 보수적으로 적용해 false-positive 위험 최소화.
-SUFFICIENCY_SHORTCUT_MIN_DOCS = 3
-SUFFICIENCY_SHORTCUT_MIN_ANCHOR_LEN = 3
-# 시군명/일반어는 anchor 후보에서 배제해 false-positive 차단
-_SUFFICIENCY_SHORTCUT_ANCHOR_STOPWORDS = {
-    "지원", "정보", "안내", "신청", "방법", "대상", "조건", "사업",
-    "제도", "서비스", "복지", "문의", "내용", "절차", "기준",
-}
-_SUFFICIENCY_NUMERIC_RE = re.compile(r"^\d{1,4}(?:년|년도)?$")
-
-
-def _tokenize_for_shortcut(text: str) -> List[str]:
-    tokens: List[str] = []
-    for raw in str(text or "").split():
-        tok = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
-        if len(tok) < SUFFICIENCY_SHORTCUT_MIN_ANCHOR_LEN:
-            continue
-        if tok in _SUFFICIENCY_SHORTCUT_ANCHOR_STOPWORDS:
-            continue
-        if _SUFFICIENCY_NUMERIC_RE.fullmatch(tok):
-            continue
-        tokens.append(tok)
-    return tokens
-
-
-def _doc_business_name(doc: Dict[str, Any]) -> str:
-    for key in ("BUSINESS_NAME", "BUSINESS_NAME_KO", "NAME", "ORG_NM"):
-        value = str(doc.get(key, "") or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def shortcut_sufficiency_by_anchor(
-    *,
-    user_question: str,
-    docs: List[Dict[str, Any]],
-    sigun_filters: Optional[List[str]] = None,
-    log_prefix: str = "RAG",
-) -> Optional[Dict[str, Any]]:
-    """검색 결과가 명확히 충분하면 LLM 판정 없이 sufficient=True 반환.
-
-    조건(모두 충족 시 단축):
-    - docs 개수 >= SUFFICIENCY_SHORTCUT_MIN_DOCS
-    - 사용자 질의에서 추출한 anchor 토큰(>=3자, 시군명/일반어/연도 제외)이 존재
-    - 상위 1건 문서의 BUSINESS_NAME 류 필드에 anchor 포함
-
-    조건 미충족 시 None → 호출측은 LLM 판정으로 폴백.
-    """
-    if not docs or len(docs) < SUFFICIENCY_SHORTCUT_MIN_DOCS:
-        return None
-
-    candidate_tokens = _tokenize_for_shortcut(user_question)
-    if not candidate_tokens:
-        return None
-
-    # 시군명 토큰은 anchor 후보에서 제외 (예: "창원", "진주")
-    banned: set[str] = set()
-    for s in sigun_filters or []:
-        s = str(s or "").strip()
-        if not s:
-            continue
-        banned.add(s)
-        banned.add(s.replace("경상남도", "").strip())
-        banned.update(_tokenize_for_shortcut(s))
-
-    anchors = [t for t in candidate_tokens if t not in banned]
-    if not anchors:
-        return None
-
-    top_name = _doc_business_name(docs[0])
-    if not top_name:
-        return None
-
-    matched_anchor = next((t for t in anchors if t in top_name), None)
-    if not matched_anchor:
-        return None
-
-    reason = f"shortcut_anchor_top1:{matched_anchor}"
-    logger.info(
-        "[%s] sufficiency shortcut: %s | top_name=%s | docs=%d",
-        log_prefix, reason, top_name[:60], len(docs),
-    )
-    return {"sufficient": True, "reason": reason}
 
 
 @contextmanager
@@ -175,16 +79,6 @@ def _create_llm_params(
     return params
 
 
-def _is_sufficient(
-    docs: List[Dict[str, Any]],
-    min_count: int = 5,
-    weight_threshold: float = 0.75,
-) -> bool:
-    """WEIGHT >= weight_threshold 인 문서가 min_count개 이상이면 충분하다고 판단"""
-    qualified = [d for d in docs if float(d.get("WEIGHT", 0) or 0) >= weight_threshold]
-    return len(qualified) >= min_count
-
-
 def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """문서 중복 제거 (CHUNK_ID 기준, 동일 CHUNK_ID 중 WEIGHT 최고값 유지)"""
     best: Dict[str, Dict[str, Any]] = {}
@@ -214,118 +108,6 @@ def _okms_dual_query_for_search(
     if not policy_search_boost_enabled:
         return (vector_q or "").strip(), (keyword_q or "").strip()
     return augment_okms_dual_query(policy_priority_tag, vector_q, keyword_q or "")
-
-
-def resolve_fallback_max_expanded_queries(
-    *,
-    policy_priority_tag: Optional[str],
-    default_max: int = FALLBACK_MAX_EXPANDED_DEFAULT,
-    policy_search_boost_enabled: bool = True,
-) -> int:
-    """질문군별 fallback 확장 쿼리 상한을 반환."""
-    if not policy_search_boost_enabled:
-        return default_max
-    tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
-    if "elderly_benefits" in tags:
-        return FALLBACK_MAX_EXPANDED_ELDERLY
-    return default_max
-
-
-def should_rerun_sufficiency_judgment(
-    before_docs: List[Dict[str, Any]],
-    after_docs: List[Dict[str, Any]],
-    *,
-    min_doc_gain: int = FALLBACK_REJUDGE_MIN_DOC_GAIN,
-    min_top_weight_gain: float = FALLBACK_REJUDGE_MIN_TOP_WEIGHT_GAIN,
-) -> bool:
-    """fallback 후 재판단 필요 여부(문서 수/상위 weight 개선 기반)."""
-    before_n = len(before_docs or [])
-    after_n = len(after_docs or [])
-    if (after_n - before_n) >= min_doc_gain:
-        return True
-
-    def _top_weight(docs: List[Dict[str, Any]]) -> float:
-        if not docs:
-            return 0.0
-        return max(float(d.get("WEIGHT", 0) or 0) for d in docs)
-
-    return (_top_weight(after_docs) - _top_weight(before_docs)) >= min_top_weight_gain
-
-
-async def run_sufficiency_with_shortcut(
-    *,
-    judge_fn: Callable[..., Awaitable[Dict[str, Any]]],
-    user_question: str,
-    intent: str,
-    collection_name: str,
-    docs: List[Dict[str, Any]],
-    sigun_filters: Optional[List[str]] = None,
-    timeout_sec: float = SUFFICIENCY_JUDGMENT_TIMEOUT_SEC,
-    max_docs: int = SUFFICIENCY_JUDGMENT_MAX_DOCS,
-    log_prefix: str = "RAG",
-) -> Dict[str, Any]:
-    """휴리스틱 단축이 가능하면 LLM 호출 없이 즉시 충분 판정, 아니면 LLM 폴백.
-
-    Config.RAG_SUFFICIENCY_FAST_PATH_ENABLED=False면 단축을 건너뛴다.
-    """
-    if Config.RAG_SUFFICIENCY_FAST_PATH_ENABLED:
-        shortcut = shortcut_sufficiency_by_anchor(
-            user_question=user_question,
-            docs=docs,
-            sigun_filters=sigun_filters,
-            log_prefix=log_prefix,
-        )
-        if shortcut is not None:
-            return shortcut
-
-    return await run_sufficiency_judgment_fast(
-        judge_fn=judge_fn,
-        user_question=user_question,
-        intent=intent,
-        collection_name=collection_name,
-        docs=docs,
-        timeout_sec=timeout_sec,
-        max_docs=max_docs,
-        log_prefix=log_prefix,
-    )
-
-
-async def run_sufficiency_judgment_fast(
-    *,
-    judge_fn: Callable[..., Awaitable[Dict[str, Any]]],
-    user_question: str,
-    intent: str,
-    collection_name: str,
-    docs: List[Dict[str, Any]],
-    timeout_sec: float = SUFFICIENCY_JUDGMENT_TIMEOUT_SEC,
-    max_docs: int = SUFFICIENCY_JUDGMENT_MAX_DOCS,
-    log_prefix: str = "RAG",
-) -> Dict[str, Any]:
-    """적합성 판단 호출을 타임아웃/문서수 cap으로 보호한다."""
-    target_docs = list(docs or [])[:max_docs]
-    if len(docs or []) > len(target_docs):
-        logger.debug(
-            "[%s] sufficiency docs cap: %d -> %d",
-            log_prefix,
-            len(docs or []),
-            len(target_docs),
-        )
-    try:
-        return await asyncio.wait_for(
-            judge_fn(
-                user_question=user_question,
-                intent=intent,
-                collection_name=collection_name,
-                docs=target_docs,
-            ),
-            timeout=timeout_sec,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("[%s] sufficiency timeout(%.1fs) -> graceful fallback", log_prefix, timeout_sec)
-        return {"sufficient": False, "reason": "judgment_timeout"}
-    except Exception as e:
-        logger.warning("[%s] sufficiency error(%s) -> graceful fallback", log_prefix, e)
-        return {"sufficient": False, "reason": "judgment_error"}
 
 
 async def collect_okms_groupa_and_gov_docs(
@@ -368,9 +150,16 @@ async def collect_okms_groupa_and_gov_docs(
         for v, k in policy_extra_pairs
     ]
 
-    gov_strings = list(expanded_queries) + [sq for sq in tri_built if sq]
-    for vec_q, kw_q in policy_extra_pairs:
-        gov_strings.append(vec_q)
+    # GOV_OKMS는 핵심어(tri_built)만 사용한다.
+    # expanded_queries를 함께 쓰면 "복지", "지원" 같은 공통 토큰이 OP_HASANY로 매칭돼
+    # 치매 질의에 산림복지·장애인지원 같은 무관 서비스가 상위를 차지하는 오매칭 발생.
+    gov_strings = [sq for sq in tri_built if sq]
+    if not gov_strings:
+        # tri_built 전체가 빈 경우(명사 추출 실패 등) reformed_query 단일 fallback
+        if reformed_query.strip():
+            gov_strings = [reformed_query.strip()]
+    for _vec_q, kw_q in policy_extra_pairs:
+        # policy 추가 검색의 긴 vector 문자열은 제외하고 핵심 키워드만 전달
         if kw_q:
             gov_strings.append(kw_q)
     gov_okms_futures = [loop.run_in_executor(None, run_gov, s) for s in gov_strings]
@@ -519,9 +308,12 @@ async def collect_okms_groupa_and_gov_fallback_docs(
         for vec, kw in fb_pairs
     ]
 
-    gov_queries = list(expanded_queries) + [sq for sq in tri_built if sq]
-    for vec_q, kw_q in policy_pairs:
-        gov_queries.append(vec_q)
+    # GOV_OKMS는 핵심어(tri_built)만 사용한다 (expanded_queries 제외).
+    gov_queries = [sq for sq in tri_built if sq]
+    if not gov_queries:
+        if reformed_query.strip():
+            gov_queries = [reformed_query.strip()]
+    for _vec_q, kw_q in policy_pairs:
         if kw_q:
             gov_queries.append(kw_q)
     fb_gov_futures = [

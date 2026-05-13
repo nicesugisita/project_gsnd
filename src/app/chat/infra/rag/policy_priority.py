@@ -508,7 +508,14 @@ def _pick_distinct_keywords(keywords: Tuple[str, ...], *, n: int) -> List[str]:
 # OP_VECTOR_SEARCH는 검색어로부터 임베딩을 생성하므로 동일 키워드를 N회 반복하면
 # 임베딩 중심이 해당 키워드 방향으로 이동한다. OP_HASANY 계열은 토큰 집합 매칭이라
 # 반복 자체로는 가중치가 늘지 않으므로, 반복 부스트는 벡터 검색용 문자열에만 적용한다.
-_POLICY_BOOST_VECTOR_REPEAT: int = 3
+#
+# Side effect 완화(2026-05): 과도한 boost로 원본 쿼리 의미가 희석되는 문제 →
+# - VECTOR_REPEAT 3 → 2 (boost 강도 약화)
+# - VECTOR_ANCHOR_MAX 1 (벡터에 추가하는 anchor 키워드 개수)
+# - KEYWORD_EXTRA_MAX 2 (OP_HASANY 토큰 폭증 방지)
+_POLICY_BOOST_VECTOR_REPEAT: int = 2
+_POLICY_BOOST_VECTOR_ANCHOR_MAX: int = 1
+_POLICY_BOOST_KEYWORD_EXTRA_MAX: int = 2
 
 
 def _repeat_for_vector_boost(keyword: str, n: int = _POLICY_BOOST_VECTOR_REPEAT) -> str:
@@ -573,21 +580,25 @@ def augment_okms_dual_query(
     if not kws:
         return vec, kw
 
-    # vector: 반복 삽입으로 임베딩 부스트
+    # vector: 반복 삽입으로 임베딩 부스트 (anchor 1개만 — 과도한 임베딩 왜곡 방지)
     low_vec = vec.casefold()
-    for needle in _pick_distinct_keywords(kws, n=2):
+    for needle in _pick_distinct_keywords(kws, n=_POLICY_BOOST_VECTOR_ANCHOR_MAX):
         if needle.casefold() not in low_vec:
             vec = f"{vec} {_repeat_for_vector_boost(needle)}".strip()
             low_vec = vec.casefold()
 
     # keyword: 토큰 커버리지 보강 (반복 무효 → 1회 추가)
+    # 모든 키워드를 OP_HASANY 토큰에 풀면 노인복지 문서 거의 전부 매칭되므로 상한 적용
     if kw and kws:
         kw_cf = kw.casefold()
-        extra = [
-            t
-            for t in kws
-            if t.strip() and t.strip().casefold() not in kw_cf
-        ]
+        extra: List[str] = []
+        for t in kws:
+            tok = t.strip()
+            if not tok or tok.casefold() in kw_cf:
+                continue
+            extra.append(tok)
+            if len(extra) >= _POLICY_BOOST_KEYWORD_EXTRA_MAX:
+                break
         if extra:
             kw = f"{kw} {' '.join(extra)}".strip()
 
@@ -607,16 +618,14 @@ def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) ->
         return []
 
     if "elderly_benefits" in tags:
+        # 추가 검색 쌍을 1개로 제한 (implant/low_income과 일관성 유지, 풀 오염 방지)
         elderly_kws = tag_keywords.get("elderly_benefits", ())
-        anchors = _pick_distinct_keywords(elderly_kws, n=2)
+        anchors = _pick_distinct_keywords(elderly_kws, n=1)
         if not anchors:
             return []
-        pairs: List[Tuple[str, str]] = []
-        for idx, anchor in enumerate(anchors):
-            suffix = " 안내" if idx == 0 else ""
-            boosted = _repeat_for_vector_boost(anchor)
-            pairs.append((f"{rq} {boosted}{suffix}".strip(), anchor))
-        return pairs
+        anchor = anchors[0]
+        boosted = _repeat_for_vector_boost(anchor)
+        return [(f"{rq} {boosted} 안내".strip(), anchor)]
 
     if "implant" in tags:
         implant_kws = _pick_distinct_keywords(tag_keywords.get("implant", ()), n=1)

@@ -96,11 +96,6 @@ def load_rag_norag_judgment_prompt() -> str:
     return _load_prompt_file('rag_norag_judgment_prompt.txt')
 
 
-def load_retrieval_sufficiency_judgment_prompt() -> str:
-    """Load retrieval sufficiency judgment prompt from file."""
-    return _load_prompt_file('retrieval_sufficiency_judgment_prompt.txt')
-
-
 def load_text_cleaning_prompt() -> str:
     """Load Text Cleaning prompt from file."""
     return _load_prompt_file('text_cleaning_prompt.txt')

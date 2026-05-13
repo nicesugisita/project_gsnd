@@ -129,10 +129,6 @@ class Settings(BaseSettings):
     RAG_GOV_OKMS_COLLECTION: str = ""
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
-    RETRIEVAL_JUDGMENT_ENABLED: bool = True
-    # 적합성 판정 LLM(병렬 5건) 호출 전, 명확히 충분한 케이스를 휴리스틱으로 단축할지 여부.
-    # True면 사용자 질의 핵심어가 상위 문서 BUSINESS_NAME에 포함될 때 LLM 판정을 생략한다.
-    RAG_SUFFICIENCY_FAST_PATH_ENABLED: bool = True
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""

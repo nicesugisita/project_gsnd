@@ -32,6 +32,11 @@ from app.mariner.jvm_manager import ensure_jvm_thread
 
 logger = logging.getLogger(__name__)
 
+# 검색단에 NOT pair 로 적용할 제외 ID 의 상한.
+# 초과분은 호출부의 filter_excluded_docs 가 post-filter 로 처리.
+# (NOT pair 가 많아지면 Mariner 쿼리 트리가 커져 -60004 타임아웃 발생)
+_MARINER_SEARCH_EXCLUSION_CAP = 15
+
 
 def _uses_okms_document_schema(collection: Optional[str]) -> bool:
     return (collection or "").strip().upper() == Config.RAG_OKMS_COLLECTION.upper()
@@ -231,6 +236,8 @@ def query_GSND_general_documents(
                 ]
 
         # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
+        # NOT pair 가 많아지면 Mariner 쿼리 트리가 폭증해 -60004(타임아웃) 발생.
+        # 검색단은 cap 까지만 적용하고, 잔여는 호출부의 filter_excluded_docs(post-filter)가 처리한다.
         if excluded_chunk_set:
             excluded_values = sorted(excluded_chunk_set)
             # 컬렉션 스키마별 식별 필드 결정
@@ -239,16 +246,19 @@ def query_GSND_general_documents(
             else:
                 id_field = "CHUNK_ID"
 
-            _n = len(excluded_values)
-            _sample = excluded_values[:20]
+            _n_total = len(excluded_values)
+            search_excluded_values = excluded_values[:_MARINER_SEARCH_EXCLUSION_CAP]
+            _n_applied = len(search_excluded_values)
+            _overflow = _n_total - _n_applied
             logger.info(
-                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs(%d) field=%s: %s%s",
-                _n,
+                "[MoreResults][Mariner/general/GSND] 검색단 제외 IDs 총=%d 적용=%d field=%s%s 샘플=%s",
+                _n_total,
+                _n_applied,
                 id_field,
-                _sample,
-                "..." if _n > 20 else "",
+                f" (cap={_MARINER_SEARCH_EXCLUSION_CAP}, 잔여 {_overflow}건 post-filter)" if _overflow > 0 else "",
+                search_excluded_values[:20],
             )
-            for chunk_id in excluded_values:
+            for chunk_id in search_excluded_values:
                 where_set_array += [
                     jpkg_query.WhereSet(OP_NOT),
                     jpkg_query.WhereSet(id_field, OP_INT_SUMMATION, chunk_id, 0),
