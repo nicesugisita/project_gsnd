@@ -49,7 +49,6 @@ from .pipeline_utils import (
     _build_documents_text,
     _build_qa_messages,
     _create_llm_params,
-    _is_sufficient,
     _deduplicate_documents,
 )
 

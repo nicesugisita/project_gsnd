@@ -129,10 +129,13 @@ class Settings(BaseSettings):
     RAG_GOV_OKMS_COLLECTION: str = ""
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
-    RETRIEVAL_JUDGMENT_ENABLED: bool = True
-    # 적합성 판정 LLM(병렬 5건) 호출 전, 명확히 충분한 케이스를 휴리스틱으로 단축할지 여부.
-    # True면 사용자 질의 핵심어가 상위 문서 BUSINESS_NAME에 포함될 때 LLM 판정을 생략한다.
-    RAG_SUFFICIENCY_FAST_PATH_ENABLED: bool = True
+
+    # Query Rewriting 모드 토글.
+    # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
+    # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
+    # rewrite 모드는 대화 맥락 흡수·모호함 해소·키워드 강화로 정밀도 ↑, Mariner 호출 수 ↓.
+    # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
+    QUERY_REWRITING_ENABLED: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
@@ -185,6 +188,8 @@ class Settings(BaseSettings):
     POLICY_PRIORITY_TABLE: str = "gsnd_policy_priority"
     POLICY_PRIORITY_CACHE_TTL_SEC: int = 1800
     POLICY_PRIORITY_CHANGE_CHECK_SEC: int = 1800
+    # 정책 정적 규칙 YAML(우선순위 tag 별 anchor_keywords 등). 프로젝트 루트 기준 상대경로 허용.
+    POLICY_RULES_PATH: str = "config/policy_rules.yaml"
 
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10

@@ -22,7 +22,6 @@ from app.chat.routing import (
     extract_triples,
     query_recreation,
 )
-from app.chat.retrieval_judgment import retrieval_sufficiency_judgment
 from app.chat.infra.llm import (
     call_llm_api,
     convert_korean_to_standard,
@@ -48,7 +47,6 @@ __all__ = [
     "reform_query_with_history", "reform_query_if_needed",
     "classify_next_intent", "expand_query",
     "extract_triples", "query_recreation",
-    "retrieval_sufficiency_judgment",
     "call_llm_api", "convert_korean_to_standard", "ask_judgment", "re_ask",
     "rag_norag_judgment", "clean_query_text", "mandatory_condition_check",
     "generate_suggested_questions", "convert_to_voice_output",

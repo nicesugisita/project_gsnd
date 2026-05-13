@@ -18,7 +18,10 @@ from app.shared.utils.prompt_loader import load_unified_preprocessing_prompt
 
 logger = logging.getLogger(__name__)
 
-VALID_INTENTS = ("general", "comparison", "guide_recommend", "search")
+# P3: intent_registry 가 단일 진실 공급원. 본 튜플은 하위 호환·import 편의를 위한 별칭.
+from app.chat.intent_registry import get_intent_names as _get_intent_names
+
+VALID_INTENTS = _get_intent_names()
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
 POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})
@@ -171,6 +174,10 @@ async def unified_preprocess(
     if not prompt_template:
         logger.error("[UnifiedPreprocess] 프롬프트 로드 실패 — 폴백 반환")
         return _make_fallback(user_query)
+    logger.debug(
+        "[UnifiedPreprocess] mode=%s",
+        "rewrite" if Config.QUERY_REWRITING_ENABLED else "expand",
+    )
 
     today = date.today()
     prompt_template = (
@@ -220,9 +227,14 @@ async def unified_preprocess(
         expanded = []
         keywords = []
     else:
-        expanded = parsed.get("expanded_queries") or []
-        if not expanded:
-            expanded = [reformed]
+        # Query Rewriting 모드: expanded_queries 를 무조건 [reformed_query] 단일 원소로 강제.
+        # LLM 이 무시하고 5개를 반환해도 무력화 — 단일 검색으로 동작 보장.
+        if Config.QUERY_REWRITING_ENABLED:
+            expanded = [reformed] if reformed else [user_query]
+        else:
+            expanded = parsed.get("expanded_queries") or []
+            if not expanded:
+                expanded = [reformed]
         raw_reformed = reformed
         raw_expanded = list(expanded)
         reformed = sanitize_disability_text(reformed, user_query)

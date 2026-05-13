@@ -1,0 +1,27 @@
+# 정책 우선순위(priority tag) 보조 규칙.
+#
+# 운영자가 코드 변경 없이 정책 보강·재정렬 동작을 조정하기 위한 파일.
+# 본 YAML 은 정책팀이 직접 편집하며, 백엔드는 파일 mtime 변화 시 자동 리로드한다.
+#
+# 본 파일은 "정적·구조적" 정책 데이터만 둔다. 수시로 변동되는 키워드는 DB
+# (`POLICY_PRIORITY_TABLE`) 에서 관리한다 (기존 동작 유지).
+#
+# 스키마:
+#   priority_tags:
+#     <tag>:
+#       anchor_keywords:  # 1티어 부스트(=문서 정렬 1순위)에 사용되는 핵심 키워드
+#         - "..."         # 다중 표기(띄어쓰기 변이 등) 모두 나열
+#
+# 정의된 tag 외의 키는 무시. anchor_keywords 누락 시 빈 목록으로 처리.
+
+priority_tags:
+  # 노인 일반 복지 탐색 시 기초연금 계열을 최상위 부스트.
+  elderly_benefits:
+    anchor_keywords:
+      - "기초연금"
+      - "기초 연금"
+
+  # implant·low_income 은 현재 anchor 없음 (DB 키워드만 사용).
+  # 필요 시 아래 형식으로 추가:
+  # implant:
+  #   anchor_keywords: ["임플란트"]

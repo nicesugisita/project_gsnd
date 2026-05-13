@@ -56,6 +56,10 @@ from app.chat.more_results import (
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.rag import filter_okms_keywords
 from app.chat.routing import classify_next_intent
+from app.chat.intent_registry import (
+    lookup as _lookup_intent_spec,
+    resolve_reused_intent_on_more,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -501,10 +505,10 @@ async def _streaming_chat_flow(
                 user_message = more.last_preprocess["reformed_query"]
             await _update_user_message(chat_request.messages, user_message)
             previous_intent = str(more.last_preprocess.get("intent") or "general")
-            reused_intent = (
-                "guide_recommend"
-                if not more.more_detail
-                else ("search" if previous_intent == "search" else "general")
+            reused_intent = resolve_reused_intent_on_more(
+                previous_intent,
+                more_detail=more.more_detail,
+                user_message=user_message,
             )
             preprocess_data = _build_preprocess_from_history(
                 user_message,
@@ -607,10 +611,11 @@ async def _streaming_chat_flow(
         }
         _capture_preprocess_timings(_timings, preprocess_data, expanded_queries)
 
-        # [7] 생애주기 체크 (guide_recommend 전용, 로그만)
+        # [7] 생애주기 체크 (requires_lifecycle=True 인 intent 전용, 로그만)
         _t_lc = time.monotonic()
         run_lifecycle_check(user_message, chat_request.messages, use_rag, user_intent)
-        if use_rag and user_intent == "guide_recommend":
+        _intent_spec = _lookup_intent_spec(user_intent)
+        if use_rag and _intent_spec.requires_lifecycle:
             _timings["t_lifecycle_check"] = round(time.monotonic() - _t_lc, 3)
 
         logger.info("[Intent Classification] intent=%s", user_intent)
@@ -643,7 +648,7 @@ async def _streaming_chat_flow(
             final_user_message=more.final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )
-        if user_intent == "general":
+        if _intent_spec.supports_detail_form:
             # MORE_DETAIL 후속(이전 대화 기반) 또는 unified_preprocess의 detail_requested(첫 메시지에서 자세히 요청) 중 하나라도 True면 form B 강제
             effective_more_detail = bool(more.more_detail) or bool(preprocess_data.get("detail_requested"))
             if effective_more_detail and not more.more_detail:

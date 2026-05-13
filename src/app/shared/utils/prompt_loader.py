@@ -96,11 +96,6 @@ def load_rag_norag_judgment_prompt() -> str:
     return _load_prompt_file('rag_norag_judgment_prompt.txt')
 
 
-def load_retrieval_sufficiency_judgment_prompt() -> str:
-    """Load retrieval sufficiency judgment prompt from file."""
-    return _load_prompt_file('retrieval_sufficiency_judgment_prompt.txt')
-
-
 def load_text_cleaning_prompt() -> str:
     """Load Text Cleaning prompt from file."""
     return _load_prompt_file('text_cleaning_prompt.txt')
@@ -201,7 +196,17 @@ def load_uploaded_qa_prompt() -> str:
 
 
 def load_unified_preprocessing_prompt() -> str:
-    """Load Unified Preprocessing prompt from file."""
+    """Load Unified Preprocessing prompt — config QUERY_REWRITING_ENABLED 에 따라 분기.
+
+    - True : unified_preprocessing_prompt_rewrite.txt (단일 self-contained 쿼리, expansion 없음)
+    - False(기본): unified_preprocessing_prompt.txt (의미 보존 expansion 5개)
+
+    런타임 분기지만 _load_prompt_file 가 mtime 캐시를 가지므로 양쪽 모두 캐시된다.
+    """
+    # lazy import: Config 의존을 prompt_loader 모듈 초기화에 끌어들이지 않기 위해 지연.
+    from app.core.config import Config
+    if getattr(Config, "QUERY_REWRITING_ENABLED", False):
+        return _load_prompt_file('unified_preprocessing_prompt_rewrite.txt')
     return _load_prompt_file('unified_preprocessing_prompt.txt')
 
 
