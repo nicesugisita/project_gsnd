@@ -37,6 +37,7 @@ from app.chat.more_results import (
     collect_prior_service_names,
 )
 from app.chat.routing import classify_next_intent
+from app.chat.intent_registry import resolve_reused_intent_on_more
 from app.shared.utils.keyword_extractor import extract_nouns
 from ._stream_utils import _build_streaming_response, SSE_RESPONSE_HEADERS
 from ._conversation_ctx import _check_user_limit, _merge_and_init_conversation
@@ -359,10 +360,8 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
         if more_detected and more_last_preprocess:
             previous_intent = str(more_last_preprocess.get("intent") or "general")
-            reused_intent = (
-                "guide_recommend"
-                if not llm_detected_more_detail
-                else ("search" if previous_intent == "search" else "general")
+            reused_intent = resolve_reused_intent_on_more(
+                previous_intent, more_detail=llm_detected_more_detail
             )
             try:
                 reused_keywords = extract_nouns(user_message)

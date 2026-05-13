@@ -22,11 +22,7 @@ from app.chat.sigun import (
     MSG_SIGUN_FAILURE,
     MAX_SIGUN_ASK_ATTEMPTS,
 )
-from app.chat.infra.rag.pipeline_comparison import process_rag_with_documents_v2 as process_rag_comparison
-from app.chat.infra.rag.pipeline_guide_recommend import process_rag_guide_recommend
-from app.chat.infra.rag.pipeline_general import process_rag_general
-from app.chat.infra.rag.pipeline_recommended_question import process_rag_recommended_question
-from app.chat.infra.rag.pipeline_search import process_rag_search
+from app.chat.intent_registry import RECOMMENDED_QUESTION_SPEC, lookup as _lookup_intent_spec
 from app.shared.utils import (
     build_chat_response,
     load_system_prompt,
@@ -77,16 +73,13 @@ def _build_assistant_preprocess_payload(
 
 
 def _get_rag_processor(intent: str, *, recommended_question_route: bool = False):
-    """일반 completions는 intent로, /v1/chat/recommended-question 은 recommended_question_route 로만 분기한다."""
+    """일반 completions는 intent로, /v1/chat/recommended-question 은 recommended_question_route 로만 분기한다.
+
+    intent → processor 매핑은 `chat.intent_registry` 의 IntentSpec 테이블이 담당한다.
+    """
     if recommended_question_route:
-        return process_rag_recommended_question
-    if intent == "comparison":
-        return process_rag_comparison
-    if intent == "guide_recommend":
-        return process_rag_guide_recommend
-    if intent == "search":
-        return process_rag_search
-    return process_rag_general
+        return RECOMMENDED_QUESTION_SPEC.processor
+    return _lookup_intent_spec(intent).processor
 
 
 async def _handle_clarify_response(

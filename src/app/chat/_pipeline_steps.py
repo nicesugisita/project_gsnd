@@ -148,8 +148,14 @@ async def run_unified_preprocess(
 
 
 def run_lifecycle_check(user_message: str, messages: list, use_rag: bool, intent: str) -> None:
-    """[6단계] guide_recommend 전용 생애주기 확인 (로그만 기록, 제어 흐름에 영향 없음)."""
-    if not (use_rag and intent == "guide_recommend"):
+    """[6단계] requires_lifecycle=True intent 전용 생애주기 확인.
+
+    로그만 기록하며 제어 흐름에 영향 없음. intent 별 활성화 여부는
+    `chat.intent_registry.IntentSpec.requires_lifecycle` 메타데이터로 관리.
+    """
+    from app.chat.intent_registry import lookup as _lookup_intent_spec
+
+    if not use_rag or not _lookup_intent_spec(intent).requires_lifecycle:
         return
     lifecycle, need_clarify, _ = check_lifecycle(user_message, messages)
     if need_clarify:

@@ -18,7 +18,10 @@ from app.shared.utils.prompt_loader import load_unified_preprocessing_prompt
 
 logger = logging.getLogger(__name__)
 
-VALID_INTENTS = ("general", "comparison", "guide_recommend", "search")
+# P3: intent_registry 가 단일 진실 공급원. 본 튜플은 하위 호환·import 편의를 위한 별칭.
+from app.chat.intent_registry import get_intent_names as _get_intent_names
+
+VALID_INTENTS = _get_intent_names()
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
 POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})

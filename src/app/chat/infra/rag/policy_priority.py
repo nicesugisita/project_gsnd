@@ -10,6 +10,7 @@ from typing import Any, Dict, FrozenSet, List, Tuple
 
 from app.core.config import Config
 from app.shared.db.connection import get_db_connection
+from app.chat.infra.rag import policy_config
 
 logger = logging.getLogger(__name__)
 
@@ -694,20 +695,23 @@ def apply_policy_priority_to_documents(
         return docs
 
     kws_cf = tuple(kw.casefold() for kw in boost_keywords if kw.strip())
-    _basic_pen_cf = frozenset({"기초연금".casefold(), "기초 연금".casefold()})
+    # P4: elderly_benefits 의 anchor 키워드는 config/policy_rules.yaml 에서 로드.
+    # YAML 없거나 비어 있으면 frozenset() — 결과적으로 has_basic 가 항상 0 이 되어
+    # 기존 elderly_benefits 분기는 일반 hits 정렬과 동일하게 동작 (안전 폴백).
+    _anchor_cf = policy_config.get_anchor_keywords_casefold("elderly_benefits")
 
     def _hit_count(blob: str) -> int:
         return sum(1 for kw in kws_cf if kw in blob)
 
     def _elderly_sort_key(blob: str) -> Tuple[int, int]:
-        """(기초연금·기초 연금 포함 여부, 나머지 부스트 키 적중 수)."""
-        has_basic = any(p in blob for p in _basic_pen_cf)
+        """(anchor 키워드 포함 여부, 나머지 부스트 키 적중 수)."""
+        has_anchor = any(p in blob for p in _anchor_cf)
         sec = sum(
             1
             for kw in kws_cf
-            if kw not in _basic_pen_cf and kw in blob
+            if kw not in _anchor_cf and kw in blob
         )
-        return (1 if has_basic else 0, sec)
+        return (1 if has_anchor else 0, sec)
 
     blobs = [_document_policy_match_blob(d) for d in docs]
 
@@ -729,9 +733,10 @@ def apply_policy_priority_to_documents(
         scored.sort(key=lambda t: (-t[0], -t[1], -t[2], t[3]))
         reordered = [t[4] for t in scored]
         logger.info(
-            "[%s] tags=%s — 노인혜택: 기초연금 1티어 후 나머지 키 조합 (boost_keys=%s)",
+            "[%s] tags=%s — 노인혜택: anchor 1티어(%s) 후 나머지 키 조합 (boost_keys=%s)",
             log_prefix,
             sorted(tags),
+            sorted(_anchor_cf),
             list(boost_keywords),
         )
         return reordered
