@@ -10,6 +10,7 @@ guide_recommend 의도의 검색 및 응답 생성을 별도 파일로 분리한
 import logging
 import asyncio
 import time
+from datetime import date
 from typing import Dict, Any, List, Optional
 
 from app.core.config import Config
@@ -47,6 +48,7 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
+    filter_gov_okms_docs_by_lifecycle,
 )
 logger = logging.getLogger(__name__)
 
@@ -126,12 +128,17 @@ async def process_rag_guide_recommend(
             else:
                 logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
 
-        # 연도 필터: 질의에 연도 없으면 현재 연도 기본 적용
-        gr_year_filters = extract_year_filters(message)
-        if gr_year_filters:
-            logger.debug(f"[RAG/guide_recommend_v2] 연도 필터: {gr_year_filters}")
-        else:
-            logger.debug(f"[RAG/guide_recommend_v2] 연도 필터 미적용")
+        # 연도 필터: guide_recommend 는 항상 현재 연도 문서만 추천 (timeliness 보장).
+        # 사용자가 과거/미래 연도를 명시해도 추천 결과는 현재 연도로 강제.
+        _current_year = str(date.today().year)
+        _user_specified_years = extract_year_filters(message)
+        if _user_specified_years and _user_specified_years != [_current_year]:
+            logger.info(
+                "[RAG/guide_recommend_v2] 사용자 명시 연도=%s → 현재 연도 [%s] 강제 (guide_recommend timeliness)",
+                _user_specified_years, _current_year,
+            )
+        gr_year_filters = [_current_year]
+        logger.debug(f"[RAG/guide_recommend_v2] 연도 필터: {gr_year_filters}")
 
         # Step A-1: 쿼리 확장 (Mariner 검색 전)
         gr_expand_base = reformed_query
@@ -264,8 +271,12 @@ async def process_rag_guide_recommend(
             )
 
         # GOV_OKMS_V1 독립 정렬 → top 3 (쿼터 확정)
+        # GOV_OKMS WHERE 의 LIFE_CYCLE 필터(op 34)가 일관적이지 않아 불일치 문서가 통과하는
+        # 사례 확인됨 → 결정적 post-filter 로 보강. 사용자 lifecycle 없으면 필터 안 함.
+        _gov_okms_pool = _deduplicate_documents(gov_okms_docs)
+        _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle)
         gov_okms_top_docs = sorted(
-            _deduplicate_documents(gov_okms_docs),
+            _gov_okms_pool,
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
         )[:_GR_GOV_OKMS_TOP_N]
@@ -451,10 +462,13 @@ async def process_rag_guide_recommend(
             ]
 
             # 반복별 필터 완화 전략: (lifecycle, year, boost)
+            # NOTE: guide_recommend 의 연도 필터는 정책상 항상 현재 연도 유지 (timeliness).
+            # 따라서 iter3 에서도 year 완화하지 않는다 — 과거 연도 문서가 재귀 보강 결과로
+            # 유입되면 "현재 연도 추천" 의도와 충돌.
             _RELAX_PLAN = [
-                {"lifecycle": False, "year": True,  "boost": _query_policy_boost_enabled},   # iter1: lifecycle off
-                {"lifecycle": False, "year": True,  "boost": False},                          # iter2: boost off
-                {"lifecycle": False, "year": False, "boost": False},                          # iter3: year off
+                {"lifecycle": False, "year": True, "boost": _query_policy_boost_enabled},   # iter1: lifecycle off
+                {"lifecycle": False, "year": True, "boost": False},                          # iter2: boost off
+                {"lifecycle": False, "year": True, "boost": False},                          # iter3: lifecycle/boost 외 완화 없음
             ]
 
             for _iter in range(1, _GR_RECURSIVE_MAX_ITERS + 1):

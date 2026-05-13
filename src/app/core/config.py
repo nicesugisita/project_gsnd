@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
 
+    # Query Rewriting 모드 토글.
+    # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
+    # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
+    # rewrite 모드는 대화 맥락 흡수·모호함 해소·키워드 강화로 정밀도 ↑, Mariner 호출 수 ↓.
+    # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
+    QUERY_REWRITING_ENABLED: bool = False
+
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555

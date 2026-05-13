@@ -174,6 +174,10 @@ async def unified_preprocess(
     if not prompt_template:
         logger.error("[UnifiedPreprocess] 프롬프트 로드 실패 — 폴백 반환")
         return _make_fallback(user_query)
+    logger.debug(
+        "[UnifiedPreprocess] mode=%s",
+        "rewrite" if Config.QUERY_REWRITING_ENABLED else "expand",
+    )
 
     today = date.today()
     prompt_template = (
@@ -223,9 +227,14 @@ async def unified_preprocess(
         expanded = []
         keywords = []
     else:
-        expanded = parsed.get("expanded_queries") or []
-        if not expanded:
-            expanded = [reformed]
+        # Query Rewriting 모드: expanded_queries 를 무조건 [reformed_query] 단일 원소로 강제.
+        # LLM 이 무시하고 5개를 반환해도 무력화 — 단일 검색으로 동작 보장.
+        if Config.QUERY_REWRITING_ENABLED:
+            expanded = [reformed] if reformed else [user_query]
+        else:
+            expanded = parsed.get("expanded_queries") or []
+            if not expanded:
+                expanded = [reformed]
         raw_reformed = reformed
         raw_expanded = list(expanded)
         reformed = sanitize_disability_text(reformed, user_query)

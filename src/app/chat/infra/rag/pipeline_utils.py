@@ -20,6 +20,106 @@ from .document import _get_document_snippet, _get_document_name
 logger = logging.getLogger(__name__)
 
 
+# GOV_OKMS 검색 문자열에서 제거할 광범위 일반어.
+# GOV_OKMS WHERE 의 SERVICE_NAME_KO OP_HASANY(weight=0.7) 가 한 토큰이라도 매칭되면 boost 하므로,
+# "복지/지원/서비스" 같은 거의 모든 복지 서비스명에 들어 있는 토큰을 그대로 두면
+# 무관 서비스가 광범위 매칭됨(예: "창원 노인 복지 추천" → "청소년**복지**시설" 매칭).
+# OKMS 는 sigun 필터로 범위가 좁혀지지만 GOV_OKMS 는 전국 DB라 노이즈가 큰 문제가 됨.
+_GOV_OKMS_KEYWORD_STOPWORDS: frozenset[str] = frozenset({
+    "복지",
+    "지원",
+    "서비스",
+    "사업",
+    "정책",
+    "안내",
+    "프로그램",
+    "추천",
+    "혜택",
+})
+
+
+def _filter_gov_okms_stopwords(query: str) -> str:
+    """공백 분리된 토큰 중 일반어를 제거. 전부 제거되면 원본 반환(검색 신호 보존)."""
+    raw = (query or "").strip()
+    if not raw:
+        return raw
+    tokens = raw.split()
+    filtered = [t for t in tokens if t and t not in _GOV_OKMS_KEYWORD_STOPWORDS]
+    if not filtered:
+        return raw
+    return " ".join(filtered)
+
+
+def filter_gov_okms_docs_by_lifecycle(
+    docs: List[Dict[str, Any]],
+    user_lifecycle: Optional[str],
+) -> List[Dict[str, Any]]:
+    """GOV_OKMS 결과를 LIFE_CYCLE 필드 기준으로 post-filter.
+
+    배경: GOV_OKMS WHERE 의 LIFE_CYCLE 필터(op code 34)가 정의된 OP 상수 목록에 없는
+    undocumented 연산자라 동작이 일관적이지 않음(예: 노년 필터에 "아동, 청년, 청소년"
+    문서가 통과되는 사례 확인). DB 필드를 직접 파싱해 결정적으로 검증한다.
+
+    동작:
+    - user_lifecycle 가 빈값/None: 사용자 질의에서 생애주기 단서가 추출되지 않은
+      경우이므로 **필터 없이 원본 반환** (false negative 방지).
+    - user_lifecycle 지정: GOV_OKMS 표준값으로 매핑(예: "노인" → "노년") 후,
+      문서 LIFE_CYCLE 멀티값(쉼표·세미콜론·슬래시 구분)에 포함되어야 유지.
+    - 문서 LIFE_CYCLE 필드 자체가 빈값: 전체 대상 문서일 수 있어 **보수적으로 유지**.
+    """
+    if not user_lifecycle:
+        return docs
+    if not docs:
+        return docs
+
+    # 매핑은 queryset_gov_okms 의 SSOT 사용 (lazy import 로 순환 회피)
+    try:
+        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
+        target = (_map_lifecycle_for_gov_okms(user_lifecycle) or "").strip()
+    except Exception:
+        target = str(user_lifecycle or "").strip()
+    if not target:
+        return docs
+
+    kept: List[Dict[str, Any]] = []
+    removed_samples: List[str] = []
+    for doc in docs:
+        raw_field = str(doc.get("LIFE_CYCLE", "") or "").strip()
+        if not raw_field:
+            # LIFE_CYCLE 빈값: 전체 대상 가능성 → 유지
+            kept.append(doc)
+            continue
+        # 멀티값 토큰화: "아동,청년,청소년" / "아동;청년" / "아동/청년" / "아동 청년"
+        # 모두 동일하게 분해
+        normalized = raw_field.replace(";", ",").replace("/", ",")
+        tokens = [t.strip() for t in normalized.split(",") if t.strip()]
+        # 공백 구분 케이스도 보강
+        if len(tokens) == 1 and " " in tokens[0]:
+            tokens = [t.strip() for t in tokens[0].split() if t.strip()]
+        if target in tokens:
+            kept.append(doc)
+        else:
+            if len(removed_samples) < 5:
+                _name = (
+                    str(doc.get("NAME", "") or "").strip()
+                    or str(doc.get("SERVICE_NAME", "") or "").strip()
+                    or str(doc.get("CHUNK_ID", "") or "").strip()
+                    or "?"
+                )
+                removed_samples.append(f"{_name}(LIFE_CYCLE={raw_field})")
+
+    if len(kept) < len(docs):
+        logger.info(
+            "[GOV_OKMS][LifecyclePostFilter] target=%s | 입력=%d → %d 유지 (제거 %d건, 샘플=%s)",
+            target,
+            len(docs),
+            len(kept),
+            len(docs) - len(kept),
+            removed_samples,
+        )
+    return kept
+
+
 @contextmanager
 def log_step_banner(logger_obj: logging.Logger, label: str):
     """스텝 시작/끝 배너 로그."""
@@ -151,17 +251,19 @@ async def collect_okms_groupa_and_gov_docs(
     ]
 
     # GOV_OKMS는 핵심어(tri_built)만 사용한다.
-    # expanded_queries를 함께 쓰면 "복지", "지원" 같은 공통 토큰이 OP_HASANY로 매칭돼
-    # 치매 질의에 산림복지·장애인지원 같은 무관 서비스가 상위를 차지하는 오매칭 발생.
-    gov_strings = [sq for sq in tri_built if sq]
-    if not gov_strings:
-        # tri_built 전체가 빈 경우(명사 추출 실패 등) reformed_query 단일 fallback
-        if reformed_query.strip():
-            gov_strings = [reformed_query.strip()]
-    for _vec_q, kw_q in policy_extra_pairs:
-        # policy 추가 검색의 긴 vector 문자열은 제외하고 핵심 키워드만 전달
-        if kw_q:
-            gov_strings.append(kw_q)
+    # - expanded_queries 제외: "복지", "지원" 같은 공통 토큰이 OP_HASANY로 매칭돼
+    #   치매 질의에 산림복지·장애인지원 같은 무관 서비스가 상위 차지하는 오매칭 방지.
+    # - policy_extra anchor 제외: GOV_OKMS는 sigun 필터 없는 전국 DB라
+    #   "기초연금" 같은 anchor가 토크나이저에서 「연금」 토큰으로 분해돼
+    #   농업인연금/국민연금 등 무관 서비스를 광범위하게 매칭시킴.
+    #   정책 boost 는 sigun 필터로 범위가 좁혀지는 OKMS 에서만 적용.
+    # - stopword 제거: 광범위 일반어("복지/지원/서비스" 등)는 OP_HASANY 노이즈 유발 →
+    #   GOV_OKMS 전송 직전에 제거.
+    _raw_gov_strings = [sq for sq in tri_built if sq]
+    if not _raw_gov_strings and reformed_query.strip():
+        _raw_gov_strings = [reformed_query.strip()]
+    gov_strings = [_filter_gov_okms_stopwords(s) for s in _raw_gov_strings]
+    gov_strings = [s for s in gov_strings if s]
     gov_okms_futures = [loop.run_in_executor(None, run_gov, s) for s in gov_strings]
 
     if status_callback:
@@ -308,14 +410,15 @@ async def collect_okms_groupa_and_gov_fallback_docs(
         for vec, kw in fb_pairs
     ]
 
-    # GOV_OKMS는 핵심어(tri_built)만 사용한다 (expanded_queries 제외).
-    gov_queries = [sq for sq in tri_built if sq]
-    if not gov_queries:
-        if reformed_query.strip():
-            gov_queries = [reformed_query.strip()]
-    for _vec_q, kw_q in policy_pairs:
-        if kw_q:
-            gov_queries.append(kw_q)
+    # GOV_OKMS는 핵심어(tri_built)만 사용한다.
+    # - expanded_queries 제외 / policy_extra anchor 제외 (전국 DB 광범위 매칭 방지).
+    # - stopword 제거: 일반어 OP_HASANY 노이즈 차단.
+    # - 정책 boost 는 sigun 필터가 있는 OKMS 검색에서만 효과적.
+    _raw_gov_queries = [sq for sq in tri_built if sq]
+    if not _raw_gov_queries and reformed_query.strip():
+        _raw_gov_queries = [reformed_query.strip()]
+    gov_queries = [_filter_gov_okms_stopwords(s) for s in _raw_gov_queries]
+    gov_queries = [s for s in gov_queries if s]
     fb_gov_futures = [
         loop.run_in_executor(None, run_gov, s)
         for s in gov_queries
