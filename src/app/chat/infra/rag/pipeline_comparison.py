@@ -175,11 +175,14 @@ async def process_rag_with_documents_v2(
         # ====================================================================
         def _group_a_run(vector: str, keywords: str):
             try:
+                # 비교형 질의는 lifecycle 카테고리를 넘나드는 경우가 많아 lifecycle 필터를
+                # 강제하면 한쪽 사업이 검색 단계에서 제외됨(예: 장애수당[성인] vs 장애아동수당[아동]).
+                # 사업명 anchor가 정합성을 잡아주므로 검색 폭이 과도하게 넓어지지 않음.
                 return query_group_a_documents(
                     vector, keywords, selected_collection,
                     year_filters=comp_year_filters or None,
                     sigun_filters=comp_sigun_filters,
-                    lifecycle_filter=comp_lifecycle or None,
+                    lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
