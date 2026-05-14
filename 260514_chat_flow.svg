@@ -1,0 +1,389 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="2280" viewBox="0 0 1300 2280" font-family="'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',system-ui,sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#555"/>
+    </marker>
+    <marker id="arrowDashed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#999"/>
+    </marker>
+    <style>
+      .flow-line { stroke:#555; stroke-width:2; fill:none; marker-end:url(#arrow); }
+      .flow-line-dashed { stroke:#999; stroke-width:1.8; stroke-dasharray:6,4; fill:none; marker-end:url(#arrowDashed); }
+      .branch-line { stroke:#555; stroke-width:2; fill:none; }
+      .lbl-title { font-size:22px; font-weight:bold; fill:#1a1a1a; }
+      .lbl-sub { font-size:13px; fill:#7f8c8d; }
+      .lbl-section { font-size:16px; font-weight:bold; }
+      .lbl-step-num { font-size:13px; font-weight:bold; }
+      .lbl-step-name { font-size:13px; font-weight:bold; fill:#222; }
+      .lbl-step-desc { font-size:11px; fill:#444; }
+      .lbl-fn { font-size:11px; fill:#999; font-family:Consolas,monospace; }
+      .lbl-tag { font-size:10px; font-weight:bold; }
+      .lbl-rag-step { font-size:12px; font-weight:bold; fill:#222; }
+      .lbl-rag-desc { font-size:11px; fill:#555; }
+    </style>
+  </defs>
+
+  <rect width="1300" height="2280" fill="#fafafa"/>
+
+  <!-- ===== Title ===== -->
+  <text x="650" y="38" text-anchor="middle" class="lbl-title">경상남도청 RAG 챗봇 — 채팅 처리 전체 흐름</text>
+  <text x="650" y="60" text-anchor="middle" class="lbl-sub">POST /v1/chat/completions · streaming/non-streaming 동일 단계 함수 공유</text>
+
+  <!-- Legend -->
+  <g transform="translate(20, 80)">
+    <rect width="180" height="100" rx="6" fill="white" stroke="#bbb" stroke-width="1"/>
+    <text x="90" y="18" text-anchor="middle" font-size="11" font-weight="bold" fill="#444">범례</text>
+    <rect x="10" y="28" width="14" height="14" fill="#3498db"/><text x="30" y="40" font-size="11" fill="#444">진입/응답</text>
+    <rect x="10" y="46" width="14" height="14" fill="#e67e22"/><text x="30" y="58" font-size="11" fill="#444">LLM 호출</text>
+    <rect x="10" y="64" width="14" height="14" fill="#16a085"/><text x="30" y="76" font-size="11" fill="#444">Mariner 검색</text>
+    <rect x="10" y="82" width="14" height="14" fill="#8e44ad"/><text x="30" y="94" font-size="11" fill="#444">분기/판단</text>
+  </g>
+
+  <!-- ===== Section 1: Entry ===== -->
+  <g transform="translate(450, 100)">
+    <rect width="400" height="56" rx="8" fill="#3498db" stroke="#2874a6" stroke-width="2"/>
+    <text x="200" y="24" text-anchor="middle" fill="white" font-size="14" font-weight="bold">요청 수신 · ChatRequest 생성</text>
+    <text x="200" y="42" text-anchor="middle" fill="#ebf5fb" font-size="11">user_id 정규화 · 로그 컨텍스트 · 세션 초기화 · 메시지 검증</text>
+  </g>
+  <line x1="650" y1="156" x2="650" y2="186" class="flow-line"/>
+
+  <!-- ===== Section 2: classify_next_intent ===== -->
+  <g transform="translate(380, 188)">
+    <rect width="540" height="70" rx="8" fill="#fef5e7" stroke="#e67e22" stroke-width="2"/>
+    <text x="270" y="22" text-anchor="middle" fill="#a04000" font-size="13" font-weight="bold">classify_next_intent() — 후속 의도 분류 [LLM]</text>
+    <text x="270" y="40" text-anchor="middle" fill="#5d4037" font-size="11">MORE_INFO · MORE_DETAIL · NEW_SEARCH · REFINE_SEARCH · CLARIFY_REPLY</text>
+    <text x="270" y="56" text-anchor="middle" fill="#5d4037" font-size="11">→ 직전 검색 재사용 / 노출 chunk·service 제외 / 주제 전환 처리</text>
+  </g>
+  <line x1="650" y1="258" x2="650" y2="290" class="flow-line"/>
+
+  <!-- ===== Section 3: 8-step pipeline ===== -->
+  <g transform="translate(80, 290)">
+    <rect width="1140" height="540" rx="10" fill="#f4f9f4" stroke="#27ae60" stroke-width="2"/>
+    <text x="570" y="28" text-anchor="middle" class="lbl-section" fill="#1e7d3a">전처리 파이프라인 (src/app/chat/_pipeline_steps.py)</text>
+
+    <!-- [1] PreCheck -->
+    <g transform="translate(40, 50)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#e67e22" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#e67e22">[1]</text>
+      <text x="40" y="20" class="lbl-step-name">Pre-Check</text>
+      <text x="14" y="38" class="lbl-step-desc">RAG 사용 여부 + 되묻기(clarification) 감지</text>
+      <text x="14" y="54" class="lbl-step-desc" font-style="italic">is_clarification이면 스킵</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_pre_check()</text>
+      <rect x="430" y="44" width="76" height="14" rx="3" fill="#e67e22"/>
+      <text x="468" y="55" text-anchor="middle" class="lbl-tag" fill="white">LLM 호출</text>
+    </g>
+
+    <!-- [2] Early Sigun -->
+    <g transform="translate(580, 50)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#34495e" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#34495e">[2]</text>
+      <text x="40" y="20" class="lbl-step-name">조기 시군 확인</text>
+      <text x="14" y="38" class="lbl-step-desc">되묻기 답변일 때 query_recreation 전 시군 확정</text>
+      <text x="14" y="54" class="lbl-step-desc" font-style="italic">is_clarification &amp; use_rag일 때만 실행</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_early_sigun_check()</text>
+    </g>
+
+    <!-- [3] Query Recreation -->
+    <g transform="translate(40, 124)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#e67e22" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#e67e22">[3]</text>
+      <text x="40" y="20" class="lbl-step-name">쿼리 재구성</text>
+      <text x="14" y="38" class="lbl-step-desc">멀티턴 문맥 반영한 검색 쿼리 재생성</text>
+      <text x="14" y="54" class="lbl-step-desc" font-style="italic">MORE_INFO · NEW_SEARCH · general 후속 시 스킵</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">_run_query_recreation()</text>
+      <rect x="430" y="44" width="76" height="14" rx="3" fill="#e67e22"/>
+      <text x="468" y="55" text-anchor="middle" class="lbl-tag" fill="white">LLM 호출</text>
+    </g>
+
+    <!-- [4] Out of scope -->
+    <g transform="translate(580, 124)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#34495e" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#34495e">[4]</text>
+      <text x="40" y="20" class="lbl-step-name">범위 체크 (Out-of-Scope)</text>
+      <text x="14" y="38" class="lbl-step-desc">경남 외 지역 질문 감지</text>
+      <text x="14" y="54" class="lbl-step-desc" font-style="italic">감지 시 안내 메시지 반환 후 종료</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_out_of_scope_check()</text>
+    </g>
+
+    <!-- [5] Sigun Check -->
+    <g transform="translate(40, 198)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#8e44ad" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#8e44ad">[5]</text>
+      <text x="40" y="20" class="lbl-step-name">시군 체크 + 되묻기</text>
+      <text x="14" y="38" class="lbl-step-desc">시·군 추출 실패 시 되묻기 메시지 반환</text>
+      <text x="14" y="54" class="lbl-step-desc" font-style="italic">최대 MAX_CLARIFY_ATTEMPTS(3) 회 후 포기</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_sigun_check()</text>
+    </g>
+
+    <!-- [6] Unified Preprocess -->
+    <g transform="translate(580, 198)">
+      <rect width="520" height="64" rx="6" fill="white" stroke="#e67e22" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#e67e22">[6]</text>
+      <text x="40" y="20" class="lbl-step-name">통합 전처리 (1 LLM 호출)</text>
+      <text x="14" y="38" class="lbl-step-desc">query · intent · reformed_query · expanded_queries</text>
+      <text x="14" y="54" class="lbl-step-desc">+ search_target · policy_priority_tag (+ kiwi keywords)</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_unified_preprocess()</text>
+      <rect x="430" y="44" width="76" height="14" rx="3" fill="#e67e22"/>
+      <text x="468" y="55" text-anchor="middle" class="lbl-tag" fill="white">LLM 호출</text>
+    </g>
+
+    <!-- [6-MORE] -->
+    <g transform="translate(40, 272)">
+      <rect width="1060" height="50" rx="6" fill="#fdf2f8" stroke="#c0392b" stroke-width="1.5" stroke-dasharray="5,3"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#c0392b">[6-MORE]</text>
+      <text x="100" y="20" class="lbl-step-name">MORE_INFO/MORE_DETAIL 또는 general 후속 → 통합 전처리 LLM 스킵, 히스토리 preprocess 재사용</text>
+      <text x="14" y="40" class="lbl-step-desc">MORE_INFO는 직전 intent 무시하고 <tspan font-weight="bold" fill="#c0392b">guide_recommend로 강제</tspan> · MORE_DETAIL은 노출 문서 제외 X (동일 문서 상세 요구이므로)</text>
+    </g>
+
+    <!-- [7] Lifecycle -->
+    <g transform="translate(40, 332)">
+      <rect width="520" height="56" rx="6" fill="white" stroke="#34495e" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-step-num" fill="#34495e">[7]</text>
+      <text x="40" y="20" class="lbl-step-name">생애주기 체크</text>
+      <text x="14" y="40" class="lbl-step-desc">guide_recommend 전용 — 출생연도 → 생애주기 변환 로그</text>
+      <text x="506" y="20" text-anchor="end" class="lbl-fn">run_lifecycle_check()</text>
+    </g>
+
+    <!-- [Result Box] -->
+    <g transform="translate(580, 332)">
+      <rect width="520" height="56" rx="6" fill="#eef7ff" stroke="#2980b9" stroke-width="1.8"/>
+      <text x="14" y="20" font-size="12" font-weight="bold" fill="#2980b9">통합 전처리 결과 (PreprocessResult)</text>
+      <text x="14" y="38" font-size="11" fill="#444">intent · reformed_query · expanded_queries · keywords</text>
+      <text x="14" y="52" font-size="11" fill="#444">+ sigun_filters · search_target · policy_priority_tag · more_detail</text>
+    </g>
+
+    <!-- Internal arrow chain -->
+    <line x1="300" y1="114" x2="300" y2="124" class="flow-line"/>
+    <line x1="840" y1="114" x2="840" y2="124" class="flow-line"/>
+    <line x1="300" y1="188" x2="300" y2="198" class="flow-line"/>
+    <line x1="840" y1="188" x2="840" y2="198" class="flow-line"/>
+    <line x1="300" y1="262" x2="300" y2="272" class="flow-line"/>
+    <line x1="300" y1="322" x2="300" y2="332" class="flow-line"/>
+
+    <!-- Result label -->
+    <text x="570" y="430" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e7d3a">↓ 의도별 RAG 파이프라인으로 분기 ↓</text>
+  </g>
+
+  <line x1="650" y1="830" x2="650" y2="864" class="flow-line"/>
+
+  <!-- ===== Section 4: Intent branching ===== -->
+  <g transform="translate(80, 866)">
+    <text x="570" y="20" text-anchor="middle" class="lbl-section" fill="#8e44ad">[8] RAG 실행 — _handle_rag_mode(intent)</text>
+
+    <!-- 4 branch boxes -->
+    <g transform="translate(0, 36)">
+      <rect width="270" height="80" rx="6" fill="white" stroke="#16a085" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#16a085">general</text>
+      <text x="135" y="42" text-anchor="middle" font-size="11" fill="#444">기본 — 복지/행정 일반 질의</text>
+      <text x="135" y="58" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">pipeline_general.py</text>
+      <text x="135" y="74" text-anchor="middle" font-size="10" fill="#c0392b" font-weight="bold">↓ 아래 상세</text>
+    </g>
+
+    <g transform="translate(290, 36)">
+      <rect width="270" height="80" rx="6" fill="white" stroke="#7f8c8d" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#7f8c8d">comparison</text>
+      <text x="135" y="42" text-anchor="middle" font-size="11" fill="#444">두 서비스 비교</text>
+      <text x="135" y="58" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">pipeline_comparison.py</text>
+      <text x="135" y="74" text-anchor="middle" font-size="10" fill="#666">사업명 앵커 복수화 + DeepServer triple/attr</text>
+    </g>
+
+    <g transform="translate(580, 36)">
+      <rect width="270" height="80" rx="6" fill="white" stroke="#7f8c8d" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#7f8c8d">guide_recommend</text>
+      <text x="135" y="42" text-anchor="middle" font-size="11" fill="#444">맞춤 복지 추천</text>
+      <text x="135" y="58" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">pipeline_guide_recommend.py</text>
+      <text x="135" y="74" text-anchor="middle" font-size="10" fill="#666">생애주기 + 시군 기반</text>
+    </g>
+
+    <g transform="translate(870, 36)">
+      <rect width="270" height="80" rx="6" fill="white" stroke="#7f8c8d" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-size="13" font-weight="bold" fill="#7f8c8d">search</text>
+      <text x="135" y="42" text-anchor="middle" font-size="11" fill="#444">키워드 단순 검색</text>
+      <text x="135" y="58" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">pipeline_search.py</text>
+      <text x="135" y="74" text-anchor="middle" font-size="10" fill="#666">search_target → WELFARE_TEL/WELFARE/OKMS</text>
+    </g>
+
+    <!-- branch lines from top center to each box top -->
+    <path d="M 570 0 L 570 22 L 135 22 L 135 36" class="branch-line"/>
+    <path d="M 570 22 L 425 22 L 425 36" class="branch-line"/>
+    <path d="M 570 22 L 715 22 L 715 36" class="branch-line"/>
+    <path d="M 570 22 L 1005 22 L 1005 36" class="branch-line"/>
+  </g>
+
+  <!-- highlight arrow to general -->
+  <line x1="215" y1="982" x2="215" y2="1010" class="flow-line"/>
+  <text x="225" y="1000" font-size="11" fill="#c0392b" font-weight="bold">general 의도 상세 ↓</text>
+
+  <!-- ===== Section 5: General RAG detail ===== -->
+  <g transform="translate(80, 1014)">
+    <rect width="1140" height="990" rx="10" fill="#e8f8f5" stroke="#16a085" stroke-width="2"/>
+    <text x="570" y="28" text-anchor="middle" class="lbl-section" fill="#0e6655">general RAG 파이프라인 (process_rag_general)</text>
+    <text x="570" y="48" text-anchor="middle" font-size="12" fill="#117864">OKMS / GOV_OKMS / GSND 동시 병렬 수집 → 정렬 → 부스팅 → 관련성 필터 → 최종 응답</text>
+
+    <!-- Step 1+3+4: pre-search prep -->
+    <g transform="translate(40, 70)">
+      <rect width="340" height="100" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 1] 쿼리 확장</text>
+      <text x="14" y="36" class="lbl-rag-desc">precomputed_expanded_queries → dedupe_cap</text>
+      <text x="14" y="50" class="lbl-rag-desc">없으면 expand_query() 폴백</text>
+      <text x="14" y="72" class="lbl-rag-step">[Step 3] 키워드(트리플) 추출</text>
+      <text x="14" y="86" class="lbl-rag-desc">precomputed_keywords + filter_okms_keywords()</text>
+    </g>
+
+    <g transform="translate(400, 70)">
+      <rect width="340" height="100" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 4] 필터 추출</text>
+      <text x="14" y="38" class="lbl-rag-desc">SIGUN: 외부 인자 우선 / 메시지 추출</text>
+      <text x="14" y="54" class="lbl-rag-desc">LIFECYCLE: 출생연도 → _birth_year_to_lifecycle()</text>
+      <text x="14" y="70" class="lbl-rag-desc">YEAR: extract_year_filters()</text>
+      <text x="14" y="86" class="lbl-rag-desc" font-style="italic" fill="#888">만 18세는 청년기로 분류</text>
+    </g>
+
+    <g transform="translate(760, 70)">
+      <rect width="340" height="100" rx="6" fill="#fef5e7" stroke="#e67e22" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#a04000">→ 검색 입력</text>
+      <text x="14" y="40" class="lbl-rag-desc">expanded_queries (의미 확장)</text>
+      <text x="14" y="56" class="lbl-rag-desc">+ keyword search strings (kiwi 명사)</text>
+      <text x="14" y="72" class="lbl-rag-desc">+ filters: sigun · year · lifecycle</text>
+      <text x="14" y="88" class="lbl-rag-desc">+ excluded_chunk_ids (MORE_INFO 시)</text>
+    </g>
+
+    <line x1="210" y1="170" x2="210" y2="200" class="flow-line"/>
+    <line x1="570" y1="170" x2="570" y2="200" class="flow-line"/>
+    <line x1="930" y1="170" x2="930" y2="200" class="flow-line"/>
+
+    <!-- Step 5-A: Parallel search -->
+    <g transform="translate(40, 200)">
+      <rect width="1060" height="160" rx="8" fill="#fffbea" stroke="#f1c40f" stroke-width="2"/>
+      <text x="530" y="22" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a7d0a">[Step 5-A] OKMS Group A + GOV_OKMS + GSND_DATASET_V8 동시 병렬 검색</text>
+      <text x="530" y="40" text-anchor="middle" font-size="11" fill="#7d6608">asyncio.gather(okms_task, gsnd_task) · Mariner는 동기 → run_in_executor()로 스레드 풀 실행</text>
+
+      <g transform="translate(20, 56)">
+        <rect width="330" height="90" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+        <text x="165" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a085">OKMS Group A</text>
+        <text x="165" y="38" text-anchor="middle" font-size="11" fill="#444">벡터 + 키워드 듀얼</text>
+        <text x="165" y="54" text-anchor="middle" font-size="11" fill="#444">SIGUN · YEAR · LIFECYCLE 필터</text>
+        <text x="165" y="70" text-anchor="middle" font-size="11" fill="#444">excluded_chunk_ids 적용</text>
+        <text x="165" y="84" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">queryset_okms.py</text>
+      </g>
+
+      <g transform="translate(360, 56)">
+        <rect width="330" height="90" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+        <text x="165" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a085">GOV_OKMS</text>
+        <text x="165" y="38" text-anchor="middle" font-size="11" fill="#444">국가 정부기관 복지카드</text>
+        <text x="165" y="54" text-anchor="middle" font-size="11" fill="#444">LIFECYCLE · SIGUN 필터만</text>
+        <text x="165" y="70" text-anchor="middle" font-size="11" fill="#444">YEAR 필터 없음</text>
+        <text x="165" y="84" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">queryset_gov_okms.py</text>
+      </g>
+
+      <g transform="translate(700, 56)">
+        <rect width="340" height="90" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+        <text x="170" y="20" text-anchor="middle" font-size="12" font-weight="bold" fill="#16a085">GSND_DATASET_V8</text>
+        <text x="170" y="38" text-anchor="middle" font-size="11" fill="#444">경남도청 일반 행정 문서</text>
+        <text x="170" y="54" text-anchor="middle" font-size="11" fill="#c0392b" font-weight="bold">시군 필터 미적용 (메타 비균일)</text>
+        <text x="170" y="70" text-anchor="middle" font-size="11" fill="#c0392b">-60004 타임아웃 → 1회 재시도</text>
+        <text x="170" y="84" text-anchor="middle" font-size="10" fill="#999" font-family="monospace">queryset_gsnd.py</text>
+      </g>
+    </g>
+
+    <line x1="570" y1="360" x2="570" y2="390" class="flow-line"/>
+
+    <!-- Step 6: top N -->
+    <g transform="translate(280, 392)">
+      <rect width="580" height="50" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 6] OKMS + GOV_OKMS 중복 제거 → 가중치 정렬 → 상위 N건 선택</text>
+      <text x="14" y="38" class="lbl-rag-desc">기본 8건 / more_detail=True면 15건 (_GEN_FINAL_TOP_N)</text>
+    </g>
+
+    <line x1="570" y1="442" x2="570" y2="468" class="flow-line"/>
+
+    <!-- Step 6-F: fallback -->
+    <g transform="translate(280, 470)">
+      <rect width="580" height="56" rx="6" fill="#fdf2f8" stroke="#c0392b" stroke-width="1.5" stroke-dasharray="5,3"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#c0392b">[Step 6-F] OKMS Fallback (결과 0건일 때)</text>
+      <text x="14" y="38" class="lbl-rag-desc">생애주기 + 사업명 앵커 제거 후 재검색 (시군·연도·제외는 유지)</text>
+      <text x="14" y="52" class="lbl-rag-desc" font-style="italic">apply_business_anchor=False, lifecycle_filter=None</text>
+    </g>
+
+    <line x1="570" y1="526" x2="570" y2="552" class="flow-line"/>
+
+    <!-- Step 7: GSND merge -->
+    <g transform="translate(280, 554)">
+      <rect width="580" height="50" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 7] GSND 상위 3건 (more_detail이면 7건) 보강 + OKMS 합산</text>
+      <text x="14" y="38" class="lbl-rag-desc">중복 제거 → 가중치 내림차순 정렬</text>
+    </g>
+
+    <line x1="570" y1="604" x2="570" y2="630" class="flow-line"/>
+
+    <!-- Step 7-C: policy + relevance -->
+    <g transform="translate(40, 632)">
+      <rect width="510" height="80" rx="6" fill="#fef9e7" stroke="#f1c40f" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#9a7d0a">[Step 7-C] 정책 우선순위 부스팅</text>
+      <text x="14" y="38" class="lbl-rag-desc">apply_policy_priority_to_documents()</text>
+      <text x="14" y="54" class="lbl-rag-desc">policy_priority_tag(implant/low_income/elderly_benefits)</text>
+      <text x="14" y="70" class="lbl-rag-desc" font-style="italic">제외 목록 있는 후속 검색에서는 비활성</text>
+    </g>
+
+    <g transform="translate(560, 632)">
+      <rect width="540" height="80" rx="6" fill="#fef5e7" stroke="#e67e22" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#a04000">[Step 7-C] LLM 관련성 필터 [8b/sllm]</text>
+      <text x="14" y="38" class="lbl-rag-desc">filter_irrelevant_docs() — 질문 무관 문서 제거</text>
+      <text x="14" y="54" class="lbl-rag-desc">sigun_filters 인자로 시군 무관 문서도 함께 제외</text>
+      <text x="14" y="70" class="lbl-rag-desc" font-style="italic">more_detail이면 max_judgment_docs=20</text>
+      <rect x="436" y="62" width="92" height="14" rx="3" fill="#e67e22"/>
+      <text x="482" y="73" text-anchor="middle" class="lbl-tag" fill="white">LLM 호출</text>
+    </g>
+
+    <line x1="570" y1="712" x2="570" y2="738" class="flow-line"/>
+
+    <!-- Step 7-C-3, 7-C-4 fallback chain -->
+    <g transform="translate(40, 740)">
+      <rect width="1060" height="56" rx="6" fill="#fdf2f8" stroke="#c0392b" stroke-width="1.5" stroke-dasharray="5,3"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#c0392b">[Step 7-C-3 / 7-C-4] 0건 회복 절차</text>
+      <text x="14" y="38" class="lbl-rag-desc">관련성 필터 0건 → Group A 하위 문서로 재시도 → Fallback 재검색 + 관련성 필터 재적용</text>
+      <text x="14" y="52" class="lbl-rag-desc" font-style="italic">최종 0건이면 "답변을 찾을 수 없습니다" 반환 (Step 7-C-2)</text>
+    </g>
+
+    <line x1="570" y1="796" x2="570" y2="822" class="flow-line"/>
+
+    <!-- Step 7-D: sort -->
+    <g transform="translate(280, 824)">
+      <rect width="580" height="50" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 7-D] sort_weight_top30_then_year()</text>
+      <text x="14" y="38" class="lbl-rag-desc">상위 30%는 YEAR 최신순 / 나머지는 WEIGHT 내림차순 → top_docs</text>
+    </g>
+
+    <line x1="570" y1="874" x2="570" y2="900" class="flow-line"/>
+
+    <!-- Step 8 + 9 -->
+    <g transform="translate(40, 902)">
+      <rect width="510" height="70" rx="6" fill="white" stroke="#16a085" stroke-width="1.5"/>
+      <text x="14" y="20" class="lbl-rag-step">[Step 8] build_referenced_documents()</text>
+      <text x="14" y="38" class="lbl-rag-desc">프론트 표시용 출처 메타데이터 구성</text>
+      <text x="14" y="54" class="lbl-rag-desc">(referenced_service_names · chunk_ids · 데이터셋 ID)</text>
+    </g>
+
+    <g transform="translate(560, 902)">
+      <rect width="540" height="70" rx="6" fill="#fef5e7" stroke="#e67e22" stroke-width="1.8"/>
+      <text x="14" y="20" class="lbl-rag-step" fill="#a04000">[Step 9] generate_final_response_v2() [32b/luxia]</text>
+      <text x="14" y="38" class="lbl-rag-desc">의도별 프롬프트 + reformed_query + top_docs → LLM</text>
+      <text x="14" y="54" class="lbl-rag-desc" font-style="italic">stream=True면 SSE 스트리밍 제너레이터</text>
+      <rect x="438" y="46" width="90" height="14" rx="3" fill="#e67e22"/>
+      <text x="483" y="57" text-anchor="middle" class="lbl-tag" fill="white">LLM 호출</text>
+    </g>
+  </g>
+
+  <line x1="650" y1="2004" x2="650" y2="2042" class="flow-line"/>
+
+  <!-- ===== Section 6: Final response ===== -->
+  <g transform="translate(390, 2046)">
+    <rect width="520" height="60" rx="8" fill="#3498db" stroke="#2874a6" stroke-width="2"/>
+    <text x="260" y="24" text-anchor="middle" fill="white" font-size="14" font-weight="bold">SSE 스트리밍 응답 → 클라이언트</text>
+    <text x="260" y="44" text-anchor="middle" fill="#ebf5fb" font-size="11">상태 메시지 (status event) + LLM 토큰 delta + referenced_documents</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="650" y="2160" text-anchor="middle" font-size="11" fill="#95a5a6">자세한 단계별 코드 위치는 260514_README.md 8장(채팅 파이프라인) · 9장(general RAG) 참조</text>
+  <text x="650" y="2178" text-anchor="middle" font-size="10" fill="#bdc3c7">생성일: 2026-05-14</text>
+</svg>

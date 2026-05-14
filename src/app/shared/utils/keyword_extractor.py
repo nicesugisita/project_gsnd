@@ -61,5 +61,5 @@ def extract_nouns(text: str, min_length: int = 2, use_bigram: bool = False) -> l
                     _add(tok.form + nxt.form)
 
         i += 1
-
+    print(f"====================================추출된 명사: {keywords}")
     return keywords
