@@ -46,7 +46,6 @@ async def fetch_converted_text(text: str, voice_prompt: str) -> str:
     # 이 부분은 캐시가 없을 때만 실행됩니다.
     call_messages = [{"role": "user", "content": f"TTS 변환: {text}"}]
 
-    # timeout을 10초 내외로 짧게 잡아 병목 방지
     response = await call_llm_api(
         temperature=0,
         messages=call_messages,

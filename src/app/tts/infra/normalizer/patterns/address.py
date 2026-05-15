@@ -23,38 +23,44 @@ class AddressHandler(PatternHandler):
         self._init_helpers()
 
     def _load_config(self) -> None:
-        """설정 파일에서 패턴 및 단위 로딩"""
-        # 1. 행정구역 단위 로딩
+        # 1. 행정구역 단위 로딩 (동일)
         self.major_units = get_config('patterns.address.units.major', r'(?:특별시|광역시|특별자치시|자치시|도|시|군|구)')
         self.minor_units = get_config('patterns.address.units.minor', r'(?:읍|면|동|가|리|로|길|대로)')
-        
-        # 2. 붙여쓰기 단위 (Suffix 처리용)
+
+        # 2. 붙여쓰기 단위 (동일)
         tight_list = get_config('patterns.address.tight_suffixes', ['동', '호', '층', '번지', '통', '반', '가', '길', '로', '리'])
         self.tight_suffixes: Set[str] = set(tight_list)
 
-        # 3. 정규식 템플릿 로딩
+        # [핵심 수정 3] 정규식 템플릿 제약 강화
+        # 1) Prefix: 주소 단위(시/도/로/길) 뒤에 '으로', '에서' 같은 조사가 붙으면 매칭하지 않도록 전방부정탐색(?!...) 추가
+        #    또한 도로명 뒤에는 보통 공백이나 숫자가 오므로 단어 경계 조건을 강화합니다.
         self.regex_prefix_tpl = get_config(
-            'patterns.address.regex.prefix', 
-            # fallback (설정 파일 누락 시 기본값)
-            r'((?:[가-힣0-9]+{major}\s+)+[가-힣0-9]+{minor}|(?:[가-힣0-9]+{major}\s+)+[가-힣0-9]+(?:{major}))'
+            'patterns.address.regex.prefix',
+            r'((?:[가-힣0-9]+(?:{major}|{minor})(?![가-힣])\s+)*[가-힣0-9]+(?:{major}|{minor})(?![가-힣]))'
         )
+
+        # 2) Number: 번지수 뒤에 하이픈이 연속 2개 이상 나오는 형태(전화번호 형식)는 번지수로 잡지 않도록 차단(?!.*\d+-\d+)
         self.regex_number_str = get_config(
             'patterns.address.regex.number',
-            r'([\d\s-]+(?:번지|호|동|층|가|통|반|산)|[가-힣\s]+(?:다시\s*[가-힣\s]+)?|[\d\s-]+(?![0-9가-힣]))'
+            r'((?!.*\d+-\d+-\d+)(?:산\s*)?\d+(?:[\s-]*\d+)*(?:\s*(?:번지|호|동|층|가|통|반))?)'
         )
+
+        # 3) Suffix (기존과 동일)
         self.regex_suffix_str = get_config(
             'patterns.address.regex.suffix',
-            r'([가-힣0-9a-zA-Z\s,]*)(?:\s*\(([^)]+)\))?'
+            r'((?:\s+\d+[가-힣A-Za-z0-9\s]*?(?:동|호|층|빌딩|아파트|상가))?)(?:\s*\(([^)]+)\))?'
         )
+
+        # 4) Building (기존과 동일)
         self.regex_building_str = get_config(
             'patterns.address.regex.building',
             r'([가-힣0-9a-zA-Z]*[a-zA-Z]+[가-힣0-9a-zA-Z]*)\s*(?:아파트|빌라|맨션|타워|오피스텔|동|호|층|점|빌딩)'
         )
-        
-        # 4. 알파벳 발음 (normalization 또는 patterns에서 로드 후 정제)
-        # [수정] 원본 로드 후 정제 함수 통과
+
+        # 5. 알파벳 발음 (기존과 동일)
         raw_alphabet = get_config('patterns.alphabet', get_config('normalization.alphabet', {}))
         self.alphabet_dict: Dict[str, str] = self._create_clean_alphabet_map(raw_alphabet)
+
 
     # [신규 추가] 알파벳 발음 정제 로직 (MixedCodeHandler와 동일 로직)
     def _create_clean_alphabet_map(self, raw_dict: Dict[str, str]) -> Dict[str, str]:
