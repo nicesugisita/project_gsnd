@@ -177,13 +177,15 @@ async def process_rag_with_documents_v2(
             try:
                 # 비교형 질의는 lifecycle 카테고리를 넘나드는 경우가 많아 lifecycle 필터를
                 # 강제하면 한쪽 사업이 검색 단계에서 제외됨(예: 장애수당[성인] vs 장애아동수당[아동]).
-                # 사업명 anchor가 정합성을 잡아주므로 검색 폭이 과도하게 넓어지지 않음.
+                # 사업명 anchor도 한쪽 시군 사업명에만 들어간 단어("시술비")가 anchor로 잡히면
+                # 다른 시군 사업이 전부 탈락하므로 비교 검색에서는 끈다.
                 return query_group_a_documents(
                     vector, keywords, selected_collection,
                     year_filters=comp_year_filters or None,
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    apply_business_anchor=False,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] Group A 검색 실패: {e}")

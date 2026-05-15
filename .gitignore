@@ -87,3 +87,15 @@ uv.lock
 .copilot/
 .github/prompts/local/
 .github/chatmodes/local/
+
+
+log/
+qa_test/*
+260514_chat_flow.svg
+260514_README_summary.md
+260514_README(참고용).md
+
+_test_response.json
+_test_response_v4.json
+_test_response_v5.json
+

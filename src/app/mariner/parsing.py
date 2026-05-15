@@ -25,8 +25,12 @@ def parse_file(file_path: str, timeout: int = 120) -> str:
         "test", conf_path, file_path,
     ]
 
+    env = os.environ.copy()
+    path_sep = ";" if os.name == "nt" else ":"
+    env["PATH"] = library_path + path_sep + env.get("PATH", "")
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Document parsing timeout") from exc
 
