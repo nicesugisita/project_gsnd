@@ -167,7 +167,7 @@ def _birth_year_to_lifecycle(birth_year: int, current_year: int = None) -> str:
         return "영유아"
     elif age <= 12:
         return "아동"
-    elif age <= 18:
+    elif age < 18:
         return "청소년"
     elif age <= 39:
         return "청년"

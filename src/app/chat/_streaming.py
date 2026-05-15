@@ -723,20 +723,11 @@ async def _streaming_chat_flow(
                 return
 
         raw_referenced_documents = list(referenced_documents or [])
-        filtered_referenced_documents = _filter_referenced_documents_by_response(
-            assistant_content,
-            referenced_documents,
-        )
-        if raw_referenced_documents:
-            _persist_referenced_documents = raw_referenced_documents
-            if not filtered_referenced_documents:
-                logger.info(
-                    "[MoreResults] conv_id=%s | 응답 매칭 0건 → 히스토리 raw referenced_documents 보존(%d건)",
-                    chat_request.conv_id,
-                    len(raw_referenced_documents),
-                )
-        else:
-            _persist_referenced_documents = filtered_referenced_documents
+        # 응답 본문 alias 매칭 필터 비활성화: LLM이 행정 접미사를 생략하면 alias 매칭이 실패해
+        # 실제 참조 문서가 UI에서 누락되는 false negative 발생. RelevanceFilter(8b/sllm)가 이미
+        # 비관련 문서를 걸렀으므로 그 결과를 그대로 UI 카드와 히스토리에 사용.
+        filtered_referenced_documents = raw_referenced_documents
+        _persist_referenced_documents = raw_referenced_documents
 
         if filtered_referenced_documents:
             yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"

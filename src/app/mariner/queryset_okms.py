@@ -46,10 +46,29 @@ _ANCHOR_STOPWORDS = {
 # 예: "2025", "2025년", "26년", "26", "10년", "1년"
 _NUMERIC_ANCHOR_RE = re.compile(r"^\d{1,4}(?:년|년도)?$")
 
+# WHERE 트리 폭증 방지를 위한 anchor 후보 상한.
+_BUSINESS_ANCHOR_MAX = 3
+
+# 토큰 끝에 붙은 1자 한국어 조사 (사업명을 흡수하지 않도록 일반적인 것만).
+_KOREAN_PARTICLES = frozenset("은는이가을를의과와에도만")
+
 
 def _is_numeric_anchor_token(token: str) -> bool:
     """순수 숫자(연도 포함) 토큰이면 anchor 후보에서 배제."""
     return bool(_NUMERIC_ANCHOR_RE.fullmatch(token or ""))
+
+
+def _strip_korean_particle(token: str) -> str:
+    """토큰 끝에 붙은 1자 한국어 조사 제거.
+
+    "장애수당과" → "장애수당", "기초연금은" → "기초연금".
+    길이 < 3 토큰은 조사처럼 보여도 손상 방지를 위해 그대로 반환.
+    """
+    if not token or len(token) < 3:
+        return token
+    if token[-1] in _KOREAN_PARTICLES:
+        return token[:-1]
+    return token
 
 
 def _tokenize_query_terms(text: str) -> List[str]:
@@ -58,24 +77,28 @@ def _tokenize_query_terms(text: str) -> List[str]:
         tok = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
         if len(tok) < 2:
             continue
-        tokens.append(tok)
+        tokens.append(_strip_korean_particle(tok))
     return tokens
 
 
-def _extract_business_anchor(
+def _extract_business_anchors(
     vector: str,
     keyword: str,
     sigun_filters: Optional[List[str]],
-) -> str:
+) -> List[str]:
     """
-    질의에서 사업명 정합성 앵커 1개를 추출.
-    - vector/keyword 공통 토큰 우선
+    질의에서 사업명 정합성 앵커 후보를 N개까지 추출.
+
+    - vector/keyword 공통 토큰을 vector 단독보다 우선
+    - substring 관계 토큰("장애수당" ⊂ "장애아동수당")도 모두 보존 →
+      비교형 질의에서 두 사업명이 동시에 검색에 부스팅되도록 함
     - 지역명/일반어/연도(숫자) 토큰은 제외
+    - 결과는 `_BUSINESS_ANCHOR_MAX` 로 상한
     """
     vector_tokens = _tokenize_query_terms(vector)
     keyword_tokens = _tokenize_query_terms(keyword)
     if not vector_tokens and not keyword_tokens:
-        return ""
+        return []
 
     banned: set[str] = set(_ANCHOR_STOPWORDS)
     for s in sigun_filters or []:
@@ -87,6 +110,8 @@ def _extract_business_anchor(
         banned.update(t for t in _tokenize_query_terms(s))
 
     def _is_valid_anchor(tok: str) -> bool:
+        if len(tok) < 3:
+            return False
         if tok in banned:
             return False
         if _is_numeric_anchor_token(tok):
@@ -96,18 +121,29 @@ def _extract_business_anchor(
     vec_set = {t for t in vector_tokens if _is_valid_anchor(t)}
     key_set = {t for t in keyword_tokens if _is_valid_anchor(t)}
 
-    # 공통 핵심어를 우선 사용(예: "기초연금")
-    common = sorted((vec_set & key_set), key=len, reverse=True)
-    for tok in common:
-        if len(tok) >= 3:
-            return tok
+    common_sorted = sorted((vec_set & key_set), key=len, reverse=True)
+    vec_only_sorted = sorted((vec_set - set(common_sorted)), key=len, reverse=True)
 
-    # 공통어가 없으면 vector 쪽에서 가장 긴 토큰 사용
-    candidates = sorted(vec_set, key=len, reverse=True)
-    for tok in candidates:
-        if len(tok) >= 3:
-            return tok
-    return ""
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for tok in common_sorted + vec_only_sorted:
+        if tok in seen:
+            continue
+        seen.add(tok)
+        ordered.append(tok)
+        if len(ordered) >= _BUSINESS_ANCHOR_MAX:
+            break
+    return ordered
+
+
+def _extract_business_anchor(
+    vector: str,
+    keyword: str,
+    sigun_filters: Optional[List[str]],
+) -> str:
+    """단일 anchor wrapper — 복수 후보 중 첫 번째를 반환."""
+    anchors = _extract_business_anchors(vector, keyword, sigun_filters)
+    return anchors[0] if anchors else ""
 
 
 def _build_okms_document_name(doc: Dict[str, Any]) -> str:
@@ -273,31 +309,38 @@ def _query_dual_documents(
             ]
 
             # 사업명 정합성 앵커(하드코딩 없이 질의에서 동적 추출)
-            # 예: "창원 기초연금 ..." 질의에서 "기초연금"을 앵커로 사용
+            # 단일 사업: "창원 기초연금 ..." → ["기초연금"]
+            # 비교형:    "장애수당과 장애아동수당 차이" → ["장애수당", "장애아동수당"]
+            #            (substring 관계도 흡수 없이 둘 다 부스팅)
             # apply_business_anchor=False(예: fallback)면 앵커 미적용 → 검색 폭 유지
-            anchor_term = (
-                _extract_business_anchor(
+            anchor_terms = (
+                _extract_business_anchors(
                     vector=str(vector or ""),
                     keyword=str(keyword or ""),
                     sigun_filters=sigun_filters,
                 )
                 if apply_business_anchor
-                else ""
+                else []
             )
-            if anchor_term:
-                anchor = JString(anchor_term)
-                where_set_array += [
-                    jpkg_query.WhereSet(OP_AND),
-                    jpkg_query.WhereSet(OP_BRACE_OPEN),
-                    jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASALL, anchor, MARINER_WEIGHT_HIGH),
-                    jpkg_query.WhereSet(OP_OR),
-                    jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY, anchor, MARINER_WEIGHT_HIGH),
-                    jpkg_query.WhereSet(OP_BRACE_CLOSE),
-                ]
+            if anchor_terms:
+                where_set_array.append(jpkg_query.WhereSet(OP_AND))
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_OPEN))
+                for i, term in enumerate(anchor_terms):
+                    if i > 0:
+                        where_set_array.append(jpkg_query.WhereSet(OP_OR))
+                    a = JString(term)
+                    where_set_array += [
+                        jpkg_query.WhereSet(OP_BRACE_OPEN),
+                        jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASALL, a, MARINER_WEIGHT_HIGH),
+                        jpkg_query.WhereSet(OP_OR),
+                        jpkg_query.WhereSet("BUSINESS_NAME_MI", OP_HASANY, a, MARINER_WEIGHT_HIGH),
+                        jpkg_query.WhereSet(OP_BRACE_CLOSE),
+                    ]
+                where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
                 logger.debug(
                     "[Mariner/%s] 사업명 앵커 적용: %s",
                     log_label,
-                    anchor_term,
+                    anchor_terms,
                 )
 
             # SIGUN 스크립틀릿 필터 (n개 OR)

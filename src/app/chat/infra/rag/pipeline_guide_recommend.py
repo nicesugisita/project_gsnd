@@ -441,6 +441,7 @@ async def process_rag_guide_recommend(
         # - D-1이 전부 필터링한 경우(컬렉션 전체 비관련)면 생략
         # ====================================================================
         _GR_RECURSIVE_MAX_ITERS = 3
+        _recur_added = False  # 재귀로 SLM 미검증 신규 문서가 추가됐는지 추적 (D-1.6 게이트)
         if not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
             logger.info(
                 f"[RAG/guide_recommend_v2] 관련성 필터 후 {len(gr_top_docs)}건 "
@@ -611,6 +612,7 @@ async def process_rag_guide_recommend(
                     apply_enabled=not _skip_policy_boost,
                 )
                 gr_top_docs = list(gr_top_docs) + new_docs
+                _recur_added = True
                 logger.info(
                     f"[RAG/guide_recommend_v2] 재귀 #{_iter} 합산 후: {len(gr_top_docs)}건 "
                     f"(신규 {len(new_docs)}건 추가)"
@@ -626,6 +628,24 @@ async def process_rag_guide_recommend(
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 후 상위 {_GR_TARGET_TOTAL}건 캡: {len(gr_top_docs)}건")
             else:
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 종료: 최종 {len(gr_top_docs)}건")
+
+        # ====================================================================
+        # Step D-1.6: 재귀 보강 후 SLM 관련성 재필터
+        # 재귀(D-1.5) 내부에서는 속도를 위해 SLM 필터를 생략하므로, 응답 직전에 한 번 더 검증.
+        # 재귀로 신규 문서가 추가된 경우에만 실행.
+        # ====================================================================
+        if _recur_added:
+            _t = time.monotonic()
+            gr_top_docs = await filter_irrelevant_docs(
+                reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters
+            )
+            logger.info(
+                "[TIMING][guide_recommend] StepD-1.6 재귀 후 관련성 재필터 [8b/sllm]: %.3fs",
+                time.monotonic() - _t,
+            )
+            logger.info(
+                f"[RAG/guide_recommend_v2] 재귀 후 관련성 재필터 결과: {len(gr_top_docs)}개 문서"
+            )
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순
         gr_top_docs = sort_weight_top30_then_year(gr_top_docs)
