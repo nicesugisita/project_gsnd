@@ -1,0 +1,409 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 2240" font-family="'Segoe UI','Malgun Gothic',sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#047857"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b45309"/>
+    </marker>
+    <linearGradient id="g-blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dbeafe"/>
+      <stop offset="100%" stop-color="#bfdbfe"/>
+    </linearGradient>
+    <linearGradient id="g-green" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d1fae5"/>
+      <stop offset="100%" stop-color="#a7f3d0"/>
+    </linearGradient>
+    <linearGradient id="g-amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="g-purple" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#ddd6fe"/>
+    </linearGradient>
+    <linearGradient id="g-rose" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffe4e6"/>
+      <stop offset="100%" stop-color="#fecdd3"/>
+    </linearGradient>
+    <linearGradient id="g-slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="1480" height="2240" fill="#f8fafc"/>
+
+  <!-- Title -->
+  <text x="740" y="42" font-size="24" font-weight="700" text-anchor="middle" fill="#0f172a">문서 업로드 · 요약 · 질의응답 처리 흐름</text>
+  <text x="740" y="66" font-size="13" text-anchor="middle" fill="#475569">FastAPI → DQJFAttacher 파싱 → LLM 요약 → Mariner 색인 → RAG 기반 질의</text>
+
+  <!-- Lane backgrounds -->
+  <rect x="20"   y="100" width="190" height="2100" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <rect x="220"  y="100" width="290" height="2100" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <rect x="520"  y="100" width="320" height="2100" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <rect x="850"  y="100" width="290" height="2100" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <rect x="1150" y="100" width="310" height="2100" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+
+  <!-- Lane headers -->
+  <rect x="20"   y="100" width="190" height="36" fill="#0f172a" rx="8"/>
+  <rect x="220"  y="100" width="290" height="36" fill="#0f172a" rx="8"/>
+  <rect x="520"  y="100" width="320" height="36" fill="#0f172a" rx="8"/>
+  <rect x="850"  y="100" width="290" height="36" fill="#0f172a" rx="8"/>
+  <rect x="1150" y="100" width="310" height="36" fill="#0f172a" rx="8"/>
+  <text x="115"  y="124" font-size="14" font-weight="700" fill="#f8fafc" text-anchor="middle">Client (UI)</text>
+  <text x="365"  y="124" font-size="14" font-weight="700" fill="#f8fafc" text-anchor="middle">FastAPI Endpoint</text>
+  <text x="680"  y="124" font-size="14" font-weight="700" fill="#f8fafc" text-anchor="middle">Processing Layer</text>
+  <text x="995"  y="124" font-size="14" font-weight="700" fill="#f8fafc" text-anchor="middle">External Services</text>
+  <text x="1305" y="124" font-size="14" font-weight="700" fill="#f8fafc" text-anchor="middle">Storage / DB</text>
+
+  <!-- ==================== STEP 1: UPLOAD ==================== -->
+  <text x="40" y="170" font-size="15" font-weight="700" fill="#1d4ed8">① 파일 업로드</text>
+
+  <rect x="35" y="185" width="160" height="80" fill="url(#g-blue)" stroke="#1d4ed8" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="115" y="208" font-weight="600" fill="#0f172a" text-anchor="middle">사용자</text>
+  <text x="115" y="228" font-size="11" fill="#334155" text-anchor="middle">파일 선택</text>
+  <text x="115" y="246" font-size="11" fill="#334155" text-anchor="middle">FormData 전송</text>
+  <text x="115" y="260" font-size="10" fill="#64748b" text-anchor="middle">user_id, conv_id</text>
+
+  <rect x="230" y="185" width="270" height="80" fill="url(#g-blue)" stroke="#1d4ed8" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="365" y="208" font-weight="600" fill="#0f172a" text-anchor="middle">POST /v1/files/upload</text>
+  <text x="365" y="228" font-size="11" fill="#334155" text-anchor="middle">app/document/_upload.py · upload_file()</text>
+  <text x="365" y="246" font-size="11" fill="#334155" text-anchor="middle">conv_id 없으면 uuid4() 자동 생성</text>
+  <text x="365" y="260" font-size="11" fill="#334155" text-anchor="middle">파일명: {timestamp}_{원본명}</text>
+
+  <rect x="530" y="185" width="300" height="80" fill="url(#g-slate)" stroke="#475569" stroke-width="1.2" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="208" font-weight="600" fill="#0f172a" text-anchor="middle">디스크 저장</text>
+  <text x="680" y="228" font-size="11" fill="#334155" text-anchor="middle">Config.UPLOAD_DIR/{timestamp}_{name}</text>
+  <text x="680" y="246" font-size="11" fill="#334155" text-anchor="middle">동기 file write</text>
+  <text x="680" y="260" font-size="11" fill="#334155" text-anchor="middle">응답: success / filename / path / conv_id</text>
+
+  <rect x="1160" y="185" width="290" height="80" fill="url(#g-slate)" stroke="#475569" stroke-width="1.2" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="210" font-weight="600" fill="#0f172a" text-anchor="middle">로컬 파일시스템 (업로드 영역)</text>
+  <text x="1305" y="232" font-size="11" fill="#334155" text-anchor="middle">UPLOAD_DIR/</text>
+  <text x="1305" y="250" font-size="11" fill="#64748b" text-anchor="middle">원본 바이너리 보관</text>
+
+  <!-- Arrows step 1 -->
+  <line x1="195" y1="225" x2="230" y2="225" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <line x1="500" y1="225" x2="530" y2="225" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <line x1="830" y1="225" x2="1160" y2="225" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- Divider -->
+  <line x1="40" y1="295" x2="1440" y2="295" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+
+  <!-- ==================== STEP 2: EXTRACT + SUMMARIZE ==================== -->
+  <text x="40" y="325" font-size="15" font-weight="700" fill="#047857">② 텍스트 추출 + 요약 + 색인</text>
+
+  <rect x="35" y="345" width="160" height="80" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="115" y="368" font-weight="600" fill="#0f172a" text-anchor="middle">사용자</text>
+  <text x="115" y="388" font-size="11" fill="#334155" text-anchor="middle">서버 경로 전달</text>
+  <text x="115" y="406" font-size="11" fill="#334155" text-anchor="middle">+ collection_name</text>
+
+  <rect x="230" y="345" width="270" height="80" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="365" y="368" font-weight="600" fill="#0f172a" text-anchor="middle">POST /v1/documents/extract-and-summarize</text>
+  <text x="365" y="388" font-size="11" fill="#334155" text-anchor="middle">_download.py · extract_and_summarize_document()</text>
+  <text x="365" y="404" font-size="11" fill="#334155" text-anchor="middle">body: file_path, conv_id, user_id,</text>
+  <text x="365" y="418" font-size="11" fill="#334155" text-anchor="middle">collection_name (선택)</text>
+
+  <!-- 2-1 parse_file -->
+  <rect x="530" y="345" width="300" height="100" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="368" font-weight="600" fill="#0f172a" text-anchor="middle">2-1 parse_file() — DQJFAttacher</text>
+  <text x="680" y="386" font-size="11" fill="#334155" text-anchor="middle">app/mariner/parsing.py</text>
+  <text x="680" y="402" font-size="11" fill="#334155" text-anchor="middle">subprocess.run([java, -Djava.library.path,</text>
+  <text x="680" y="416" font-size="11" fill="#334155" text-anchor="middle">  -cp DQJFAttacher.jar, ...])</text>
+  <text x="680" y="432" font-size="10" font-style="italic" fill="#b45309" text-anchor="middle">PATH에 filter dir 주입 (snf_win.dll 의존성 해결)</text>
+
+  <rect x="860" y="345" width="270" height="100" fill="url(#g-amber)" stroke="#b45309" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="995" y="368" font-weight="600" fill="#0f172a" text-anchor="middle">JVM 외부 프로세스</text>
+  <text x="995" y="386" font-size="11" fill="#334155" text-anchor="middle">com.diquest.jnifilter.DQJFAttacher</text>
+  <text x="995" y="402" font-size="11" fill="#334155" text-anchor="middle">jfattacher.conf 로드</text>
+  <text x="995" y="418" font-size="11" fill="#334155" text-anchor="middle">Synap Filter native (sn3fjni/snf_win)</text>
+  <text x="995" y="434" font-size="11" fill="#334155" text-anchor="middle">stdout으로 추출 텍스트 반환</text>
+
+  <!-- 2-2 save extracted text -->
+  <rect x="530" y="465" width="300" height="80" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="488" font-weight="600" fill="#0f172a" text-anchor="middle">2-2 추출 텍스트 저장</text>
+  <text x="680" y="506" font-size="11" fill="#334155" text-anchor="middle">{datetime}_{uuid}.txt 작성</text>
+  <text x="680" y="522" font-size="11" fill="#334155" text-anchor="middle">transfer_uploaded_text_to_remote() →</text>
+  <text x="680" y="536" font-size="11" fill="#334155" text-anchor="middle">SFTP 전송 시 로컬 파일 삭제</text>
+
+  <rect x="1160" y="465" width="290" height="80" fill="url(#g-slate)" stroke="#475569" stroke-width="1.2" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="488" font-weight="600" fill="#0f172a" text-anchor="middle">UPLOADED_TEXT_REMOTE_DIR</text>
+  <text x="1305" y="508" font-size="11" fill="#334155" text-anchor="middle">로컬 또는 SFTP 원격 디렉터리</text>
+  <text x="1305" y="526" font-size="11" fill="#64748b" text-anchor="middle">Mariner 색인 대상 경로</text>
+
+  <!-- 2-3 meta DB -->
+  <rect x="530" y="565" width="300" height="70" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="586" font-weight="600" fill="#0f172a" text-anchor="middle">2-3 업로드 문서 메타 저장</text>
+  <text x="680" y="604" font-size="11" fill="#334155" text-anchor="middle">UploadedDocumentService.save_uploaded_document()</text>
+  <text x="680" y="620" font-size="11" fill="#334155" text-anchor="middle">conv_id, user_id, name, path(stored_text)</text>
+
+  <rect x="1160" y="565" width="290" height="70" fill="url(#g-rose)" stroke="#be123c" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="586" font-weight="600" fill="#0f172a" text-anchor="middle">MySQL · gsnd_uploaded_documents</text>
+  <text x="1305" y="606" font-size="11" fill="#334155" text-anchor="middle">conv_id ↔ user_id ↔ name ↔ path 매핑</text>
+  <text x="1305" y="624" font-size="11" fill="#64748b" text-anchor="middle">질의 시 allowed_names 필터로 사용</text>
+
+  <!-- 2-4 summarize -->
+  <rect x="530" y="655" width="300" height="100" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="678" font-weight="600" fill="#0f172a" text-anchor="middle">2-4 summarize_document_text()</text>
+  <text x="680" y="696" font-size="11" fill="#334155" text-anchor="middle">app/chat/infra/llm/judgment.py</text>
+  <text x="680" y="712" font-size="11" fill="#334155" text-anchor="middle">_split_document_text_for_summary()</text>
+  <text x="680" y="726" font-size="11" fill="#334155" text-anchor="middle">단일/멀티 청크 분기 (Map-Reduce)</text>
+  <text x="680" y="742" font-size="10" font-style="italic" fill="#64748b" text-anchor="middle">load_document_summary_prompt() 사용</text>
+
+  <rect x="860" y="655" width="270" height="100" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="995" y="678" font-weight="600" fill="#0f172a" text-anchor="middle">LLM (call_llm_api)</text>
+  <text x="995" y="696" font-size="11" fill="#334155" text-anchor="middle">청크 1개 → 단일 호출 (max_tokens=1200)</text>
+  <text x="995" y="712" font-size="11" fill="#334155" text-anchor="middle">청크 N개 → 병렬 N회 (Semaphore=10)</text>
+  <text x="995" y="728" font-size="11" fill="#334155" text-anchor="middle">→ 통합 요약 1회</text>
+  <text x="995" y="744" font-size="11" fill="#334155" text-anchor="middle">temperature=0</text>
+
+  <!-- 2-5 history -->
+  <rect x="530" y="775" width="300" height="70" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="796" font-weight="600" fill="#0f172a" text-anchor="middle">2-5 대화내역 upsert</text>
+  <text x="680" y="814" font-size="11" fill="#334155" text-anchor="middle">user: "문서 요약 요청: {filename}"</text>
+  <text x="680" y="830" font-size="11" fill="#334155" text-anchor="middle">assistant: 요약 결과</text>
+
+  <rect x="1160" y="775" width="290" height="70" fill="url(#g-rose)" stroke="#be123c" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="796" font-weight="600" fill="#0f172a" text-anchor="middle">MySQL · 채팅 이력 테이블</text>
+  <text x="1305" y="816" font-size="11" fill="#334155" text-anchor="middle">ChatHistoryService.upsert_history()</text>
+  <text x="1305" y="832" font-size="11" fill="#64748b" text-anchor="middle">user_id+conv_id 단위 누적</text>
+
+  <!-- 2-6 index trigger -->
+  <rect x="530" y="865" width="300" height="90" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="888" font-weight="600" fill="#0f172a" text-anchor="middle">2-6 trigger_mariner_index()</text>
+  <text x="680" y="906" font-size="11" fill="#334155" text-anchor="middle">app/chat/mariner_index.py</text>
+  <text x="680" y="922" font-size="11" fill="#334155" text-anchor="middle">POST MARINER_INDEX_API_URL</text>
+  <text x="680" y="938" font-size="11" fill="#334155" text-anchor="middle">params: collection, type=full</text>
+  <text x="680" y="952" font-size="10" font-style="italic" fill="#b45309" text-anchor="middle">색인 성공 시 await asyncio.sleep(10)</text>
+
+  <rect x="860" y="865" width="270" height="90" fill="url(#g-amber)" stroke="#b45309" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="995" y="888" font-weight="600" fill="#0f172a" text-anchor="middle">Mariner Index API</text>
+  <text x="995" y="906" font-size="11" fill="#334155" text-anchor="middle">MARINER_UPLOAD_COLLECTION</text>
+  <text x="995" y="924" font-size="11" fill="#334155" text-anchor="middle">원격 저장된 .txt를 청크 분할</text>
+  <text x="995" y="940" font-size="11" fill="#334155" text-anchor="middle">→ NAME / CHUNK_ID / CHUNK_PATH 등록</text>
+
+  <!-- 2-7 response -->
+  <rect x="35" y="975" width="160" height="80" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="115" y="998" font-weight="600" fill="#0f172a" text-anchor="middle">사용자에게 응답</text>
+  <text x="115" y="1018" font-size="11" fill="#334155" text-anchor="middle">filename, text, summary,</text>
+  <text x="115" y="1034" font-size="11" fill="#334155" text-anchor="middle">meta.index, text_length, ...</text>
+
+  <rect x="230" y="975" width="270" height="80" fill="url(#g-green)" stroke="#047857" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="365" y="998" font-weight="600" fill="#0f172a" text-anchor="middle">JSONResponse 200</text>
+  <text x="365" y="1018" font-size="11" fill="#334155" text-anchor="middle">실패 시 detail.create_error_detail(...)로</text>
+  <text x="365" y="1034" font-size="11" fill="#334155" text-anchor="middle">500 응답 + 로그 기록</text>
+
+  <!-- Step 2 arrows -->
+  <line x1="195" y1="385" x2="230" y2="385" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="500" y1="385" x2="530" y2="385" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="395" x2="860" y2="395" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="860" y1="415" x2="830" y2="425" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow-amber)"/>
+
+  <line x1="680" y1="445" x2="680" y2="465" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="505" x2="1160" y2="505" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="680" y1="545" x2="680" y2="565" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="600" x2="1160" y2="600" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="680" y1="635" x2="680" y2="655" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="705" x2="860" y2="705" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="860" y1="725" x2="830" y2="735" stroke="#6d28d9" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+
+  <line x1="680" y1="755" x2="680" y2="775" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="810" x2="1160" y2="810" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="680" y1="845" x2="680" y2="865" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="830" y1="910" x2="860" y2="910" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <line x1="680" y1="955" x2="680" y2="970" stroke="#047857" stroke-width="2"/>
+  <line x1="680" y1="970" x2="365" y2="970" stroke="#047857" stroke-width="2"/>
+  <line x1="365" y1="970" x2="365" y2="975" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <line x1="230" y1="1015" x2="195" y2="1015" stroke="#047857" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <!-- Divider -->
+  <line x1="40" y1="1085" x2="1440" y2="1085" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+
+  <!-- ==================== STEP 3: ASK ==================== -->
+  <text x="40" y="1115" font-size="15" font-weight="700" fill="#6d28d9">③ 업로드 문서에 대한 질의</text>
+
+  <rect x="35" y="1135" width="160" height="80" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="115" y="1158" font-weight="600" fill="#0f172a" text-anchor="middle">사용자 질문</text>
+  <text x="115" y="1178" font-size="11" fill="#334155" text-anchor="middle">question, conv_id,</text>
+  <text x="115" y="1194" font-size="11" fill="#334155" text-anchor="middle">user_id, chat_history</text>
+
+  <rect x="230" y="1135" width="270" height="80" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="365" y="1158" font-weight="600" fill="#0f172a" text-anchor="middle">POST /v1/documents/ask</text>
+  <text x="365" y="1178" font-size="11" fill="#334155" text-anchor="middle">_ask.py · ask_uploaded_document()</text>
+  <text x="365" y="1196" font-size="11" fill="#334155" text-anchor="middle">user_id / question 검증 → 400</text>
+
+  <!-- 3-1 list docs -->
+  <rect x="530" y="1135" width="300" height="80" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="1158" font-weight="600" fill="#0f172a" text-anchor="middle">3-1 대화의 업로드 문서 목록</text>
+  <text x="680" y="1176" font-size="11" fill="#334155" text-anchor="middle">UploadedDocumentService.get_uploaded_documents()</text>
+  <text x="680" y="1192" font-size="11" fill="#334155" text-anchor="middle">limit=max_documents (기본 5)</text>
+  <text x="680" y="1208" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">없으면 "업로드된 문서를 찾지 못했습니다" 응답</text>
+
+  <rect x="1160" y="1135" width="290" height="80" fill="url(#g-rose)" stroke="#be123c" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="1158" font-weight="600" fill="#0f172a" text-anchor="middle">MySQL · gsnd_uploaded_documents</text>
+  <text x="1305" y="1178" font-size="11" fill="#334155" text-anchor="middle">conv_id + user_id로 후보 산출</text>
+  <text x="1305" y="1196" font-size="11" fill="#64748b" text-anchor="middle">name 집합 → allowed_names</text>
+
+  <!-- 3-2 mariner search -->
+  <rect x="530" y="1235" width="300" height="110" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="1258" font-weight="600" fill="#0f172a" text-anchor="middle">3-2 Mariner 청크 검색 (RAG)</text>
+  <text x="680" y="1276" font-size="11" fill="#334155" text-anchor="middle">query_mariner_documents(</text>
+  <text x="680" y="1292" font-size="11" fill="#334155" text-anchor="middle">  question, MARINER_UPLOAD_COLLECTION,</text>
+  <text x="680" y="1308" font-size="11" fill="#334155" text-anchor="middle">  max(max_documents*5, 10), user_id, conv_id)</text>
+  <text x="680" y="1326" font-size="11" fill="#334155" text-anchor="middle">→ allowed_names로 필터링</text>
+  <text x="680" y="1340" font-size="10" font-style="italic" fill="#64748b" text-anchor="middle">실패해도 로그만 남기고 fallback 진입</text>
+
+  <rect x="860" y="1235" width="270" height="110" fill="url(#g-amber)" stroke="#b45309" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="995" y="1258" font-weight="600" fill="#0f172a" text-anchor="middle">Mariner Search</text>
+  <text x="995" y="1276" font-size="11" fill="#334155" text-anchor="middle">NAME / CHUNK_ID / CHUNK_PATH</text>
+  <text x="995" y="1292" font-size="11" fill="#334155" text-anchor="middle">관련도 순 결과 반환</text>
+  <text x="995" y="1310" font-size="11" fill="#334155" text-anchor="middle">CHUNK_PATH가 파일 경로면</text>
+  <text x="995" y="1326" font-size="11" fill="#334155" text-anchor="middle">load_uploaded_text_content() 로</text>
+  <text x="995" y="1342" font-size="11" fill="#334155" text-anchor="middle">SFTP에서 원문 청크 로드</text>
+
+  <!-- 3-3 build context -->
+  <rect x="530" y="1365" width="300" height="100" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="1388" font-weight="600" fill="#0f172a" text-anchor="middle">3-3 컨텍스트 구성</text>
+  <text x="680" y="1406" font-size="11" fill="#334155" text-anchor="middle">[문서명] {name}\n[내용]\n{청크}</text>
+  <text x="680" y="1422" font-size="11" fill="#334155" text-anchor="middle">총 30,000자 상한 (clip)</text>
+  <text x="680" y="1438" font-size="11" fill="#334155" text-anchor="middle">qa_source = "mariner"</text>
+  <text x="680" y="1454" font-size="10" font-style="italic" fill="#b45309" text-anchor="middle">Mariner 후보 없으면 → 전체 .txt를 직접 read (file_fallback)</text>
+
+  <rect x="1160" y="1365" width="290" height="100" fill="url(#g-slate)" stroke="#475569" stroke-width="1.2" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="1388" font-weight="600" fill="#0f172a" text-anchor="middle">원문 텍스트 파일 (fallback)</text>
+  <text x="1305" y="1408" font-size="11" fill="#334155" text-anchor="middle">UPLOADED_TEXT_REMOTE_DIR/*.txt</text>
+  <text x="1305" y="1426" font-size="11" fill="#64748b" text-anchor="middle">SFTP/로컬 read</text>
+  <text x="1305" y="1444" font-size="11" fill="#64748b" text-anchor="middle">load_uploaded_text_content()</text>
+
+  <!-- 3-4 LLM call -->
+  <rect x="530" y="1485" width="300" height="110" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="1508" font-weight="600" fill="#0f172a" text-anchor="middle">3-4 답변 생성 (call_llm_api)</text>
+  <text x="680" y="1526" font-size="11" fill="#334155" text-anchor="middle">extra_system_prompts=[uploaded_qa_prompt]</text>
+  <text x="680" y="1542" font-size="11" fill="#334155" text-anchor="middle">history (최근 8개) + user 메시지:</text>
+  <text x="680" y="1558" font-size="11" fill="#334155" text-anchor="middle">"[업로드 문서 컨텍스트]\n{context}\n\n질문: ..."</text>
+  <text x="680" y="1574" font-size="11" fill="#334155" text-anchor="middle">temperature=0, max_tokens=1200</text>
+  <text x="680" y="1590" font-size="10" font-style="italic" fill="#be123c" text-anchor="middle">실패 시 500 응답 (create_error_detail)</text>
+
+  <rect x="860" y="1485" width="270" height="110" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="995" y="1508" font-weight="600" fill="#0f172a" text-anchor="middle">LLM</text>
+  <text x="995" y="1526" font-size="11" fill="#334155" text-anchor="middle">load_uploaded_qa_prompt():</text>
+  <text x="995" y="1542" font-size="11" fill="#334155" text-anchor="middle">업로드 문서 컨텍스트 한정 답변 강제</text>
+  <text x="995" y="1560" font-size="11" fill="#334155" text-anchor="middle">→ 응답 텍스트</text>
+  <text x="995" y="1578" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">빈 응답이면 "답변을 생성하지 못했습니다"</text>
+
+  <!-- 3-5 save history -->
+  <rect x="530" y="1615" width="300" height="90" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="680" y="1638" font-weight="600" fill="#0f172a" text-anchor="middle">3-5 대화 이력 누적 저장</text>
+  <text x="680" y="1656" font-size="11" fill="#334155" text-anchor="middle">기존 history get → user/assistant append</text>
+  <text x="680" y="1672" font-size="11" fill="#334155" text-anchor="middle">ChatRequest 만들어 _save_chat_history()</text>
+  <text x="680" y="1688" font-size="11" fill="#334155" text-anchor="middle">referenced_documents도 함께 저장</text>
+
+  <rect x="1160" y="1615" width="290" height="90" fill="url(#g-rose)" stroke="#be123c" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="1305" y="1638" font-weight="600" fill="#0f172a" text-anchor="middle">MySQL · 채팅 이력 + 인용 메타</text>
+  <text x="1305" y="1658" font-size="11" fill="#334155" text-anchor="middle">_resolve_chat_history_user_id(scope)</text>
+  <text x="1305" y="1676" font-size="11" fill="#334155" text-anchor="middle">conv_id 없으면 uuid4()로 새로 생성</text>
+  <text x="1305" y="1692" font-size="11" fill="#64748b" text-anchor="middle">name + chunk_id 형태로 출처 기록</text>
+
+  <!-- 3-6 response -->
+  <rect x="35" y="1725" width="160" height="90" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="115" y="1748" font-weight="600" fill="#0f172a" text-anchor="middle">사용자에게 응답</text>
+  <text x="115" y="1768" font-size="11" fill="#334155" text-anchor="middle">question, answer,</text>
+  <text x="115" y="1784" font-size="11" fill="#334155" text-anchor="middle">meta.referenced_documents,</text>
+  <text x="115" y="1800" font-size="11" fill="#334155" text-anchor="middle">source, history_used</text>
+
+  <rect x="230" y="1725" width="270" height="90" fill="url(#g-purple)" stroke="#6d28d9" stroke-width="1.5" rx="8" filter="url(#shadow)"/>
+  <text x="365" y="1748" font-weight="600" fill="#0f172a" text-anchor="middle">JSONResponse 200</text>
+  <text x="365" y="1768" font-size="11" fill="#334155" text-anchor="middle">meta.source ∈ {"mariner", "file_fallback"}</text>
+  <text x="365" y="1786" font-size="11" fill="#334155" text-anchor="middle">documents_found / documents_loaded</text>
+  <text x="365" y="1802" font-size="11" fill="#334155" text-anchor="middle">context_chars</text>
+
+  <!-- Step 3 arrows -->
+  <line x1="195" y1="1175" x2="230" y2="1175" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="500" y1="1175" x2="530" y2="1175" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="830" y1="1175" x2="1160" y2="1175" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <line x1="680" y1="1215" x2="680" y2="1235" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="830" y1="1290" x2="860" y2="1290" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="860" y1="1320" x2="830" y2="1330" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow-amber)"/>
+
+  <line x1="680" y1="1345" x2="680" y2="1365" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="830" y1="1420" x2="1160" y2="1420" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow-amber)"/>
+
+  <line x1="680" y1="1465" x2="680" y2="1485" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="830" y1="1540" x2="860" y2="1540" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="860" y1="1565" x2="830" y2="1575" stroke="#6d28d9" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+
+  <line x1="680" y1="1595" x2="680" y2="1615" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="830" y1="1660" x2="1160" y2="1660" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <line x1="680" y1="1705" x2="680" y2="1720" stroke="#6d28d9" stroke-width="2"/>
+  <line x1="680" y1="1720" x2="365" y2="1720" stroke="#6d28d9" stroke-width="2"/>
+  <line x1="365" y1="1720" x2="365" y2="1725" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="230" y1="1770" x2="195" y2="1770" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Legend / notes -->
+  <line x1="40" y1="1855" x2="1440" y2="1855" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+
+  <text x="40" y="1885" font-size="15" font-weight="700" fill="#0f172a">참고 / 핵심 포인트</text>
+
+  <rect x="35" y="1905" width="450" height="285" fill="#fff" stroke="#94a3b8" rx="8"/>
+  <text x="50" y="1928" font-weight="700" fill="#0f172a">파이프라인 의존성</text>
+  <text x="50" y="1948" font-size="11" fill="#334155">• DQJFAttacher = 외부 Java 서브프로세스. JVM 부팅 + Synap native</text>
+  <text x="50" y="1964" font-size="11" fill="#334155">  filter (sn3fjni → snf_win) 호출</text>
+  <text x="50" y="1984" font-size="11" fill="#334155">• 색인 트리거 후 10초 sleep — 색인 완료 대기 (best-effort)</text>
+  <text x="50" y="2004" font-size="11" fill="#334155">• 요약/질의에서 LLM은 동일한 call_llm_api 사용, prompt 분리</text>
+  <text x="50" y="2024" font-size="11" fill="#334155">  (document_summary_prompt vs uploaded_qa_prompt)</text>
+  <text x="50" y="2050" font-weight="700" fill="#0f172a">최근 고친 이슈 — Windows DLL 종속성</text>
+  <text x="50" y="2070" font-size="11" fill="#334155">• ClassNotFoundException: filter/ 디렉터리 자체가 없었음 →</text>
+  <text x="50" y="2086" font-size="11" fill="#334155">  backend_v2/mariner/filter 복사 + jar/conf 평탄화로 해결</text>
+  <text x="50" y="2106" font-size="11" fill="#334155">• UnsatisfiedLinkError: -Djava.library.path는 1차 DLL만 처리.</text>
+  <text x="50" y="2122" font-size="11" fill="#334155">  transitive snf_win.dll 탐색은 OS PATH 기준 → parsing.py에서</text>
+  <text x="50" y="2138" font-size="11" fill="#334155">  subprocess env["PATH"]에 library_path 주입으로 해결</text>
+  <text x="50" y="2164" font-weight="700" fill="#0f172a">에러/예외</text>
+  <text x="50" y="2184" font-size="11" fill="#334155">• 파일 미존재 400, 파싱/요약/질문 처리 500, 부분 실패는 로그만</text>
+
+  <rect x="500" y="1905" width="450" height="285" fill="#fff" stroke="#94a3b8" rx="8"/>
+  <text x="515" y="1928" font-weight="700" fill="#0f172a">검색·답변의 듀얼 경로 (RAG vs file fallback)</text>
+  <text x="515" y="1948" font-size="11" fill="#334155">• 1순위 Mariner: 청크 단위로 관련 부분만 컨텍스트로 사용</text>
+  <text x="515" y="1964" font-size="11" fill="#334155">  → 정확도·토큰 효율 모두 우수, source="mariner"</text>
+  <text x="515" y="1984" font-size="11" fill="#334155">• 2순위 file_fallback: Mariner 후보 없거나 색인 실패 시</text>
+  <text x="515" y="2000" font-size="11" fill="#334155">  → 전체 .txt 파일을 30,000자까지 그대로 사용</text>
+  <text x="515" y="2020" font-size="11" fill="#334155">• allowed_names로 다른 conv/user 문서가 섞이지 않게 가드</text>
+  <text x="515" y="2046" font-weight="700" fill="#0f172a">요약의 Map-Reduce 패턴</text>
+  <text x="515" y="2066" font-size="11" fill="#334155">• 단일 청크: 1회 호출로 직접 요약</text>
+  <text x="515" y="2082" font-size="11" fill="#334155">• 다중 청크: Semaphore(10) 병렬 청크 요약 → 통합 요약</text>
+  <text x="515" y="2098" font-size="11" fill="#334155">• 청크 분할 기준: max_chars_per_chunk=10,000</text>
+  <text x="515" y="2124" font-weight="700" fill="#0f172a">데이터 흐름 (요약)</text>
+  <text x="515" y="2144" font-size="11" fill="#334155">원본 파일 → 추출 텍스트(.txt) → SFTP 원격 → Mariner 색인</text>
+  <text x="515" y="2160" font-size="11" fill="#334155">                                      ↘ 메타 DB ↗</text>
+  <text x="515" y="2180" font-size="11" fill="#334155">질문 → Mariner 검색 → 컨텍스트 → LLM → 답변 + 인용 메타</text>
+
+  <rect x="965" y="1905" width="485" height="285" fill="#fff" stroke="#94a3b8" rx="8"/>
+  <text x="980" y="1928" font-weight="700" fill="#0f172a">엔드포인트 요약</text>
+  <text x="980" y="1950" font-size="11" fill="#334155">• POST /v1/files/upload (multipart) → 파일 저장만</text>
+  <text x="980" y="1968" font-size="11" fill="#334155">• POST /v1/documents/extract-text → 단일 파일 텍스트만 반환</text>
+  <text x="980" y="1986" font-size="11" fill="#334155">• POST /v1/documents/extract-and-summarize</text>
+  <text x="980" y="2002" font-size="11" fill="#334155">   → 파싱 + 요약 + 텍스트 저장 + 메타 DB + Mariner 색인</text>
+  <text x="980" y="2018" font-size="11" fill="#334155">• POST /v1/documents/ask → RAG 기반 질의응답</text>
+  <text x="980" y="2034" font-size="11" fill="#334155">• GET  /v1/documents/download → 업로드 파일 원본 다운로드</text>
+  <text x="980" y="2060" font-weight="700" fill="#0f172a">주요 설정 (Config)</text>
+  <text x="980" y="2080" font-size="11" fill="#334155">• JAR_LIB_PATH — DQJFAttacher.jar / 네이티브 dll / conf 루트</text>
+  <text x="980" y="2096" font-size="11" fill="#334155">• UPLOAD_DIR — 업로드 원본 저장</text>
+  <text x="980" y="2112" font-size="11" fill="#334155">• UPLOADED_TEXT_REMOTE_DIR — 추출 텍스트 저장 (SFTP 가능)</text>
+  <text x="980" y="2128" font-size="11" fill="#334155">• MARINER_INDEX_API_URL / MARINER_UPLOAD_COLLECTION</text>
+  <text x="980" y="2144" font-size="11" fill="#334155">• MARINER_INDEX_TIMEOUT</text>
+  <text x="980" y="2170" font-weight="700" fill="#0f172a">관련 파일</text>
+  <text x="980" y="2186" font-size="11" fill="#334155">document/{_upload,_download,_ask}.py · mariner/parsing.py ·</text>
+</svg>
