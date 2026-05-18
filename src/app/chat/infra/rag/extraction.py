@@ -2,9 +2,82 @@
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.mariner.sigun_utils import _SIGUN_NORMALIZE_MAP
+
+# HSHD_STTN_NM(가구상황) 키워드 → DB 정규화값 매핑.
+# DB 셀은 CSV 멀티값(예: "저소득,한부모·조손,장애인") 이며, 단일값으로는
+# "일반가구"/"저소득"/"장애인"/"한부모·조손"/"다문화·탈북민"/"다자녀" 등이 관측됨.
+# WhereSet op=34 (OP_HASANY|QUASI_SYNONYM)로 매칭하므로 정규화값은 셀 토큰과
+# 동일한 문자열을 사용해야 한다.
+_HSHD_STTN_KEYWORD_MAP: Dict[str, str] = {
+    # 저소득 (구체적 신호인 수급자/차상위 계열을 우선 — 길이 동률 시 dict 선언 순서가 tie-breaker)
+    "기초생활수급자": "저소득",
+    "기초생활수급": "저소득",
+    "기초수급": "저소득",
+    "수급자": "저소득",
+    "차상위계층": "저소득",
+    "차상위": "저소득",
+    "생계급여": "저소득",
+    "의료급여": "저소득",
+    "주거급여": "저소득",
+    "저소득가구": "저소득",
+    "저소득층": "저소득",
+    "저소득": "저소득",
+
+    # 장애인
+    "장애인": "장애인",
+    "장애아동": "장애인",
+    "장애가족": "장애인",
+    "중증장애": "장애인",
+    "장애우": "장애인",
+
+    # 한부모·조손
+    "한부모": "한부모·조손",
+    "한부모가정": "한부모·조손",
+    "한부모가족": "한부모·조손",
+    "조손": "한부모·조손",
+    "조손가정": "한부모·조손",
+    "조손가족": "한부모·조손",
+
+    # 다문화·탈북민
+    "다문화": "다문화·탈북민",
+    "다문화가정": "다문화·탈북민",
+    "다문화가족": "다문화·탈북민",
+    "탈북민": "다문화·탈북민",
+    "북한이탈주민": "다문화·탈북민",
+
+    # 다자녀
+    "다자녀": "다자녀",
+    "다자녀가정": "다자녀",
+    "다자녀가구": "다자녀",
+    "세자녀": "다자녀",
+
+    # 보훈대상자 (구체적 신호 우선 — 동률 길이 시 dict 순서가 tie-breaker)
+    "참전유공자": "보훈대상자",
+    "국가유공자": "보훈대상자",
+    "보훈대상자": "보훈대상자",
+    "보훈가족": "보훈대상자",
+    "유공자": "보훈대상자",
+    "보훈": "보훈대상자",
+}
+
+
+# 정규화 DB값 → 동의어 토큰 리스트 (OKMS 검색에서 BUSINESS_NAME_KO/TEXT_CHUNK_KO
+# 추가 OR-부스팅에만 사용; HSHD_STTN_NM 필터값과는 별개).
+# 토큰 수는 Mariner 트리 폭증 방지를 위해 의도적으로 최소화(그룹당 ≤ 5).
+# 주의: 여기 들어가는 토큰은 vector/keyword 문자열에 합치지 않고 별도 WhereSet 으로만
+# 전달되므로 _extract_business_anchors 가 anchor 로 승격할 위험이 없음.
+_HSHD_STTN_SYNONYM_GROUPS: Dict[str, List[str]] = {
+    "저소득": ["기초생활수급자", "차상위", "생계급여", "의료급여", "주거급여"],
+    "장애인": ["장애아동", "중증장애"],
+    "한부모·조손": ["한부모가정", "조손가정"],
+    "다문화·탈북민": ["다문화가정", "북한이탈주민"],
+    "다자녀": ["다자녀가정"],
+    "보훈대상자": ["국가유공자", "참전유공자", "보훈가족"],
+}
+
 
 _LIFECYCLE_CONTENT_KEYWORDS: Dict[str, List[str]] = {
     "영유아": ["영유아"],
@@ -156,6 +229,25 @@ def _extract_lifecycle_from_message(message: str) -> str:
         elif decade >= 10:
             return "청소년"
     return ""
+
+
+def _extract_hshd_sttn_from_message(message: str) -> Tuple[str, List[str]]:
+    """메시지에서 가구상황을 추출해 (정규화 DB값, 동의어 토큰 리스트) 튜플을 반환.
+
+    매칭은 긴 키워드 우선(예: "기초생활수급자" → "수급자"보다 먼저 매칭). 동일
+    길이일 때는 dict 선언 순서가 tie-breaker (수급자 계열 우선). 매칭 없으면
+    ("", []) 반환.
+
+    동의어 리스트는 OKMS BUSINESS_NAME/TEXT_CHUNK 부스팅 전용. HSHD_STTN_NM 필터값
+    자체는 정규화값(첫 번째 반환) 하나만 사용한다.
+    """
+    if not message:
+        return "", []
+    for keyword in sorted(_HSHD_STTN_KEYWORD_MAP.keys(), key=len, reverse=True):
+        if keyword in message:
+            norm = _HSHD_STTN_KEYWORD_MAP[keyword]
+            return norm, list(_HSHD_STTN_SYNONYM_GROUPS.get(norm, []))
+    return "", []
 
 
 def _birth_year_to_lifecycle(birth_year: int, current_year: int = None) -> str:

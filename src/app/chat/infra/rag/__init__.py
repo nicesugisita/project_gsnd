@@ -21,10 +21,13 @@ from .document import (
 from .extraction import (
     _LIFECYCLE_CONTENT_KEYWORDS,
     _LIFECYCLE_KEYWORD_MAP,
+    _HSHD_STTN_KEYWORD_MAP,
+    _HSHD_STTN_SYNONYM_GROUPS,
     _extract_sigun_from_message,
     _extract_years_from_message,
     _extract_birth_year_from_message,
     _extract_lifecycle_from_message,
+    _extract_hshd_sttn_from_message,
     _birth_year_to_lifecycle,
     _filter_docs_by_lifecycle,
     _normalize_sigun_docs,

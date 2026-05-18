@@ -35,6 +35,9 @@ _LIFECYCLE_MAP: Dict[str, str] = {
     "노인": "노년",
 }
 
+# 가구상황 동의어 토큰 캡 (queryset_okms 와 동일 정책)
+_HSHD_SYNONYMS_MAX_TOKENS = 5
+
 
 def _map_lifecycle_for_gov_okms(lifecycle: Optional[str]) -> Optional[str]:
     """파이프라인 lifecycle 값을 GOV_OKMS_V1 컬렉션 LIFE_CYCLE 필드값으로 변환"""
@@ -57,15 +60,19 @@ def query_gov_okms_documents(
     lifecycle_filter: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    hshd_sttn_filter: Optional[str] = None,
+    hshd_sttn_synonyms: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     GOV_OKMS_V1 단일 검색 (QuerySet(1))
 
     Args:
-        search_string:    검색어 (확장쿼리 또는 트리플쿼리)
-        collection:       컬렉션명 (None → Config.RAG_GOV_OKMS_COLLECTION)
-        lifecycle_filter: 생애주기 필터 (예: "영유아"), None이면 미적용
-        sigun_filters:    시군 필터 목록(표시용 SIGUN 기본값 보정에만 사용)
+        search_string:      검색어 (확장쿼리 또는 트리플쿼리)
+        collection:         컬렉션명 (None → Config.RAG_GOV_OKMS_COLLECTION)
+        lifecycle_filter:   생애주기 필터 (예: "영유아"), None이면 미적용
+        sigun_filters:      시군 필터 목록(표시용 SIGUN 기본값 보정에만 사용)
+        hshd_sttn_filter:   가구상황 정규화값 (예: "저소득"), HOUSE_SITUATION 필드에 op=34 적용
+        hshd_sttn_synonyms: 가구상황 동의어 토큰 (SERVICE_NAME_KO/TEXT_CHUNK_KO 부스팅용)
 
     Returns:
         docs: List[Dict] — CHUNK_ID·NAME·CONTENT·WEIGHT 정규화 필드 포함
@@ -159,13 +166,46 @@ def query_gov_okms_documents(
             jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks, 0.3),                 #   서비스명 벡터
             jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_MI",   96, ks, 0.3),            #   텍스트 벡터
-            jpkg_query.WhereSet(OP_BRACE_CLOSE),                             # )
         ]
+
+        # 가구상황 동의어 부스팅 (SERVICE_NAME_KO / TEXT_CHUNK_KO 만)
+        # - 메인 4-필드 OR 괄호 안에 동일 레벨로 OR-append → 결과 broaden
+        # - search_string 원본 손대지 않음 → 타 검색 흐름 영향 없음
+        # - 토큰 캡으로 트리 폭증 방지
+        _syn_tokens = [
+            str(t).strip()
+            for t in (hshd_sttn_synonyms or [])
+            if t and str(t).strip()
+        ]
+        if _syn_tokens:
+            _syn_str = " ".join(_syn_tokens[:_HSHD_SYNONYMS_MAX_TOKENS])
+            _syn_ks = JString(_syn_str)
+            where_set_array += [
+                jpkg_query.WhereSet(OP_OR),
+                jpkg_query.WhereSet("SERVICE_NAME_KO", 2, _syn_ks, 0.3),
+                jpkg_query.WhereSet(OP_OR),
+                jpkg_query.WhereSet("TEXT_CHUNK_KO",   2, _syn_ks, 0.3),
+            ]
+            logger.debug(
+                "[Mariner/GOV_OKMS] HSHD 동의어 부스팅 적용: %s (적용 토큰=%d/%d)",
+                _syn_str,
+                min(len(_syn_tokens), _HSHD_SYNONYMS_MAX_TOKENS),
+                len(_syn_tokens),
+            )
+
+        where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))          # )
 
         if mapped_lifecycle:
             where_set_array += [
                 jpkg_query.WhereSet(OP_AND),
                 jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
+            ]
+
+        # HOUSE_SITUATION(가구상황) 스크립틀릿 필터 — LIFE_CYCLE 동일 패턴 (op=34)
+        if hshd_sttn_filter:
+            where_set_array += [
+                jpkg_query.WhereSet(OP_AND),
+                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
             ]
 
         # CHUNK_ID(SERVICE_ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)

@@ -30,6 +30,7 @@ from app.chat.infra.rag import (
     _extract_birth_year_from_message,
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
+    _extract_hshd_sttn_from_message,
     _build_search_queries,
     filter_okms_keywords,
 )
@@ -162,7 +163,11 @@ async def process_rag_with_documents_v2(
             if comp_birth_year
             else _extract_lifecycle_from_message(message)
         )
-        logger.debug(f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, lifecycle: '{comp_lifecycle}'")
+        comp_hshd_sttn, comp_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        logger.debug(
+            f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, "
+            f"lifecycle: '{comp_lifecycle}', hshd_sttn: '{comp_hshd_sttn}'"
+        )
 
         comp_year_filters = extract_year_filters(message)
         if comp_year_filters:
@@ -207,7 +212,7 @@ async def process_rag_with_documents_v2(
                 return [], []
 
         def _run_gov_okms_query(search_str: str):
-            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE만 선택 적용"""
+            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE/HOUSE_SITUATION 선택 적용"""
             try:
                 return query_gov_okms_documents(
                     search_str,
@@ -215,6 +220,8 @@ async def process_rag_with_documents_v2(
                     lifecycle_filter=comp_lifecycle or None,
                     sigun_filters=comp_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    hshd_sttn_filter=comp_hshd_sttn or None,
+                    hshd_sttn_synonyms=comp_hshd_synonyms or None,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/comparison_v2] GOV_OKMS 쿼리 실패: {e}")

@@ -34,6 +34,7 @@ from app.chat.infra.rag import (
     _extract_birth_year_from_message,
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
+    _extract_hshd_sttn_from_message,
     _build_search_queries,
     filter_okms_keywords,
 )
@@ -162,7 +163,13 @@ async def process_rag_general(
             gen_lifecycle = extract_lifecycle_from_history(messages)
             if gen_lifecycle:
                 logger.debug(f"[RAG/general_v2] 히스토리에서 생애주기 추출: '{gen_lifecycle}'")
-        logger.debug(f"[RAG/general_v2] OKMS 필터 - sigun: {gen_sigun_filters}, lifecycle: '{gen_lifecycle}'")
+        # HSHD_STTN_NM(가구상황) 추출 — (정규화값, 동의어 토큰 리스트)
+        gen_hshd_sttn, gen_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        logger.debug(
+            f"[RAG/general_v2] OKMS 필터 - sigun: {gen_sigun_filters}, "
+            f"lifecycle: '{gen_lifecycle}', hshd_sttn: '{gen_hshd_sttn}' "
+            f"(synonyms={gen_hshd_synonyms})"
+        )
 
         # OKMS 연도 필터 추출
         gen_year_filters = extract_year_filters(message)
@@ -182,6 +189,8 @@ async def process_rag_general(
                     year_filters=gen_year_filters or None,
                     sigun_filters=gen_sigun_filters,
                     lifecycle_filter=gen_lifecycle or None,
+                    hshd_sttn_filter=gen_hshd_sttn or None,
+                    hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
                 )
             except Exception as e:
@@ -196,6 +205,8 @@ async def process_rag_general(
                     year_filters=gen_year_filters or None,
                     sigun_filters=gen_sigun_filters,
                     lifecycle_filter=None,
+                    hshd_sttn_filter=gen_hshd_sttn or None,
+                    hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
                     apply_business_anchor=False,
                 )
@@ -204,7 +215,7 @@ async def process_rag_general(
                 return [], []
 
         def _run_gov_okms_query(search_str: str):
-            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE만 선택 적용"""
+            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE/HOUSE_SITUATION 선택 적용"""
             try:
                 return query_gov_okms_documents(
                     search_str,
@@ -212,6 +223,8 @@ async def process_rag_general(
                     lifecycle_filter=gen_lifecycle or None,
                     sigun_filters=gen_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    hshd_sttn_filter=gen_hshd_sttn or None,
+                    hshd_sttn_synonyms=gen_hshd_synonyms or None,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] GOV_OKMS 쿼리 실패: {e}")

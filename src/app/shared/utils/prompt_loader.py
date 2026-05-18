@@ -8,9 +8,13 @@ uvicorn --reload는 .py만 감시하므로, .txt 변경 시 lru_cache가 옛 내
 
 import os
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+_KST = timezone(timedelta(hours=9))
+_WEEKDAYS_KO = ('월', '화', '수', '목', '금', '토', '일')
 
 # prompt_loader.py: src/app/shared/utils/ → 4단계 상위가 프로젝트 루트
 _PROMPT_BASE_DIR = os.path.normpath(os.path.join(
@@ -56,9 +60,17 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
 
 def load_system_prompt() -> str:
-    """Load system prompt from file."""
+    """Load system prompt from file with today's date (KST) injected."""
     default_prompt = "당신은 경상남도청의 AI 어시스턴트입니다."
-    return _load_prompt_file('system_prompt.txt', default_prompt)
+    template = _load_prompt_file('system_prompt.txt', default_prompt)
+    today = datetime.now(_KST).date()
+    weekday = _WEEKDAYS_KO[today.weekday()] + '요일'
+    return (
+        template
+        .replace("{오늘날짜}", today.isoformat())
+        .replace("{오늘요일}", weekday)
+        .replace("{현재연도}", str(today.year))
+    )
 
 
 def load_query_reform_prompt() -> str:

@@ -168,6 +168,9 @@ def _build_okms_document_name(doc: Dict[str, Any]) -> str:
 # 듀얼 검색 내부 공통 함수 (Group A/B 공유)
 # ============================================================
 
+_HSHD_SYNONYMS_MAX_TOKENS = 5  # Mariner 트리 폭증 방지용 캡
+
+
 def _query_dual_documents(
     vector: str,
     keyword: str,
@@ -177,6 +180,8 @@ def _query_dual_documents(
     year_filters: Optional[List[str]] = None,
     sigun_filters: Optional[List[str]] = None,
     lifecycle_filter: Optional[str] = None,
+    hshd_sttn_filter: Optional[str] = None,
+    hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -305,8 +310,35 @@ def _query_dual_documents(
                 jpkg_query.WhereSet("TEXT_CHUNK_MI",    96, ks, ws["txt_mi"]),      #   텍스트 벡터
                 jpkg_query.WhereSet(OP_OR),                                              #   OR
                 jpkg_query.WhereSet("SIGUN",            96, ks, ws["sigun"]),       #   시군 벡터
-                jpkg_query.WhereSet(OP_BRACE_CLOSE),                                             # )
             ]
+
+            # 가구상황 동의어 부스팅 (BUSINESS_NAME_KO / TEXT_CHUNK_KO 만)
+            # - 메인 5-필드 OR 괄호 안에 동일 레벨로 OR-append → 결과 broaden
+            # - vector/keyword 원본은 손대지 않음 → _extract_business_anchors 영향 없음
+            # - 토큰은 공백 join, 캡 적용 → 트리 폭증 방지
+            _syn_tokens = [
+                str(t).strip()
+                for t in (hshd_sttn_synonyms or [])
+                if t and str(t).strip()
+            ]
+            if _syn_tokens:
+                _syn_str = " ".join(_syn_tokens[:_HSHD_SYNONYMS_MAX_TOKENS])
+                _syn_ks = JString(_syn_str)
+                where_set_array += [
+                    jpkg_query.WhereSet(OP_OR),
+                    jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY, _syn_ks, ws["biz_mi"]),
+                    jpkg_query.WhereSet(OP_OR),
+                    jpkg_query.WhereSet("TEXT_CHUNK_KO",    2,        _syn_ks, ws["txt_mi"]),
+                ]
+                logger.debug(
+                    "[Mariner/%s] HSHD 동의어 부스팅 적용: %s (적용 토큰=%d/%d)",
+                    log_label,
+                    _syn_str,
+                    min(len(_syn_tokens), _HSHD_SYNONYMS_MAX_TOKENS),
+                    len(_syn_tokens),
+                )
+
+            where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))                              # )
 
             # 사업명 정합성 앵커(하드코딩 없이 질의에서 동적 추출)
             # 단일 사업: "창원 기초연금 ..." → ["기초연금"]
@@ -364,6 +396,15 @@ def _query_dual_documents(
                 where_set_array += [
                     jpkg_query.WhereSet(OP_AND),
                     jpkg_query.WhereSet("LIFE_CYCLE", 34, lifecycle_filter, 0),
+                ]
+
+            # HOUSE_SITUATION(가구상황) 스크립틀릿 필터
+            # DB 셀이 "저소득,한부모·조손,장애인" 처럼 CSV 멀티값이라
+            # LIFE_CYCLE 과 동일하게 op=34 (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭.
+            if hshd_sttn_filter:
+                where_set_array += [
+                    jpkg_query.WhereSet(OP_AND),
+                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
                 ]
 
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -526,6 +567,8 @@ def query_group_a_documents(
     year_filters: Optional[List[str]] = None,
     sigun_filters: Optional[List[str]] = None,
     lifecycle_filter: Optional[str] = None,
+    hshd_sttn_filter: Optional[str] = None,
+    hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -548,6 +591,8 @@ def query_group_a_documents(
         year_filters=year_filters,
         sigun_filters=sigun_filters,
         lifecycle_filter=lifecycle_filter,
+        hshd_sttn_filter=hshd_sttn_filter,
+        hshd_sttn_synonyms=hshd_sttn_synonyms,
         excluded_chunk_ids=excluded_chunk_ids,
         apply_business_anchor=apply_business_anchor,
     )

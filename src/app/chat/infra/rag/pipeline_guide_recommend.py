@@ -34,6 +34,7 @@ from app.chat.infra.rag import (
     _extract_birth_year_from_message,
     _birth_year_to_lifecycle,
     _extract_lifecycle_from_message,
+    _extract_hshd_sttn_from_message,
     _build_search_queries,
     filter_okms_keywords,
 )
@@ -128,6 +129,12 @@ async def process_rag_guide_recommend(
             else:
                 logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
 
+        gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        if gr_hshd_sttn:
+            logger.debug(
+                f"[RAG/guide_recommend_v2] 가구상황 추출: '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
+            )
+
         # 연도 필터: guide_recommend 는 항상 현재 연도 문서만 추천 (timeliness 보장).
         # 사용자가 과거/미래 연도를 명시해도 추천 결과는 현재 연도로 강제.
         _current_year = str(date.today().year)
@@ -220,7 +227,7 @@ async def process_rag_guide_recommend(
                 return [], []
 
         def _run_gov_okms_query(search_str: str):
-            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE만 선택 적용"""
+            """GOV_OKMS_V1 단일 검색: SIGUN/YEAR 필터 없음, LIFE_CYCLE/HOUSE_SITUATION 선택 적용"""
             try:
                 return query_gov_okms_documents(
                     search_str,
@@ -228,6 +235,8 @@ async def process_rag_guide_recommend(
                     lifecycle_filter=lifecycle or None,
                     sigun_filters=gr_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    hshd_sttn_filter=gr_hshd_sttn or None,
+                    hshd_sttn_synonyms=gr_hshd_synonyms or None,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] GOV_OKMS 쿼리 실패: {e}")
@@ -534,6 +543,8 @@ async def process_rag_guide_recommend(
                             lifecycle_filter=_lc_v,
                             sigun_filters=gr_sigun_filters,
                             excluded_chunk_ids=_excl,
+                            hshd_sttn_filter=gr_hshd_sttn or None,
+                            hshd_sttn_synonyms=gr_hshd_synonyms or None,
                         )
                     except Exception as e:
                         _record_failure("gov", e)

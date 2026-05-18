@@ -102,6 +102,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
     try:
         data: Dict[str, Any] = await request.json()
 
+        # _validate_request: 요청 body 스키마/필수 필드 검증, 실패 시 400 응답 객체 반환
         is_valid, error_response = _validate_request(data)
         if not is_valid:
             return error_response
@@ -117,7 +118,9 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             data.get("mode", ""),
         )
 
+        # ChatRequest: pydantic 모델로 dict → 타입 검증된 객체로 변환
         chat_request = ChatRequest(**data)
+        # _ensure_runtime_user_id: 비로그인/임시 user_id를 conv_id로 고정해 히스토리 경로를 로그인과 동일하게 통일
         _ensure_runtime_user_id(chat_request)
         if raw_conv_id != chat_request.conv_id or raw_user_id != chat_request.user_id:
             logger.info(
@@ -128,6 +131,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 chat_request.user_id,
                 chat_request.conv_id,
             )
+        # set_log_context: 이 요청의 모든 로그에 conv_id/user_id 태그를 자동 부착 (contextvar, finally에서 해제)
         log_context_tokens = set_log_context(chat_request.conv_id, chat_request.user_id)
         first_msg_preview = chat_request.messages[0].get('content', '')[:50] if chat_request.messages else 'None'
         logger.info(
@@ -141,6 +145,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         logger.debug("[Chat Request] first_message_preview=%s", first_msg_preview)
         before_merge_conv_id = chat_request.conv_id
         before_merge_user_id = chat_request.user_id
+        # _merge_and_init_conversation: 동일 conv_id의 DB 히스토리를 messages에 머지하고 새 conv 레코드 초기화
         await _merge_and_init_conversation(chat_request)
         if before_merge_conv_id != chat_request.conv_id or before_merge_user_id != chat_request.user_id:
             logger.info(
@@ -152,14 +157,17 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 chat_request.conv_id,
             )
 
+        # _validate_user_message: messages에서 마지막 user 메시지 추출 + 빈값/길이 검증
         is_valid, error_response, user_message = _validate_user_message(chat_request.messages)
         if not is_valid:
             return error_response
 
         original_user_message = user_message
         stream = data.get("stream", False)
+        # non-stream / 추천 API / guide_recommend 모드일 때만 "더 알려줘" 후속 의도 분석 경로를 탐 (스트리밍은 _streaming_chat_flow에서 별도 처리)
         use_more_results_router_path = (not stream) or llm_recommended_followup or (chat_request.mode == "guide_recommend")
 
+        # is_clarification_answer: 직전 assistant가 되묻기였는지 감지
         is_clarification = is_clarification_answer(chat_request.messages)
 
         more_detected = False
@@ -171,16 +179,22 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         more_last_preprocess = None
 
         if use_more_results_router_path:
+            # get_last_preprocess_from_history: 직전 assistant 메타에서 preprocess(intent/reformed_query/expanded_queries 등) 복원
             more_last_preprocess = get_last_preprocess_from_history(chat_request.messages)
+            # 같은 함수의 필터 버전: 재사용 가능한 intent(guide_recommend/search/comparison)만 허용
             more_reusable_preprocess = get_last_preprocess_from_history(
                 chat_request.messages,
                 allowed_intents=_MORE_INFO_REUSABLE_INTENTS,
             )
+            # get_base_user_query_from_history: 멀티턴의 '원래 질문'(base) 추출 → MORE_INFO 시 재사용
             base_user_query = get_base_user_query_from_history(chat_request.messages)
+            # _is_context_dependent_followup: 너무 짧고 명사 1개 이하면 단독 검색이 무의미한 후속 발화로 간주
             if base_user_query and _is_context_dependent_followup(base_user_query):
                 base_user_query = ""
             prior_intent_value = str((more_last_preprocess or {}).get("intent") or "")
+            # collect_prior_service_names: 직전까지 노출된 서비스명 목록 (MORE_DETAIL 분기 보조용)
             prior_service_names = collect_prior_service_names(chat_request.messages)
+            # classify_next_intent: 후속 의도 분류 LLM (MORE_INFO/MORE_DETAIL/NEW_SEARCH/REFINE_SEARCH/CLARIFY_REPLY)
             next_intent = await classify_next_intent(
                 chat_request.messages,
                 user_message,
@@ -240,8 +254,10 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
                 if re_query:
                     user_message = re_query
+                    # _update_user_message: messages 리스트의 마지막 user 메시지 content를 새 문자열로 갱신
                     await _update_user_message(chat_request.messages, user_message)
 
+                # get_excluded_info_from_history: 직전까지 노출한 chunk_id / service_name을 모아 검색 제외 목록 구성
                 (
                     more_excluded_chunk_ids,
                     more_excluded_service_names,
@@ -255,15 +271,18 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 more_final_user_message = llm_rq or (original_user_message or "").strip() or None
 
         if not is_clarification:
+            # _check_user_limit: 동시 사용자 한도(MAX_CONCURRENT_USERS=50, 세션 10분) 초과 시 안내 응답 반환
             limit_response = _check_user_limit(user_message, chat_request, stream)
             if limit_response:
                 return limit_response
 
         if llm_recommended_followup:
             if Config.KOREAN_STANDARDIZATION_ENABLED:
+                # convert_korean_to_standard: 방언/구어체를 표준어로 정규화 (LLM 1회 호출)
                 converted = await convert_korean_to_standard(user_message)
                 if converted and isinstance(converted, str):
                     await _update_user_message(chat_request.messages, converted)
+            # _handle_rag_mode: 의도별 pipeline_*.py로 라우팅해 RAG 검색 + LLM 응답 생성 (스트리밍/논스트리밍 둘 다 처리)
             return await _handle_rag_mode(
                 user_message,
                 chat_request,
@@ -298,6 +317,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             )
 
         if stream:
+            # _streaming_chat_flow: SSE 스트리밍 본 흐름 — 8단계를 비동기 제너레이터로 흘리면서 상태/청크 yield
             return StreamingResponse(
                 _streaming_chat_flow(
                     chat_request,
@@ -313,18 +333,24 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
 
         # Non-streaming flow
         # [1] PreCheck: RAG 여부 + 되묻기
+        # run_pre_check: RAG 사용 여부 판단(use_rag) + 정보 부족 시 되묻기 질문 생성
         pre = await run_pre_check(user_message, chat_request.messages, is_clarification)
         use_rag = pre.use_rag
         if pre.clarification_question:
+            # _save_chat_history: 되묻기 질문을 DB에 영속화 (동기 함수라 to_thread로 비동기 래핑)
             await asyncio.to_thread(_save_chat_history, chat_request, pre.clarification_question, original_user_message)
+            # _handle_clarify_response: 되묻기 응답을 chat completion 포맷(또는 SSE)으로 감싸 반환
             return await _handle_clarify_response(original_user_message, pre.clarification_question, chat_request, stream)
 
         # [2] 되묻기 답변의 시군 조기 확인 (query_recreation LLM 호출 전)
         resolved_sigun_filters = None
+        # run_early_sigun_check: 되묻기 답변일 때만 동작 — 쿼리 재구성 LLM이 시군을 오염시키기 전에 시군 확정
         early_sigun = run_early_sigun_check(user_message, chat_request.messages, use_rag, is_clarification)
         if early_sigun is not None:
             if early_sigun.need_clarify:
+                # count_sigun_ask_attempts: 같은 대화에서 시군 되묻기 누적 횟수 카운트 (3회 초과 시 안내 종료)
                 if count_sigun_ask_attempts(chat_request.messages) >= MAX_SIGUN_ASK_ATTEMPTS:
+                    # build_chat_response: OpenAI Chat Completions 스키마에 맞춰 응답 dict 구성
                     return JSONResponse(content=build_chat_response(response_message=MSG_SIGUN_FAILURE, user_message=user_message, model_name=Config.MODEL_NAME), status_code=200)
                 return await _handle_clarify_response(original_user_message, early_sigun.ask_message, chat_request, stream)
             resolved_sigun_filters = early_sigun.filters
@@ -333,6 +359,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         # [3] 쿼리 재구성 (MORE_INFO 또는 general 후속 경로는 reformed_query를 직접 사용하므로 생략)
         # NEW_SEARCH/REFINE_SEARCH(주제 전환)도 스킵 — 직전 주제로 오염 방지
         if not more_detected and not more_blocked_followup and not more_topic_switch:
+            # _run_query_recreation: 멀티턴 문맥을 반영해 user_message를 단일 검색 가능 쿼리로 재작성 (LLM 호출)
             user_message, _ = await _run_query_recreation(user_message, chat_request, is_clarification)
         elif more_topic_switch:
             logger.info(
@@ -341,6 +368,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             )
 
         # [4] 경상남도 외 지역 체크
+        # run_out_of_scope_check: 쿼리에 타 시도(서울/부산 등)가 명시되면 안내 메시지로 조기 종료
         out_of_scope, region_name = run_out_of_scope_check(user_message, use_rag)
         if out_of_scope:
             msg = MSG_OUT_OF_SCOPE_TEMPLATE.format(region=region_name)
@@ -348,6 +376,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             return JSONResponse(content=build_chat_response(response_message=msg, user_message=user_message, model_name=Config.MODEL_NAME), status_code=200)
 
         # [5] 시군 체크
+        # run_sigun_check: 경남 18개 시군 중 어느 곳을 묻는지 추출, 모호하면 되묻기 ask_message 생성 (조기 확정 못한 케이스 대상)
         sigun = run_sigun_check(user_message, chat_request.messages, use_rag, resolved_sigun_filters)
         if sigun is not None:
             if sigun.need_clarify:
@@ -360,15 +389,18 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
         if more_detected and more_last_preprocess:
             previous_intent = str(more_last_preprocess.get("intent") or "general")
+            # resolve_reused_intent_on_more: MORE_INFO/DETAIL일 때 재사용할 intent 결정 (MORE_INFO는 guide_recommend 강제 등)
             reused_intent = resolve_reused_intent_on_more(
                 previous_intent,
                 more_detail=llm_detected_more_detail,
                 user_message=user_message,
             )
             try:
+                # extract_nouns: kiwi 형태소 분석기로 명사 추출 (Mariner 키워드 검색용)
                 reused_keywords = extract_nouns(user_message)
             except Exception:
                 reused_keywords = []
+            # PreprocessResult: 전처리 결과 dataclass — query/intent/reformed_query/expanded_queries/keywords 등을 묶음
             preprocess = PreprocessResult(
                 query=user_message,
                 intent=reused_intent,
@@ -417,10 +449,12 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             )
             logger.info("[MoreResults/non-stream] general 후속 → 히스토리 intent 재사용 intent=%s reformed=%s (exclusion 없음)", preprocess.intent, user_message[:60])
         elif llm_recommended_followup:
+            # build_preprocess_skip_unified_recommended_question: 통합 전처리 LLM 호출을 생략하고 PreprocessResult를 즉시 구성
             preprocess = build_preprocess_skip_unified_recommended_question(user_message)
             logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
         else:
             # 짧은 후속·되묻기 재구성 직후에도 항상 전체 메시지를 넘김 → 스레드 길이(로그인/비로그인)와 무관하게 동일 형식 입력
+            # run_unified_preprocess: LLM 1회 호출로 intent/reformed_query/expanded_queries/search_target/policy_priority_tag 등을 한 번에 추출
             preprocess = await run_unified_preprocess(
                 user_message, chat_request.messages, use_rag
             )
@@ -442,11 +476,14 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         await _update_user_message(chat_request.messages, user_message)
 
         # [7] 생애주기 체크 (guide_recommend 전용, 로그만)
+        # run_lifecycle_check: 생애주기 키워드(영유아/청년/노인 등) 매칭 로그만 출력, 분기에는 영향 없음
         run_lifecycle_check(user_message, chat_request.messages, use_rag, preprocess.intent)
 
         if not use_rag:
+            # _handle_no_rag_mode: 인사·잡담 등 검색 불필요한 입력에 대해 LLM 직답 응답 생성
             return await _handle_no_rag_mode(user_message, chat_request)
 
+        # _handle_rag_mode: preprocess.intent에 따라 pipeline_general/comparison/guide_recommend/search 중 하나로 라우팅
         return await _handle_rag_mode(
             user_message,
             chat_request,
@@ -471,6 +508,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         logger.error(f"Chat completions error: {e}", exc_info=True)
         return JSONResponse(
             content={
+                # create_error_detail: FastAPI 표준 에러 detail dict 구성 (loc/msg/type 필드)
                 "detail": [create_error_detail(
                     loc=["body"],
                     msg=str(e),
@@ -481,6 +519,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         )
     finally:
         if log_context_tokens is not None:
+            # reset_log_context: set_log_context로 박은 contextvar 토큰을 해제 (다음 요청에 누수 방지)
             reset_log_context(log_context_tokens)
 
 

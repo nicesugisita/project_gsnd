@@ -78,6 +78,7 @@ _REQUIRED_PLACEHOLDERS = {
         "{before_user_input}", "{before_answer}", "{user_input}",
     ],
     "pre_check_prompt.txt": ["{현재연도}", "{작년연도}", "{이전 대화}", "{사용자 질문}"],
+    "system_prompt.txt": ["{오늘날짜}", "{오늘요일}", "{현재연도}"],
 }
 
 
