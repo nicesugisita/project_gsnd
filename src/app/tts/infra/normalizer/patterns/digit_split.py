@@ -5,17 +5,19 @@ import re
 from ..base import PatternHandler
 from ...config_loader import get_config
 
+
 class DigitSplitHandler(PatternHandler):
     def __init__(self, config: dict = None):
         self._config = config or {}
-        
-        # 1. 패턴 로드 (patterns.yaml에서 수정된 정규식 사용)
+
+        # [핵심 수정] 금액형 콤마(숫자 1~3자리 + 콤마 + 숫자 3자리) 구조를 제외하는 필터링 조건 추가
+        # 이 조건이 추가되어 '3,500' 같은 금액은 가로채지 않고 NumberHandler로 패스합니다.
         self.pattern_str = get_config(
-            'patterns.split.digit', 
-            r'(?<!\d)(\d+(?:[\s,]+\d+)+)(?!\d)'
+            'patterns.split.digit',
+            r'(?<!\d)(?!\d{1,3},\d{3}(?!\d))(\d+(?:[\s,]+\d+)+)(?!\d)'
         )
         self.pattern = re.compile(self.pattern_str)
-        
+
         # 2. 숫자 매핑 로드 및 안전장치 추가
         # 설정 파일에 'normalization.phone_digits'가 없거나 None일 경우 사용할 기본값
         default_digits = {
@@ -52,7 +54,6 @@ class DigitSplitHandler(PatternHandler):
                 continue
 
             # 한글 변환 (1 -> 일)
-            # self.digit_dict가 이제 무조건 딕셔너리임을 보장하므로 .get() 에러가 나지 않습니다.
             korean_token = ''.join(self.digit_dict.get(ch, ch) for ch in token)
             converted_tokens.append(korean_token)
 

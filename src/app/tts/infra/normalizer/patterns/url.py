@@ -41,7 +41,7 @@ class UrlHandler(PatternHandler):
         """URL 감지를 위한 정규표현식"""
         # http(s) 포함 또는 www로 시작하거나 .com, .kr 등으로 끝나는 패턴
         self.url_pattern = re.compile(
-            r'(https?://[^\s<>"]+|www\.[^\s<>"]+\.[^\s<>"]+|[^\s<>"]+\.(?:kr|com|net|org|go\.kr|or\.kr))'
+            r'(https?://[^\s<>"]+?|www\.[^\s<>"]+?\.[^\s<>"]+?|[^\s<>"]+?\.(?:kr|com|net|org|go\.kr|or\.kr))(?=[^a-zA-Z0-9/]|$) '
         )
 
     @property
@@ -63,8 +63,8 @@ class UrlHandler(PatternHandler):
     def _url_to_korean(self, match: re.Match) -> str:
         url_str = match.group().lower()
 
-        # 1. 프로토콜 처리 (https:// 등은 생략하거나 읽어줌)
-        # 여기서는 생략하지 않고 모두 읽는 방식으로 구현
+        # URL 끝에 붙은 마침표나 조사가 포함되지 않도록 한 번 더 정제 (Rstrip)
+        # 하지만 위에서 정규표현식을 잘 정의했다면 아래 로직으로 충분합니다.
 
         result = []
         for char in url_str:
@@ -73,15 +73,15 @@ class UrlHandler(PatternHandler):
             elif char in self.symbol_dict:
                 result.append(self.symbol_dict[char])
             elif char.isdigit():
-                # 숫자는 기존 숫자 발음(공, 일, 이...) 사용 시도 (여기서는 단순 매핑)
                 digit_map = {'0': '공', '1': '일', '2': '이', '3': '삼', '4': '사', '5': '오', '6': '육', '7': '칠', '8': '팔',
                              '9': '구'}
                 result.append(digit_map.get(char, char))
             else:
+                # 정의되지 않은 문자(한글 등)는 그대로 유지
                 result.append(char)
 
-        # 2. '더블유 더블유 더블유'의 경우 '떠블유'로 발음하는 경우가 많아 보정 (선택 사항)
         converted = "".join(result)
+        # '더블유' 공백 처리 및 보정
         converted = converted.replace("더블유더블유더블유", "떠블유 떠블유 떠블유")
 
         return converted

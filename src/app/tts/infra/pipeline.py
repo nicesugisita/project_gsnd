@@ -54,7 +54,7 @@ class PreprocessingPipeline:
 
         # [Phase 1] 파싱 (text -> Segment Objects)
         parsed_segments = self.parser.parse(text)
-        logger.info(f"텍스트 후처리후 : {parsed_segments}")
+        logger.info(f"텍스트 파싱 후 : {parsed_segments}")
         # [Phase 1.5] 숫자+단위 병합 (Merging)
         # 예: ("62", ...) + ("개", ...) -> ("62개", ...)
         merged_segments = self.merger.merge(parsed_segments)
