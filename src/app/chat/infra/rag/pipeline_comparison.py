@@ -275,9 +275,11 @@ async def process_rag_with_documents_v2(
             )
 
         # ====================================================================
-        # Step 5: Group A → top 5
+        # Step 5: Group A → top N
+        # 8→10: 시군 N개 비교 시 한쪽 시군 사업이 cap 밖으로 밀려나는 케이스 완화
+        # (예: "김해 아동수당 vs 진주 아동수당" 에서 진주 아동수당이 9위라 탈락)
         # ====================================================================
-        _COMP_FINAL_TOP_N = 8
+        _COMP_FINAL_TOP_N = 10
         _FALLBACK_THRESHOLD = 1
         okms_final = comp_group_a_top[:_COMP_FINAL_TOP_N]
         logger.info(f"[RAG/comparison_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(comp_group_a_top)}개)")
