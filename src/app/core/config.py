@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
     QUERY_REWRITING_ENABLED: bool = True
 
+    # 분류기 단축 프롬프트 우선 로드 토글. True 면 prompts/short/<filename> 가 존재할 때
+    # 그것을 우선 사용한다. unified_preprocessing/pre_check/next_intent 등 분류기 프롬프트의
+    # 압축본(원본 대비 60~83% 단축)을 운영에 적용할 때 켠다. 기본 False 로 회귀 위험 차단.
+    USE_SHORT_PROMPTS: bool = False
+
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555

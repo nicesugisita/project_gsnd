@@ -8,13 +8,9 @@ uvicorn --reload는 .py만 감시하므로, .txt 변경 시 lru_cache가 옛 내
 
 import os
 import logging
-from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
-
-_KST = timezone(timedelta(hours=9))
-_WEEKDAYS_KO = ('월', '화', '수', '목', '금', '토', '일')
 
 # prompt_loader.py: src/app/shared/utils/ → 4단계 상위가 프로젝트 루트
 _PROMPT_BASE_DIR = os.path.normpath(os.path.join(
@@ -36,9 +32,23 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
     Returns:
         Content of the prompt file or default value
+
+    Note:
+        Config.USE_SHORT_PROMPTS=True 이면 prompts/short/<filename> 가
+        존재할 때 그것을 우선 사용한다. 응답시간 실험용 토글.
     """
     try:
         prompt_file = os.path.join(_PROMPT_BASE_DIR, filename)
+
+        # 단축 프롬프트 우선 로드 (실험용 토글, 실패 시 일반 경로로 폴백)
+        try:
+            from app.core.config import Config
+            if getattr(Config, "USE_SHORT_PROMPTS", False):
+                short_file = os.path.join(_PROMPT_BASE_DIR, "short", filename)
+                if os.path.exists(short_file):
+                    prompt_file = short_file
+        except Exception:
+            pass
 
         if not os.path.exists(prompt_file):
             return default
@@ -60,17 +70,9 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
 
 def load_system_prompt() -> str:
-    """Load system prompt from file with today's date (KST) injected."""
+    """Load system prompt from file."""
     default_prompt = "당신은 경상남도청의 AI 어시스턴트입니다."
-    template = _load_prompt_file('system_prompt.txt', default_prompt)
-    today = datetime.now(_KST).date()
-    weekday = _WEEKDAYS_KO[today.weekday()] + '요일'
-    return (
-        template
-        .replace("{오늘날짜}", today.isoformat())
-        .replace("{오늘요일}", weekday)
-        .replace("{현재연도}", str(today.year))
-    )
+    return _load_prompt_file('system_prompt.txt', default_prompt)
 
 
 def load_query_reform_prompt() -> str:

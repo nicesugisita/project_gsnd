@@ -75,7 +75,7 @@ async def query_recreation(
             messages=llm_messages,
             extra_system_prompts=[recreation_prompt],
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL
+            api_url=Config.RELEVANCE_LLM_API_URL
         )
 
         final_query = ""
@@ -199,7 +199,7 @@ async def classify_next_intent(
             message=formatted_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL,
+            api_url=Config.RELEVANCE_LLM_API_URL,
             extra_system_prompts=[],
         )
 

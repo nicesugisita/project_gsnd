@@ -194,7 +194,7 @@ async def unified_preprocess(
             message=final_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL,
+            api_url=Config.RELEVANCE_LLM_API_URL,
             extra_system_prompts=[],
         )
 

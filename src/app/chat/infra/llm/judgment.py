@@ -191,6 +191,7 @@ async def pre_check(user_query: str, messages: list = None) -> Dict[str, Any]:
             temperature=0,
             response_format={"type": "json_object"},
             extra_system_prompts=[],
+            api_url=Config.RELEVANCE_LLM_API_URL,
         )
 
         stripped = raw.strip()
