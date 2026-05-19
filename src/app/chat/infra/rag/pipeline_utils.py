@@ -83,6 +83,12 @@ def filter_gov_okms_docs_by_lifecycle(
 
     kept: List[Dict[str, Any]] = []
     removed_samples: List[str] = []
+    def _norm_lc(s: str) -> str:
+        # 가운데점(·) 주변 공백 변형을 통일: "임신 · 출산" / "임신· 출산" → "임신·출산"
+        # 일반 공백/탭/NBSP 모두 제거 후 가운데점 표준화.
+        return s.replace(" ", "").replace(" ", "").replace("\t", "").strip()
+
+    target_norm = _norm_lc(target)
     for doc in docs:
         raw_field = str(doc.get("LIFE_CYCLE", "") or "").strip()
         if not raw_field:
@@ -93,10 +99,13 @@ def filter_gov_okms_docs_by_lifecycle(
         # 모두 동일하게 분해
         normalized = raw_field.replace(";", ",").replace("/", ",")
         tokens = [t.strip() for t in normalized.split(",") if t.strip()]
-        # 공백 구분 케이스도 보강
-        if len(tokens) == 1 and " " in tokens[0]:
+        # 공백 구분 케이스도 보강 (가운데점 변형 케이스 제외).
+        # "아동 청년"처럼 콤마/슬래시 없이 공백으로 구분된 경우만 split.
+        if len(tokens) == 1 and " " in tokens[0] and "·" not in tokens[0]:
             tokens = [t.strip() for t in tokens[0].split() if t.strip()]
-        if target in tokens:
+        # 가운데점 주변 공백 통일 후 비교
+        normalized_tokens = [_norm_lc(t) for t in tokens]
+        if target_norm in normalized_tokens:
             kept.append(doc)
         else:
             if len(removed_samples) < 5:
