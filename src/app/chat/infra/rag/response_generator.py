@@ -28,7 +28,6 @@ from app.chat.infra.rag.document import (
 from app.chat.infra.llm import call_llm_api
 from app.chat.infra.db.welfare_tel import has_unregistered_contact
 from app.shared.utils.prompt_loader import (
-    load_system_prompt,
     load_classification_general_prompt,
     load_classification_comparison_prompt,
     load_classification_recommended_prompt,
@@ -160,22 +159,24 @@ async def generate_final_response_v2(
             )
 
         # intent별 프롬프트 선택
+        # general은 guide_recommend와 동일하게 추천 카드 형식으로 응답한다.
+        # (분류기 SLM 이전 후 general 라우팅 시 산문체로 축소되던 회귀 대응)
         if intent == "comparison":
             final_prompt = load_classification_comparison_prompt()
             logger.info("[Final Response v2] Comparison 프롬프트 사용")
-        elif intent == "guide_recommend":
+        elif intent in ("guide_recommend", "general"):
             if use_llm_recommended_prompt:
                 final_prompt = load_classification_llm_recommended_prompt()
-                logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용")
+                logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용 (intent=%s)", intent)
             else:
                 final_prompt = load_classification_recommended_prompt()
-                logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용")
+                logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용 (intent=%s)", intent)
         elif intent == "search":
             final_prompt = load_classification_search_prompt()
             logger.info("[Final Response v2] Search 프롬프트 사용")
         else:
             final_prompt = load_classification_general_prompt()
-            logger.info("[Final Response v2] General 프롬프트 사용")
+            logger.info("[Final Response v2] General 프롬프트 사용 (fallback)")
 
         if not final_prompt:
             logger.warning(f"[Final Response v2] {intent} 프롬프트 로드 실패 - 기본 LLM 사용")
@@ -228,7 +229,8 @@ async def generate_final_response_v2(
                 facility_content += _format_facility_for_prompt(wdoc, i)
 
         # user_message 구성
-        if intent == "guide_recommend":
+        # general도 추천 프롬프트를 쓰므로 guide_recommend와 동일한 메타(지역/출생연도/생애주기) 블록을 채운다.
+        if intent in ("guide_recommend", "general"):
             user_life_stage = lifecycle if lifecycle else "정보 없음"
             region_display = user_region if user_region else "정보 없음"
             birth_year_display = str(user_birth_year) if user_birth_year else "정보 없음"
@@ -243,12 +245,9 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        # 형식 B(4단계 구조) 강제 여부는 detail_requested 단일 신호로만 판단한다.
-        # detail_requested는 두 경로로 set된다:
-        #   1) unified_preprocess의 detail_requested 필드 (첫 메시지의 "자세히" 요청 등)
-        #   2) NextIntent의 MORE_DETAIL 분류 (이전 대화 기반 후속 상세 요청)
-        # 둘 다 LLM이 의미 기반으로 판단하므로, 코드에서 추가 키워드 검사를 하지 않는다.
-        force_form_b = intent == "general" and bool(detail_requested)
+        # general을 guide_recommend 카드 형식으로 통일했으므로 형식 B(4단계 구조)는 더 이상 강제하지 않는다.
+        # detail_requested는 추천 프롬프트의 자체 규칙(전수 안내)으로 대체.
+        force_form_b = False
 
         logger.info(
             "[ResponseGen] more_info_mode=%s intent=%s detail_requested=%s → force_form_b=%s",
@@ -290,20 +289,6 @@ async def generate_final_response_v2(
                 "- 문서를 검토한 뒤 안내할 근거가 없을 때에만 짧은 안내를 덧붙일 수 있으며, "
                 "그 경우에도 답변 전체를 한 줄·한 문장으로만 제한하지 마세요.\n"
             )
-        elif intent == "general":
-            logger.info("[ResponseGen] [추가 규칙] 형식 A 강제 주입 ✓")
-            user_message += (
-                "\n\n[추가 규칙]\n"
-                "- 반드시 형식 A(간결한 한두 문장 또는 단순 나열)로 답변하십시오.\n"
-                "- '1. 사업 개요', '2. 상세 요건', '3. 지원 혜택', '4. 신청 안내' 같은 번호 섹션을 절대 사용하지 마십시오.\n"
-                "- '{연도}년 기준 ... 사업 안내입니다' 형태의 도입부를 절대 쓰지 마십시오.\n"
-                "- 사용자 질문에 '사업', '지원', '안내' 단어가 있더라도 형식 B로 전환하지 마십시오. 이 요청은 일반 설명 요청입니다.\n"
-                "- 답변 마지막에 'retrieved_documents의 문의처'(전화번호·기관명)를 그대로 인용해 한 줄로 안내하십시오. "
-                "예: '자세한 사항은 {문서에 적힌 기관명}({문서에 적힌 전화번호})으로 문의해 주세요.'\n"
-                "- 문서에 문의처가 여러 개면 가장 직접 담당으로 보이는 1개만 인용합니다.\n"
-                "- 문서에 문의처가 전혀 없으면 마지막 안내 줄을 생략합니다. 문의처를 임의로 생성·추측하지 마십시오.\n"
-                "- '자세히 알려줘라고 말씀해 주세요' 같은 안내는 절대 덧붙이지 마십시오.\n"
-            )
 
         if facility_content:
             user_message += (
@@ -318,12 +303,9 @@ async def generate_final_response_v2(
         logger.debug("[Final Response v2] system_prompt:\n%s", system_prompt)
         logger.debug("[Final Response v2] messages:\n%s", final_messages)
 
-        # intent별 전용 프롬프트가 있을 때는 general system_prompt 제외
-        # (general system_prompt의 "비교 금지" 등 규칙이 comparison 등과 충돌)
-        if intent == "general":
-            combined_prompts = [load_system_prompt(), system_prompt]
-        else:
-            combined_prompts = [system_prompt]
+        # general도 추천 프롬프트를 쓰므로 모든 intent에서 분류 프롬프트만 사용한다.
+        # (system_prompt의 일부 규칙이 추천 카드 형식과 충돌하던 회귀 차단)
+        combined_prompts = [system_prompt]
 
         # 풀 페이로드 직렬화는 디버그 시에만 수행 (TTFT 절감)
         # INFO에는 핵심 카운트만 남겨 운영 가시성을 유지한다.

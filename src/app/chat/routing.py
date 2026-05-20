@@ -18,6 +18,7 @@ from typing import Dict, Any, List, Optional, Sequence
 from app.core.config import Config
 from app.core.constants import ROLE_USER, ROLE_ASSISTANT
 from app.chat.infra.llm import call_llm_api
+from app.chat.infra.llm.classifier_fallback import call_classifier_with_fallback
 from .more_results import get_base_user_query_from_history
 from app.chat.infra.deepserver.client import (
     deepserver_expand_query,
@@ -93,21 +94,23 @@ async def query_recreation(
         ]
         logger.info(f"[query_recreation] initial_query: {initial_query}")
         logger.info(f"[query_recreation] messages: {messages}")
-        response = await call_llm_api(
+        parsed, response, used_32b = await call_classifier_with_fallback(
+            classifier_name="QueryRecreation",
+            validate=lambda d: isinstance(d, dict) and isinstance(d.get("final_query"), str) and bool(d.get("final_query").strip()),
             temperature=0,
             messages=llm_messages,
             extra_system_prompts=[recreation_prompt],
             response_format={"type": "json_object"},
-            api_url=Config.RELEVANCE_LLM_API_URL
         )
+        if used_32b:
+            logger.info("[Query Recreation] 32B 폴백 응답 사용")
 
         final_query = ""
-        try:
-            parsed = json.loads(response)
-            rq = parsed.get("final_query") if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            rq = parsed.get("final_query")
             if isinstance(rq, str):
                 final_query = rq.strip()
-        except Exception:
+        if not final_query and isinstance(response, str):
             final_query = response.strip()
 
         final_query = _apply_keyword_boost(final_query)
@@ -219,24 +222,27 @@ async def classify_next_intent(
             .replace("{is_clarification_question}", is_clarify_str)
         )
 
-        response = await call_llm_api(
+        parsed, response, used_32b = await call_classifier_with_fallback(
+            classifier_name="NextIntent",
             message=formatted_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.RELEVANCE_LLM_API_URL,
             extra_system_prompts=[],
         )
-
-        text = str(response or "").strip()
-        if text.startswith("```"):
-            text = (
-                text.removeprefix("```json")
-                    .removeprefix("```")
-                    .removesuffix("```")
-                    .strip()
-            )
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        parsed = json.loads(match.group(0) if match else text)
+        if parsed is None:
+            # 마지막 방어선: raw 응답에서 { ... } 패턴 추출 후 재파싱
+            text = str(response or "").strip()
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except Exception:
+                    parsed = None
+        if not isinstance(parsed, dict):
+            logger.warning("[NextIntent] SLM/32B 모두 파싱 실패 → OTHER 폴백 (used_32b=%s)", used_32b)
+            return fallback
+        if used_32b:
+            logger.info("[NextIntent] 32B 폴백 응답 사용")
 
         raw_intent = str(parsed.get("intent", "OTHER")).upper()
         if raw_intent in _VALID_NEXT_INTENTS:

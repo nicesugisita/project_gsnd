@@ -13,6 +13,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.core.config import Config
+from app.core.constants import GUIDE_RECOMMEND_MAX_TOKENS
 
 # general 전용 Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
@@ -145,6 +146,7 @@ async def process_rag_general(
         # sigun_filters가 외부에서 전달된 경우(히스토리/위치명 기반 확정값) 그대로 사용
         if sigun_filters is not None:
             gen_sigun_filters = sigun_filters
+            gen_sigun_raws = [s.replace("경상남도 ", "") for s in sigun_filters]
             logger.debug(f"[RAG/general_v2] 외부 sigun_filters 사용: {gen_sigun_filters}")
         else:
             gen_sigun_raws = _extract_sigun_from_message(message)
@@ -394,7 +396,11 @@ async def process_rag_general(
         # ====================================================================
         # Step 6: OKMS GroupA → top N
         # ====================================================================
-        _GEN_FINAL_TOP_N = 15 if more_detail else 8
+        # 필터 ON: 15/8, 필터 OFF: 20/12 (필터 제거 보상)
+        if Config.RELEVANCE_FILTER_ENABLED:
+            _GEN_FINAL_TOP_N = 15 if more_detail else 8
+        else:
+            _GEN_FINAL_TOP_N = 20 if more_detail else 12
         _FALLBACK_THRESHOLD = 1
         okms_final = okms_group_a_top[:_GEN_FINAL_TOP_N]
         logger.info(f"[RAG/general_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(okms_group_a_top)}개)")
@@ -464,14 +470,17 @@ async def process_rag_general(
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        top_docs = await filter_irrelevant_docs(
-            reformed_query,
-            top_docs,
-            sigun_filters=gen_sigun_filters,
-            max_judgment_docs=20 if more_detail else None,
-        )
-        logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        if Config.RELEVANCE_FILTER_ENABLED:
+            top_docs = await filter_irrelevant_docs(
+                reformed_query,
+                top_docs,
+                sigun_filters=gen_sigun_filters,
+                max_judgment_docs=20 if more_detail else None,
+            )
+            logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
+            logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        else:
+            logger.info("[RAG/general_v2] Step7-C 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
 
         # ====================================================================
         # Step 7-C-3: 관련성 필터 0건 → GroupA 하위 문서 재시도
@@ -490,9 +499,13 @@ async def process_rag_general(
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
                 )
-                top_docs = await filter_irrelevant_docs(
-                    reformed_query, lower_docs, sigun_filters=gen_sigun_filters
-                )
+                if Config.RELEVANCE_FILTER_ENABLED:
+                    top_docs = await filter_irrelevant_docs(
+                        reformed_query, lower_docs, sigun_filters=gen_sigun_filters
+                    )
+                else:
+                    top_docs = lower_docs
+                    logger.info("[RAG/general_v2] Step7-C-3 관련성 필터 SKIP — lower_docs %d건 그대로", len(top_docs))
                 logger.info(
                     "[TIMING][general] Step7-C-3 GroupA 하위 재시도: %.3fs", time.monotonic() - _t
                 )
@@ -552,9 +565,13 @@ async def process_rag_general(
                 )
 
                 _t = time.monotonic()
-                top_docs = await filter_irrelevant_docs(
-                    reformed_query, fb_pool, sigun_filters=gen_sigun_filters
-                )
+                if Config.RELEVANCE_FILTER_ENABLED:
+                    top_docs = await filter_irrelevant_docs(
+                        reformed_query, fb_pool, sigun_filters=gen_sigun_filters
+                    )
+                else:
+                    top_docs = fb_pool
+                    logger.info("[RAG/general_v2] Step7-C-4 재검색 관련성 필터 SKIP — fb_pool %d건 그대로", len(top_docs))
                 logger.info(
                     "[TIMING][general] Step7-C-4 재검색 관련성 필터: %.3fs", time.monotonic() - _t
                 )
@@ -588,12 +605,23 @@ async def process_rag_general(
         # ====================================================================
         _t = time.monotonic()
         _final_user_msg = (final_user_message or "").strip() or message
+        # general도 guide_recommend 카드 형식으로 답하므로 토큰 하한·메타(지역/출생연도/policy)도 동일하게 적용
+        user_region = " ".join(r for r in gen_sigun_raws if r != "경남") or ""
+        _gen_max_tokens = max(max_tokens or 0, GUIDE_RECOMMEND_MAX_TOKENS)
+        if _gen_max_tokens != max_tokens:
+            logger.info(
+                "[general] max_tokens floor 적용: %s → %s",
+                max_tokens, _gen_max_tokens,
+            )
         response = await generate_final_response_v2(
-            _final_user_msg, top_docs, temperature, max_tokens, stream,
+            _final_user_msg, top_docs, temperature, _gen_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
+            user_region=user_region,
+            user_birth_year=str(gen_birth_year) if gen_birth_year else "",
             more_info_mode=more_detail or bool(excluded_chunk_ids or excluded_service_names),
             detail_requested=bool(more_detail),
         )

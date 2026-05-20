@@ -14,6 +14,7 @@ from datetime import date
 from typing import Dict, Any, List, Optional
 
 from app.core.config import Config
+from app.core.constants import GUIDE_RECOMMEND_MAX_TOKENS
 
 # OKMS Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
@@ -298,8 +299,9 @@ async def process_rag_guide_recommend(
                 f"  CHUNK_ID={doc.get('CHUNK_ID', '')}"
             )
 
-        # Step D: OKMS 쿼터 → top 5
-        _GR_FINAL_TOP_N = 5
+        # Step D: OKMS 쿼터 → top N (필터 ON: 5, 필터 OFF: 8)
+        # RELEVANCE_FILTER_ENABLED=False 시 dedupe 만으로 노이즈 흡수 가능한지 측정용 보상값.
+        _GR_FINAL_TOP_N = 5 if Config.RELEVANCE_FILTER_ENABLED else 8
         gr_top_docs = gr_group_a_top[:_GR_FINAL_TOP_N]
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 쿼터 확정: {len(gr_top_docs)}개")
         for i, doc in enumerate(gr_top_docs, 1):
@@ -379,9 +381,12 @@ async def process_rag_guide_recommend(
         )
         # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
         _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")]
-        gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
-        logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(f"[RAG/guide_recommend_v2] 관련성 필터 후: {len(gr_top_docs)}개 문서")
+        if Config.RELEVANCE_FILTER_ENABLED:
+            gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
+            logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
+            logger.info(f"[RAG/guide_recommend_v2] 관련성 필터 후: {len(gr_top_docs)}개 문서")
+        else:
+            logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(gr_top_docs))
 
         # D-1 SLM 필터가 전부 제거하면 reserve·재귀 생략 — 컬렉션 자체에 해당 쿼리와
         # 관련된 문서가 없다는 신호이므로 추가 검색해도 의미 없다.
@@ -645,7 +650,7 @@ async def process_rag_guide_recommend(
         # 재귀(D-1.5) 내부에서는 속도를 위해 SLM 필터를 생략하므로, 응답 직전에 한 번 더 검증.
         # 재귀로 신규 문서가 추가된 경우에만 실행.
         # ====================================================================
-        if _recur_added:
+        if _recur_added and Config.RELEVANCE_FILTER_ENABLED:
             _t = time.monotonic()
             gr_top_docs = await filter_irrelevant_docs(
                 reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters
@@ -657,6 +662,8 @@ async def process_rag_guide_recommend(
             logger.info(
                 f"[RAG/guide_recommend_v2] 재귀 후 관련성 재필터 결과: {len(gr_top_docs)}개 문서"
             )
+        elif _recur_added:
+            logger.info("[RAG/guide_recommend_v2] StepD-1.6 재귀 후 재필터 SKIP (RELEVANCE_FILTER_ENABLED=False)")
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순
         gr_top_docs = sort_weight_top30_then_year(gr_top_docs)
@@ -671,8 +678,15 @@ async def process_rag_guide_recommend(
         user_region = " ".join(r for r in sigun_raws if r != "경남") or ""
         _t = time.monotonic()
         _final_user_msg = (final_user_message or "").strip() or message
+        # 카드 포맷이 잘리지 않도록 max_tokens 하한선 적용 (요청값 < 임계 또는 None이면 끌어올림)
+        _gr_max_tokens = max(max_tokens or 0, GUIDE_RECOMMEND_MAX_TOKENS)
+        if _gr_max_tokens != max_tokens:
+            logger.info(
+                "[guide_recommend] max_tokens floor 적용: %s → %s",
+                max_tokens, _gr_max_tokens,
+            )
         gr_response = await generate_final_response_v2(
-            _final_user_msg, gr_top_docs, temperature, max_tokens, stream,
+            _final_user_msg, gr_top_docs, temperature, _gr_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             lifecycle=lifecycle,

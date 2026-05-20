@@ -48,3 +48,46 @@ cases:
         - { role: user, content: "김해는?" }
     asserts:
       - { op: equals, field: intent, value: REFINE_SEARCH }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 260519 분류기 SLM 회귀 (qa_test/260519_gsnd_total_result.xlsx)
+  # ──────────────────────────────────────────────────────────────────────
+
+  - name: regression_slm_no91_facility_lookup_after_comparison
+    tags: [regression, slm_regression, new_search, gsnd_260519]
+    notes: |
+      gsnd_total no=91 ([90-2]).
+      직전 turn(no=90)에서 김해·진주 아동수당 comparison이 안내됐고, 후속
+      "각 문의처를 알려줘"는 시설/연락처 조회 → NEW_SEARCH.
+      SLM(8B)이 이를 놓치고 guide_recommend로 잘못 라우팅한 회귀.
+    inputs:
+      prior_intent: comparison
+      prior_service_names: ["김해시 아동수당", "진주시 아동수당"]
+      user_query: "김해랑 진주의 각 문의처를 알려줘"
+      messages:
+        - { role: user, content: "김해 아동수당이랑 진주 아동수당을 비교해줘요" }
+        - { role: assistant, content: "김해시와 진주시의 아동수당은 ... [비교 표] ..." }
+        - { role: user, content: "김해랑 진주의 각 문의처를 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: NEW_SEARCH }
+
+  - name: regression_slm_no150_more_info_simple
+    tags: [regression, slm_regression, more_info, gsnd_260519]
+    notes: |
+      gsnd_total no=150 ([149-2]).
+      직전 turn(no=149)에서 한부모 형편어려움 guide_recommend가 안내됐고, 후속
+      "더 알려줘"는 같은 맥락의 추가 안내 요청 → MORE_INFO.
+      SLM(8B)이 의도를 놓치고 빈 응답("확인할 수 없습니다")을 낸 회귀.
+    inputs:
+      prior_intent: guide_recommend
+      prior_service_names:
+        - "0~2세 보육료 지원"
+        - "가정양육수당 지원사업"
+        - "저소득층 기저귀 조제분유 지원"
+      user_query: "더 알려줘"
+      messages:
+        - { role: user, content: "창원에서 혼자 2살 아이를 키우고 있어, 형편이 어려운데 도움 받을 수 있는게 있을까" }
+        - { role: assistant, content: "질문과 관련된 복지서비스는 다음과 같습니다.\n[서비스 1] 0~2세 보육료 지원 ...\n[서비스 2] 가정양육수당 지원사업 ...\n[서비스 3] 저소득층 기저귀 조제분유 지원 ..." }
+        - { role: user, content: "더 알려줘" }
+    asserts:
+      - { op: equals, field: intent, value: MORE_INFO }

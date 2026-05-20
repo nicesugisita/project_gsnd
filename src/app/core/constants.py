@@ -76,6 +76,11 @@ LLM_SYSTEM_MSG_MAX_CHARS = 4000      # 시스템 메시지 절단 기준
 LLM_MSG_MAX_CHARS = 3000             # 일반 메시지 절단 기준
 LLM_TRUNCATE_HEAD_RATIO: float = 0.7 # 컨텍스트 절단 시 앞부분 비율
 
+# guide_recommend 최종 응답 LLM 호출의 max_tokens 하한.
+# 카드 포맷(여러 사업 안내)이 1024 한도에서 잘리는 사례가 잦아 2048로 상향.
+# 요청값(chat_request.max_completion_tokens)이 이보다 작거나 None이면 이 값을 사용한다.
+GUIDE_RECOMMEND_MAX_TOKENS = 2048
+
 # ============================================================================
 # TTS 처리 제한
 # ============================================================================

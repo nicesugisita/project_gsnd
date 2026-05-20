@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     TEXT_CLEANING_ENABLED: bool = True
     KOREAN_STANDARDIZATION_ENABLED: bool = True
 
+    # SLM 기반 문서 관련성 필터(filter_irrelevant_docs) 사용 여부.
+    # False 시 필터를 스킵하고 각 파이프라인의 FINAL_TOP_N 을 상향(+50%대)하여
+    # 후처리 dedupe 만으로 노이즈 문서를 흡수할 수 있는지 측정한다.
+    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후
+    # referenced_documents / 최종 응답을 비교 (RELEVANCE_FILTER_ENABLED=true/false).
+    RELEVANCE_FILTER_ENABLED: bool = True
+
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
     DEEPSERVER_TIMEOUT: float = 30.0
