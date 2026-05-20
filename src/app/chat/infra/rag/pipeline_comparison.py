@@ -279,8 +279,7 @@ async def process_rag_with_documents_v2(
         # ====================================================================
         # Step 5: Group A → top 5
         # ====================================================================
-        # 필터 ON: 8, 필터 OFF: 12 (필터 제거 보상)
-        _COMP_FINAL_TOP_N = 8 if Config.RELEVANCE_FILTER_ENABLED else 12
+        _COMP_FINAL_TOP_N = 12
         _FALLBACK_THRESHOLD = 1
         okms_final = comp_group_a_top[:_COMP_FINAL_TOP_N]
         logger.info(f"[RAG/comparison_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(comp_group_a_top)}개)")
