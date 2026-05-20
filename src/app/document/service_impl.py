@@ -77,7 +77,7 @@ class DocumentService:
             cursor = conn.cursor(dictionary=True)
 
             query = f"""
-                SELECT ORG_NM, UUID_PATH
+                SELECT ORG_NM, SAVE_PATH
                 FROM {self.okms_doc_table}
                 WHERE ORG_NM = %s
                 LIMIT 1
@@ -90,7 +90,7 @@ class DocumentService:
                 return {
                     'id': None,
                     'name': result.get('ORG_NM', ''),
-                    'path': result.get('UUID_PATH', '')
+                    'path': result.get('SAVE_PATH', '')
                 }
             return None
         except MySQLError as e:
@@ -172,7 +172,7 @@ class DocumentService:
 
             placeholders = ','.join(['%s'] * len(doc_names))
             query = f"""
-                SELECT ORG_NM, UUID_PATH
+                SELECT ORG_NM, SAVE_PATH
                 FROM {self.okms_doc_table}
                 WHERE ORG_NM IN ({placeholders})
             """
@@ -185,7 +185,7 @@ class DocumentService:
                 documents.append({
                     'id': None,
                     'name': row.get('ORG_NM', ''),
-                    'path': row.get('UUID_PATH', '')
+                    'path': row.get('SAVE_PATH', '')
                 })
             return documents
         except MySQLError as e:
