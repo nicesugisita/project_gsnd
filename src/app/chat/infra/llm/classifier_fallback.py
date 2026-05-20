@@ -22,6 +22,7 @@ import logging
 from typing import Any, Callable, Optional, Tuple
 
 from app.core.config import Config
+from app.core.exceptions import LLMServiceError
 from .core import call_llm_api
 
 logger = logging.getLogger(__name__)
@@ -71,25 +72,47 @@ async def call_classifier_with_fallback(
     """
     llm_kwargs.pop("api_url", None)
 
-    raw = await call_llm_api(**llm_kwargs, api_url=Config.RELEVANCE_LLM_API_URL)
+    # SLM 1차 호출. status 200/content=null 같은 회귀로 LLMServiceError가 던져져도
+    # 즉시 전파하지 않고 32B 폴백을 시도하도록 흡수한다.
+    raw: str = ""
+    slm_error: Optional[Exception] = None
+    try:
+        raw = await call_llm_api(**llm_kwargs, api_url=Config.RELEVANCE_LLM_API_URL)
+    except LLMServiceError as e:
+        slm_error = e
+        logger.warning("[%s] SLM 호출 실패 (%s) → 32B 폴백 시도", classifier_name, e)
+
     parsed = _try_parse_json(raw)
     schema_ok = bool(parsed) and (validate(parsed) if validate else True)
-    if schema_ok:
+    if schema_ok and slm_error is None:
         return parsed, raw, False
 
     fallback_url = Config.LLM_API_URL
     if not fallback_url:
+        if slm_error is not None:
+            # 32B 폴백 URL이 없으면 더 이상 시도할 수 없음 → 원본 예외 그대로 전파
+            raise slm_error
         logger.warning(
             "[%s] SLM 파싱/스키마 실패했지만 LLM_API_URL이 비어있어 32B 폴백 불가",
             classifier_name,
         )
         return parsed, raw, False
 
-    logger.warning(
-        "[%s] SLM 응답 파싱/스키마 실패 → 32B 폴백 재호출 (parse_ok=%s)",
-        classifier_name,
-        bool(parsed),
-    )
-    raw2 = await call_llm_api(**llm_kwargs, api_url=fallback_url)
+    if slm_error is None:
+        logger.warning(
+            "[%s] SLM 응답 파싱/스키마 실패 → 32B 폴백 재호출 (parse_ok=%s)",
+            classifier_name,
+            bool(parsed),
+        )
+    # 32B 폴백도 동일하게 예외 흡수. 둘 다 실패하면 (None, "", True) 반환해서
+    # 호출부의 _make_fallback이 안전한 기본값으로 운영을 지속할 수 있게 한다.
+    try:
+        raw2 = await call_llm_api(**llm_kwargs, api_url=fallback_url)
+    except LLMServiceError as e:
+        logger.error(
+            "[%s] 32B 폴백 호출도 실패 (%s) — 상위 폴백으로 위임",
+            classifier_name, e,
+        )
+        return None, "", True
     parsed2 = _try_parse_json(raw2)
     return parsed2, raw2, True

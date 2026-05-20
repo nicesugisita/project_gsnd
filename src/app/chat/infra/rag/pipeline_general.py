@@ -78,6 +78,7 @@ async def process_rag_general(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
     more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -264,6 +265,23 @@ async def process_rag_general(
         else:
             logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
 
+        # service_target에 따라 GSND 컬렉션 분기.
+        # citizen 컬렉션이 미설정(.env 누락 등)이면 official로 안전 폴백.
+        _is_citizen = (service_target or "official").strip().lower() == "citizen"
+        _gsnd_collection = (
+            Config.RAG_COLLECTION_CITIZEN
+            if _is_citizen and Config.RAG_COLLECTION_CITIZEN
+            else Config.RAG_COLLECTION
+        )
+        if _is_citizen and not Config.RAG_COLLECTION_CITIZEN:
+            logger.warning(
+                "[RAG/general_v2] service_target=citizen 이지만 RAG_COLLECTION_CITIZEN 미설정 → RAG_COLLECTION 폴백"
+            )
+        logger.info(
+            "[RAG/general_v2] GSND 컬렉션 선택: service_target=%s → %s",
+            service_target, _gsnd_collection,
+        )
+
         def _run_gsnd_query(query: str) -> Tuple[List[Dict[str, Any]], bool]:
             for attempt in range(2):
                 try:
@@ -273,7 +291,7 @@ async def process_rag_general(
                     # 균일하지 않아 시군 필터를 적용하면 Mariner 서버 단계에서 통째로
                     # 제외되는 문제가 있다. 진단/완화를 위해 시군 필터 미적용.
                     docs = query_GSND_general_documents(
-                        query, Config.RAG_COLLECTION,
+                        query, _gsnd_collection,
                         sigun_filters=None,
                         year_filters=gsnd_year_filters or None,
                         excluded_chunk_ids=excluded_chunk_ids,

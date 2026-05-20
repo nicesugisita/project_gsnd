@@ -81,6 +81,7 @@ async def process_rag_search(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
@@ -89,6 +90,7 @@ async def process_rag_search(
     welfare_facility → WELFARE_CENTER 만 Mariner 검색. ambiguous·미전달은 OUR_REGION_TEL.
     """
 
+    _ = service_target  # search는 GSND 미사용 — 시그니처 호환 위해 받기만 함
     precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:

@@ -127,7 +127,8 @@ class Settings(BaseSettings):
 
     # ── RAG ───────────────────────────────────────────────────────────────────
     RAG_ENABLED: bool = True
-    RAG_COLLECTION: str = ""
+    RAG_COLLECTION: str = ""              # GSND_DATASET_V8 (service_target='official')
+    RAG_COLLECTION_CITIZEN: str = ""      # GSND_DATASET_V8_CITIZEN (service_target='citizen')
     RAG_THRESHOLD: float = 0.0
     RAG_USE_QA_WHEN_EMPTY: bool = True
     RAG_NUM_REFERENCED_DOCS: int = 5

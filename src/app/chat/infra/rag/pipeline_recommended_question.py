@@ -59,6 +59,7 @@ async def process_rag_recommended_question(
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
 ) -> Tuple[Any, List[Dict[str, str]]]:
     """
     호출 시그니처는 process_rag_guide_recommend와 동일하게 유지한다.
@@ -72,6 +73,7 @@ async def process_rag_recommended_question(
         intent,
         precomputed_search_target,
         precomputed_policy_priority_tag,
+        service_target,  # recommended_question은 GSND 미사용 — 시그니처 호환 위해 받기만 함
     )
 
     try:
