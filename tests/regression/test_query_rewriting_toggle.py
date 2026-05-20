@@ -35,11 +35,12 @@ def _mock_llm_response(*, expanded_count: int = 5) -> str:
 async def test_expand_mode_keeps_multiple_expansions(monkeypatch: pytest.MonkeyPatch) -> None:
     """QUERY_REWRITING_ENABLED=False(기본) — LLM 이 반환한 expansion 다수 유지."""
     from app.chat import preprocessing
+    from app.chat.infra.llm import classifier_fallback
 
     monkeypatch.setattr(preprocessing.Config, "QUERY_REWRITING_ENABLED", False)
 
     with patch.object(
-        preprocessing, "call_llm_api", return_value=_mock_llm_response(expanded_count=5)
+        classifier_fallback, "call_llm_api", return_value=_mock_llm_response(expanded_count=5)
     ), patch.object(
         preprocessing, "load_unified_preprocessing_prompt", return_value="dummy {사용자 질문}"
     ):
@@ -61,11 +62,12 @@ async def test_expand_mode_keeps_multiple_expansions(monkeypatch: pytest.MonkeyP
 async def test_rewrite_mode_forces_single_query(monkeypatch: pytest.MonkeyPatch) -> None:
     """QUERY_REWRITING_ENABLED=True — LLM 이 5개 반환해도 [reformed_query] 단일 원소로 강제."""
     from app.chat import preprocessing
+    from app.chat.infra.llm import classifier_fallback
 
     monkeypatch.setattr(preprocessing.Config, "QUERY_REWRITING_ENABLED", True)
 
     with patch.object(
-        preprocessing, "call_llm_api", return_value=_mock_llm_response(expanded_count=5)
+        classifier_fallback, "call_llm_api", return_value=_mock_llm_response(expanded_count=5)
     ), patch.object(
         preprocessing, "load_unified_preprocessing_prompt", return_value="dummy {사용자 질문}"
     ):

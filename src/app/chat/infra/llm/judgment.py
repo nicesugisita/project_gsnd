@@ -20,6 +20,7 @@ from app.chat.infra.deepserver.client import (
 )
 
 from .core import call_llm_api
+from .classifier_fallback import call_classifier_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -186,23 +187,21 @@ async def pre_check(user_query: str, messages: list = None) -> Dict[str, Any]:
         prompt_input = _build_pre_check_input(user_query, messages or [])
         final_prompt = prompt_template.replace("{사용자 질문}", prompt_input)
 
-        raw = await call_llm_api(
+        parsed, raw, used_32b = await call_classifier_with_fallback(
+            classifier_name="PreCheck",
             message=final_prompt,
             temperature=0,
             response_format={"type": "json_object"},
             extra_system_prompts=[],
         )
-
-        stripped = raw.strip()
-        if stripped.startswith("```"):
-            stripped = (
-                stripped.removeprefix("```json")
-                        .removeprefix("```")
-                        .removesuffix("```")
-                        .strip()
+        if parsed is None:
+            logger.warning(
+                "[PreCheck] SLM/32B 모두 JSON 파싱 실패 → 폴백 반환 (used_32b=%s)",
+                used_32b,
             )
-
-        parsed = json.loads(stripped)
+            return _fallback
+        if used_32b:
+            logger.info("[PreCheck] 32B 폴백 응답으로 파싱 성공")
         use_rag = bool(parsed.get("use_rag", True))
         clarification_question = str(parsed.get("clarification_question", "")).strip()
 

@@ -14,7 +14,9 @@ from app.chat.infra.rag.query_builder import (
 )
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm import call_llm_api
+from app.chat.infra.llm.classifier_fallback import call_classifier_with_fallback
 from app.shared.utils.prompt_loader import load_unified_preprocessing_prompt
+from app.chat.routing import KEYWORD_BOOST_MAP, _apply_keyword_boost
 
 logger = logging.getLogger(__name__)
 
@@ -190,28 +192,22 @@ async def unified_preprocess(
     final_prompt = prompt_template.replace("{사용자 질문}", prompt_input)
 
     try:
-        raw = await call_llm_api(
+        parsed, raw, used_32b = await call_classifier_with_fallback(
+            classifier_name="UnifiedPreprocess",
             message=final_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL,
             extra_system_prompts=[],
         )
-
-        stripped = raw.strip()
-        if stripped.startswith("```"):
-            stripped = (
-                stripped.removeprefix("```json")
-                        .removeprefix("```")
-                        .removesuffix("```")
-                        .strip()
+        if parsed is None:
+            logger.warning(
+                "[UnifiedPreprocess] SLM/32B 양쪽 모두 JSON 파싱 실패 → 폴백 반환 (used_32b=%s)",
+                used_32b,
             )
+            return _make_fallback(user_query)
+        if used_32b:
+            logger.info("[UnifiedPreprocess] 32B 폴백 응답으로 파싱 성공")
 
-        parsed = json.loads(stripped)
-
-    except json.JSONDecodeError as e:
-        logger.warning("[UnifiedPreprocess] JSON 파싱 실패: %s", e)
-        return _make_fallback(user_query)
     except Exception as e:
         logger.error("[UnifiedPreprocess] LLM 호출 실패: %s", e, exc_info=True)
         return _make_fallback(user_query)
@@ -242,9 +238,23 @@ async def unified_preprocess(
         expanded = [q for q in expanded if q]
         if not expanded:
             expanded = [reformed] if reformed else [user_query]
+        # KEYWORD_BOOST_MAP 후처리: unified_preprocess LLM이 reformed_query/expanded_queries에서
+        # 부스팅 키워드(예: 실직→긴급지원제도)를 떨어뜨리는 경우가 있어 검색 직전 한 번 더 복원한다.
+        # 트리거 매칭은 user_query·reformed 양쪽에서 평가해 LLM이 트리거 단어 자체를 다른 표현으로
+        # 바꿔도 부스팅이 발동되도록 함.
+        boost_basis = f"{user_query} {reformed}"
+        reformed = _apply_keyword_boost(reformed)
+        expanded = [_apply_keyword_boost(q) for q in expanded]
         try:
             raw_keywords = extract_nouns(reformed)
             keywords = sanitize_disability_keywords(raw_keywords, user_query)
+            # 부스팅 사업명이 명사 분해로 토큰화돼도 Mariner keyword 검색에서 정확히 잡히도록
+            # 원본 사업명을 keywords 풀에도 보장 주입한다.
+            for trigger, boost_terms in KEYWORD_BOOST_MAP.items():
+                if trigger in boost_basis:
+                    for term in boost_terms:
+                        if term and term not in keywords:
+                            keywords.append(term)
             if raw_reformed != reformed or raw_expanded != expanded or raw_keywords != keywords:
                 logger.info(
                     "[UnifiedPreprocess] 대상집단 가드 적용 | reformed_changed=%s | expanded_changed=%s | keywords_changed=%s",

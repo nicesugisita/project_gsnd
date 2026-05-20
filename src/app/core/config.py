@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     TEXT_CLEANING_ENABLED: bool = True
     KOREAN_STANDARDIZATION_ENABLED: bool = True
 
+    # SLM 기반 문서 관련성 필터(filter_irrelevant_docs) 사용 여부.
+    # False 시 필터를 스킵하고 각 파이프라인의 FINAL_TOP_N 을 상향(+50%대)하여
+    # 후처리 dedupe 만으로 노이즈 문서를 흡수할 수 있는지 측정한다.
+    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후
+    # referenced_documents / 최종 응답을 비교 (RELEVANCE_FILTER_ENABLED=true/false).
+    RELEVANCE_FILTER_ENABLED: bool = True
+
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
     DEEPSERVER_TIMEOUT: float = 30.0
@@ -120,7 +127,8 @@ class Settings(BaseSettings):
 
     # ── RAG ───────────────────────────────────────────────────────────────────
     RAG_ENABLED: bool = True
-    RAG_COLLECTION: str = ""
+    RAG_COLLECTION: str = ""              # GSND_DATASET_V8 (service_target='official')
+    RAG_COLLECTION_CITIZEN: str = ""      # GSND_DATASET_V8_CITIZEN (service_target='citizen')
     RAG_THRESHOLD: float = 0.0
     RAG_USE_QA_WHEN_EMPTY: bool = True
     RAG_NUM_REFERENCED_DOCS: int = 5
@@ -136,6 +144,11 @@ class Settings(BaseSettings):
     # rewrite 모드는 대화 맥락 흡수·모호함 해소·키워드 강화로 정밀도 ↑, Mariner 호출 수 ↓.
     # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
     QUERY_REWRITING_ENABLED: bool = True
+
+    # 분류기 단축 프롬프트 우선 로드 토글. True 면 prompts/short/<filename> 가 존재할 때
+    # 그것을 우선 사용한다. unified_preprocessing/pre_check/next_intent 등 분류기 프롬프트의
+    # 압축본(원본 대비 60~83% 단축)을 운영에 적용할 때 켠다. 기본 False 로 회귀 위험 차단.
+    USE_SHORT_PROMPTS: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""

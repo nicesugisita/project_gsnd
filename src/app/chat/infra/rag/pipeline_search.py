@@ -81,6 +81,7 @@ async def process_rag_search(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
@@ -89,6 +90,7 @@ async def process_rag_search(
     welfare_facility → WELFARE_CENTER 만 Mariner 검색. ambiguous·미전달은 OUR_REGION_TEL.
     """
 
+    _ = service_target  # search는 GSND 미사용 — 시그니처 호환 위해 받기만 함
     precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
@@ -258,7 +260,7 @@ async def process_rag_search(
                 len(top_docs),
             )
             logger.info("[TIMING][search] Step6 관련성 필터: 생략 (0s)")
-        else:
+        elif Config.RELEVANCE_FILTER_ENABLED:
             top_docs = await filter_irrelevant_docs(
                 reformed_query,
                 top_docs,
@@ -267,6 +269,9 @@ async def process_rag_search(
             )
             logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t_ref)
             logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        else:
+            # search: 필터 OFF 시 cap 없이 dedupe·정렬된 결과 전부 반환 (시설/연락처 조회 특성상 누락 방지)
+            logger.info("[RAG/search_v2] Step6 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — %d건 전체 반환", len(top_docs))
         logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 끝]-----------")
 
         if excluded_chunk_ids or excluded_service_names:

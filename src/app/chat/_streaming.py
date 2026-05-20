@@ -643,6 +643,7 @@ async def _streaming_chat_flow(
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
             precomputed_policy_priority_tag=policy_priority_tag,
+            service_target=getattr(chat_request, "service_target", None) or "official",
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
             final_user_message=more.final_user_message,

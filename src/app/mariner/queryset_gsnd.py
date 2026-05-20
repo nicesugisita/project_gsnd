@@ -43,7 +43,11 @@ def _uses_okms_document_schema(collection: Optional[str]) -> bool:
 
 
 def _uses_gsnd_v7_schema(collection: Optional[str]) -> bool:
-    return (collection or "").strip().upper() == Config.RAG_COLLECTION.upper()
+    # GSND_DATASET_V8 (official)과 GSND_DATASET_V8_CITIZEN (citizen)은 동일 스키마
+    name = (collection or "").strip().upper()
+    return name == Config.RAG_COLLECTION.upper() or (
+        bool(Config.RAG_COLLECTION_CITIZEN) and name == Config.RAG_COLLECTION_CITIZEN.upper()
+    )
 
 
 def _uses_welfare_center_schema(collection: Optional[str]) -> bool:
