@@ -75,6 +75,7 @@ async def process_rag_guide_recommend(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
@@ -223,6 +224,7 @@ async def process_rag_guide_recommend(
                     sigun_filters=gr_sigun_filters,
                     lifecycle_filter=lifecycle or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -238,6 +240,7 @@ async def process_rag_guide_recommend(
                     lifecycle_filter=lifecycle or None,
                     sigun_filters=gr_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=gr_hshd_sttn or None,
                     hshd_sttn_synonyms=gr_hshd_synonyms or None,
                 )
@@ -328,6 +331,7 @@ async def process_rag_guide_recommend(
                         sigun_filters=gr_sigun_filters,
                         lifecycle_filter=None,
                         excluded_chunk_ids=excluded_chunk_ids,
+                        excluded_business_keywords=llm_excluded_services,
                         apply_business_anchor=False,
                     )
                 except Exception as e:
@@ -536,6 +540,7 @@ async def process_rag_guide_recommend(
                             sigun_filters=gr_sigun_filters,
                             lifecycle_filter=_lc_v,
                             excluded_chunk_ids=_excl,
+                            excluded_business_keywords=llm_excluded_services,
                             apply_business_anchor=False,
                         )
                     except Exception as e:
@@ -550,6 +555,7 @@ async def process_rag_guide_recommend(
                             lifecycle_filter=_lc_v,
                             sigun_filters=gr_sigun_filters,
                             excluded_chunk_ids=_excl,
+                            excluded_business_keywords=llm_excluded_services,
                             hshd_sttn_filter=gr_hshd_sttn or None,
                             hshd_sttn_synonyms=gr_hshd_synonyms or None,
                         )

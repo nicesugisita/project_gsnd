@@ -211,6 +211,7 @@ async def _handle_rag_mode(
     policy_priority_tag: str | None = None,
     excluded_chunk_ids: list | None = None,
     excluded_service_names: list | None = None,
+    llm_excluded_services: list | None = None,
     final_user_message: str | None = None,
     more_info: bool = False,
     more_detail: bool = False,
@@ -295,6 +296,7 @@ async def _handle_rag_mode(
                 precomputed_policy_priority_tag=policy_priority_tag,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
+                llm_excluded_services=llm_excluded_services,
                 final_user_message=final_user_message,
             )
             if intent == "general":
@@ -434,6 +436,7 @@ async def _handle_rag_mode(
             precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
+            llm_excluded_services=llm_excluded_services,
             final_user_message=final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )

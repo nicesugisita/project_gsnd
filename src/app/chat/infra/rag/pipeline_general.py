@@ -75,6 +75,7 @@ async def process_rag_general(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
@@ -195,6 +196,7 @@ async def process_rag_general(
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] Group A 쿼리 검색 실패: {e}")
@@ -211,6 +213,7 @@ async def process_rag_general(
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -226,6 +229,7 @@ async def process_rag_general(
                     lifecycle_filter=gen_lifecycle or None,
                     sigun_filters=gen_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                 )
@@ -269,13 +273,13 @@ async def process_rag_general(
         # citizen 컬렉션이 미설정(.env 누락 등)이면 official로 안전 폴백.
         _is_citizen = (service_target or "official").strip().lower() == "citizen"
         _gsnd_collection = (
-            Config.RAG_COLLECTION_CITIZEN
-            if _is_citizen and Config.RAG_COLLECTION_CITIZEN
+            Config.RAG_CITIZEN_COLLECTION
+            if _is_citizen and Config.RAG_CITIZEN_COLLECTION
             else Config.RAG_COLLECTION
         )
-        if _is_citizen and not Config.RAG_COLLECTION_CITIZEN:
+        if _is_citizen and not Config.RAG_CITIZEN_COLLECTION:
             logger.warning(
-                "[RAG/general_v2] service_target=citizen 이지만 RAG_COLLECTION_CITIZEN 미설정 → RAG_COLLECTION 폴백"
+                "[RAG/general_v2] service_target=citizen 이지만 RAG_CITIZEN_COLLECTION 미설정 → RAG_COLLECTION 폴백"
             )
         logger.info(
             "[RAG/general_v2] GSND 컬렉션 선택: service_target=%s → %s",
