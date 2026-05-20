@@ -32,6 +32,29 @@ from app.shared.utils.helpers import shorten_text
 logger = logging.getLogger(__name__)
 
 
+# 키워드 → 부스팅 검색어 매핑. final_query에 키워드가 포함되어 있으면
+# 매핑된 사업/제도명을 검색 질의에 추가하여 RAG 검색 시 노출 가능성을 높인다.
+KEYWORD_BOOST_MAP: Dict[str, List[str]] = {
+    "실직": ["긴급지원제도"],
+}
+
+
+def _apply_keyword_boost(query: str) -> str:
+    """final_query에 등록된 키워드가 있으면 매핑된 부스팅 검색어를 덧붙여 반환."""
+    if not query:
+        return query
+    boosts: List[str] = []
+    for keyword, terms in KEYWORD_BOOST_MAP.items():
+        if keyword in query:
+            for term in terms:
+                if term and term not in query and term not in boosts:
+                    boosts.append(term)
+    if not boosts:
+        return query
+    boosted = f"{query} {' '.join(boosts)}"
+    logger.info("[Query Recreation] 키워드 부스팅 적용: +%s", boosts)
+    return boosted
+
 
 async def query_recreation(
     initial_query: str,
@@ -86,7 +109,8 @@ async def query_recreation(
                 final_query = rq.strip()
         except Exception:
             final_query = response.strip()
-        
+
+        final_query = _apply_keyword_boost(final_query)
         logger.info("[Query Recreation] 완성 질의: %s", shorten_text(final_query, 200))
         return final_query
         
