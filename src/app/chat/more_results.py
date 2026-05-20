@@ -213,6 +213,10 @@ def collect_prior_service_names(messages: list, *, max_items: int = 12) -> List[
     next_intent 분류기에 prior_service_names 컨텍스트로 주입하는 용도.
     `referenced_service_names`(직접 키) 또는 `metadata.referenced_documents[].name` 중 어디에 저장돼도
     하나로 합치고, 등장 순서를 유지한다.
+
+    단, 직전 답변의 preprocess.intent == "general" 이면 답변 본문에는 단일 사업만 안내되므로
+    상위 1건만 반환한다. (그렇지 않으면 next_intent Guard B가 다수 사업 안내로 오인해
+    '더 자세히 알려줘' 같은 후속 요청을 MORE_DETAIL이 아닌 MORE_INFO로 분류하게 됨.)
     """
     if not messages:
         return []
@@ -236,9 +240,15 @@ def collect_prior_service_names(messages: list, *, max_items: int = 12) -> List[
                 if value and value not in seen:
                     seen.add(value)
                     names.append(value)
-        if names:
-            return names[:max_items]
-        return []
+        if not names:
+            return []
+        preprocess = msg.get("preprocess")
+        prior_intent = (
+            str(preprocess.get("intent") or "").strip()
+            if isinstance(preprocess, dict) else ""
+        )
+        effective_max = 1 if prior_intent == "general" else max_items
+        return names[:effective_max]
     return []
 
 
