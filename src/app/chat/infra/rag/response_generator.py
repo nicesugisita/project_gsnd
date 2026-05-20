@@ -158,12 +158,19 @@ async def generate_final_response_v2(
                 else "제공된 참고 문서가 없습니다."
             )
 
+        # general + 자세히 요청(MORE_DETAIL 후속 또는 unified_preprocess.detail_requested)일 때만
+        # 추천 카드 형식 대신 classification_general 의 형식 B(4단계 구조)로 우회한다.
+        use_form_b_general = (intent == "general") and bool(detail_requested)
+
         # intent별 프롬프트 선택
-        # general은 guide_recommend와 동일하게 추천 카드 형식으로 응답한다.
-        # (분류기 SLM 이전 후 general 라우팅 시 산문체로 축소되던 회귀 대응)
+        # general은 기본적으로 guide_recommend와 동일한 추천 카드 형식으로 응답한다.
+        # 단, MORE_DETAIL 후속(use_form_b_general)이면 classification_general 프롬프트로 분기.
         if intent == "comparison":
             final_prompt = load_classification_comparison_prompt()
             logger.info("[Final Response v2] Comparison 프롬프트 사용")
+        elif use_form_b_general:
+            final_prompt = load_classification_general_prompt()
+            logger.info("[Final Response v2] General(MORE_DETAIL) → classification_general 프롬프트 (형식 B)")
         elif intent in ("guide_recommend", "general"):
             if use_llm_recommended_prompt:
                 final_prompt = load_classification_llm_recommended_prompt()
@@ -229,8 +236,9 @@ async def generate_final_response_v2(
                 facility_content += _format_facility_for_prompt(wdoc, i)
 
         # user_message 구성
-        # general도 추천 프롬프트를 쓰므로 guide_recommend와 동일한 메타(지역/출생연도/생애주기) 블록을 채운다.
-        if intent in ("guide_recommend", "general"):
+        # general도 추천 프롬프트를 쓰면 guide_recommend와 동일한 메타(지역/출생연도/생애주기) 블록을 채운다.
+        # 단, use_form_b_general 분기는 classification_general 프롬프트라 메타 필드를 사용하지 않으므로 단순 형태로 구성.
+        if intent in ("guide_recommend", "general") and not use_form_b_general:
             user_life_stage = lifecycle if lifecycle else "정보 없음"
             region_display = user_region if user_region else "정보 없음"
             birth_year_display = str(user_birth_year) if user_birth_year else "정보 없음"
@@ -245,9 +253,9 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        # general을 guide_recommend 카드 형식으로 통일했으므로 형식 B(4단계 구조)는 더 이상 강제하지 않는다.
-        # detail_requested는 추천 프롬프트의 자체 규칙(전수 안내)으로 대체.
-        force_form_b = False
+        # general + MORE_DETAIL(또는 unified_preprocess.detail_requested) 일 때만 형식 B(4단계 구조)를 강제한다.
+        # guide_recommend / general(일반)은 기존 추천 카드 형식 유지.
+        force_form_b = use_form_b_general
 
         logger.info(
             "[ResponseGen] more_info_mode=%s intent=%s detail_requested=%s → force_form_b=%s",
