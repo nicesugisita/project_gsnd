@@ -17,6 +17,7 @@ from app.core.constants import (
     OP_BRACE_CLOSE,
     OP_AND,
     OP_NOT,
+    OP_HASANY,
     OP_INT_SUMMATION,
 )
 from app.core.exceptions import RAGServiceError
