@@ -10,6 +10,8 @@ import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core.config import Config
+
 # Mariner 쿼리셋
 from app.mariner.queryset_welfare import query_welfare_center_documents
 from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
