@@ -19,7 +19,6 @@ from app.core.constants import (
     OP_NOT,
     OP_HASANY,
     OP_INT_SUMMATION,
-    OP_HASANY,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
