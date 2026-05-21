@@ -14,7 +14,7 @@ def _uses_gsnd_v7_schema(collection: Optional[str]) -> bool:
     """GSND_DATASET_V8 / GSND_DATASET_V8_CITIZEN 컬렉션 스키마 사용 여부 (동일 스키마)"""
     name = (collection or "").strip().upper()
     return name == Config.RAG_COLLECTION.upper() or (
-        bool(Config.RAG_COLLECTION_CITIZEN) and name == Config.RAG_COLLECTION_CITIZEN.upper()
+        bool(Config.RAG_CITIZEN_COLLECTION) and name == Config.RAG_CITIZEN_COLLECTION.upper()
     )
 
 

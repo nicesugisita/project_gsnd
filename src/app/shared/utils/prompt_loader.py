@@ -232,3 +232,8 @@ def load_next_intent_prompt() -> str:
 def load_pre_check_prompt() -> str:
     """Load Pre-check prompt (use_rag + clarification) from file."""
     return _load_prompt_file('pre_check_prompt.txt')
+
+
+def load_excluded_service_extraction_prompt() -> str:
+    """Load Excluded Service Extraction prompt from file."""
+    return _load_prompt_file('excluded_service_extraction_prompt.txt')

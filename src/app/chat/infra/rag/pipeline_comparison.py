@@ -72,6 +72,7 @@ async def process_rag_with_documents_v2(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
@@ -192,6 +193,7 @@ async def process_rag_with_documents_v2(
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -207,6 +209,7 @@ async def process_rag_with_documents_v2(
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -222,6 +225,7 @@ async def process_rag_with_documents_v2(
                     lifecycle_filter=comp_lifecycle or None,
                     sigun_filters=comp_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=comp_hshd_sttn or None,
                     hshd_sttn_synonyms=comp_hshd_synonyms or None,
                 )

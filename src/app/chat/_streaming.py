@@ -27,6 +27,7 @@ from ._pipeline_steps import (
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
+    run_extract_excluded_services,
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
@@ -497,6 +498,9 @@ async def _streaming_chat_flow(
             logger.info("[SigunCheck/stream] sigun_filters=%s", resolved_sigun_filters)
 
         # [6] 통합 전처리 (MORE_INFO면 히스토리 재사용 우선)
+        # 배제 사업명(LLM 추출)은 unified_preprocess 호출 분기에서만 병렬 추출.
+        # 히스토리 재사용 분기에서는 LLM 호출 없이 빈 리스트 유지.
+        llm_excluded_services: list = []
         preprocess_data = None
         if more.detected and more.last_preprocess:
             if more.more_detail:
@@ -547,8 +551,11 @@ async def _streaming_chat_flow(
                 logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (stream)")
             else:
                 yield build_status_message("질문을 재구성하고 있습니다")
-                pp = await run_unified_preprocess(
-                    user_message, chat_request.messages, use_rag
+                # run_unified_preprocess와 run_extract_excluded_services를 병렬 호출하여
+                # 배제 사업명("○○ 외/말고/제외하고") 추출 — 후속에서 filter_excluded_docs로 합류
+                pp, llm_excluded_services = await asyncio.gather(
+                    run_unified_preprocess(user_message, chat_request.messages, use_rag),
+                    run_extract_excluded_services(user_message, chat_request.messages, use_rag),
                 )
             _timings["t_unified_preprocess"] = pp.elapsed
             user_message = pp.query
@@ -646,6 +653,7 @@ async def _streaming_chat_flow(
             service_target=getattr(chat_request, "service_target", None) or "official",
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,
+            llm_excluded_services=llm_excluded_services,
             final_user_message=more.final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )

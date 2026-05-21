@@ -183,6 +183,7 @@ def _query_dual_documents(
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -430,6 +431,26 @@ def _query_dual_documents(
                         jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
                     ]
 
+            # 사용자 명시 배제 사업명(예: "의료급여 외") 추출값을 BUSINESS_NAME_KO 토큰
+            # 정확 부정 조건으로 추가. extract_excluded_services 가 추출한 키워드가
+            # 사업명에 포함된 문서를 검색 단계에서 사전 제외.
+            if excluded_business_keywords:
+                _biz_excluded = [
+                    str(k).strip()
+                    for k in excluded_business_keywords
+                    if str(k or "").strip()
+                ]
+                if _biz_excluded:
+                    logger.info(
+                        "[Mariner/%s] BUSINESS_NAME_KO 배제 키워드 적용: %s",
+                        log_label, _biz_excluded,
+                    )
+                    for kw in _biz_excluded:
+                        where_set_array += [
+                            jpkg_query.WhereSet(OP_NOT),
+                            jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY, kw, 0),
+                        ]
+
             query.setWhere(where_set_array)
 
             # YEAR FilterSet (사용자가 명시한 경우만 필터, 없으면 전체 연도)
@@ -570,6 +591,7 @@ def query_group_a_documents(
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -594,5 +616,6 @@ def query_group_a_documents(
         hshd_sttn_filter=hshd_sttn_filter,
         hshd_sttn_synonyms=hshd_sttn_synonyms,
         excluded_chunk_ids=excluded_chunk_ids,
+        excluded_business_keywords=excluded_business_keywords,
         apply_business_anchor=apply_business_anchor,
     )

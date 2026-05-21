@@ -12,6 +12,7 @@ from typing import List, Optional
 from app.chat.service import unified_preprocess
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm.judgment import pre_check
+from app.chat.infra.llm.excluded_service import extract_excluded_services
 from app.chat.lifecycle import check_lifecycle
 from app.chat.sigun import check_sigun, check_out_of_scope_region
 
@@ -145,6 +146,30 @@ async def run_unified_preprocess(
         policy_priority_tag=result.get("policy_priority_tag"),
         detail_requested=bool(result.get("detail_requested", False)),
     )
+
+
+async def run_extract_excluded_services(
+    user_message: str,
+    messages: Optional[list],
+    use_rag: bool,
+) -> List[str]:
+    """[5단계 병렬] 배제 사업명 추출.
+
+    `unified_preprocess`와 `asyncio.gather`로 병렬 실행되도록 설계.
+    use_rag=False면 LLM 호출 생략하고 즉시 [] 반환.
+    실패 시 [] 반환 — 답변 차단 사유 아님.
+    """
+    if not use_rag:
+        return []
+    _t = time.monotonic()
+    try:
+        result = await extract_excluded_services(user_message, messages)
+    except Exception as e:
+        logger.warning("[ExcludedServiceExtract] 예외 → 빈 리스트 폴백: %s", e)
+        result = []
+    elapsed = round(time.monotonic() - _t, 3)
+    logger.info("[TIMING] extract_excluded_services: %.3fs | count=%d", elapsed, len(result))
+    return result
 
 
 def run_lifecycle_check(user_message: str, messages: list, use_rag: bool, intent: str) -> None:

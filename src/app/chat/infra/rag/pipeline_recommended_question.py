@@ -54,6 +54,7 @@ async def process_rag_recommended_question(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     more_detail: bool = False,
     recommended_question_prompt: bool = False,

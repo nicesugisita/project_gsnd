@@ -54,6 +54,7 @@ from ._pipeline_steps import (
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
+    run_extract_excluded_services,
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
@@ -387,6 +388,9 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[SigunCheck/non-stream] sigun_filters=%s", resolved_sigun_filters)
 
         # [6] 통합 전처리 (추천 후속 전용 API는 LLM 생략)
+        # 배제 사업명(LLM 추출)은 분기에 따라 unified_preprocess와 병렬로 호출.
+        # 히스토리 재사용 분기에서는 LLM 호출 없이 빈 리스트 유지.
+        llm_excluded_services: list = []
         if more_detected and more_last_preprocess:
             previous_intent = str(more_last_preprocess.get("intent") or "general")
             # resolve_reused_intent_on_more: MORE_INFO/DETAIL일 때 재사용할 intent 결정 (MORE_INFO는 guide_recommend 강제 등)
@@ -455,8 +459,10 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
         else:
             # 짧은 후속·되묻기 재구성 직후에도 항상 전체 메시지를 넘김 → 스레드 길이(로그인/비로그인)와 무관하게 동일 형식 입력
             # run_unified_preprocess: LLM 1회 호출로 intent/reformed_query/expanded_queries/search_target/policy_priority_tag 등을 한 번에 추출
-            preprocess = await run_unified_preprocess(
-                user_message, chat_request.messages, use_rag
+            # run_extract_excluded_services: "○○ 외/말고/제외하고" 명시 배제 표현 → 배제 사업명 리스트 (병렬 호출)
+            preprocess, llm_excluded_services = await asyncio.gather(
+                run_unified_preprocess(user_message, chat_request.messages, use_rag),
+                run_extract_excluded_services(user_message, chat_request.messages, use_rag),
             )
 
         # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
@@ -499,6 +505,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
             excluded_chunk_ids=more_excluded_chunk_ids,
             excluded_service_names=more_excluded_service_names,
+            llm_excluded_services=llm_excluded_services,
             final_user_message=more_final_user_message,
             more_info=more_detected,
             more_detail=llm_detected_more_detail or getattr(preprocess, "detail_requested", False),

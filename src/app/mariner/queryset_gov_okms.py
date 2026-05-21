@@ -60,6 +60,7 @@ def query_gov_okms_documents(
     lifecycle_filter: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -229,6 +230,27 @@ def query_gov_okms_documents(
                     jpkg_query.WhereSet(OP_NOT),
                     jpkg_query.WhereSet("SERVICE_ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
+
+        # 사용자 명시 배제 사업명(예: "의료급여 외") 추출값을 SERVICE_NAME_KO 토큰
+        # 정확 부정 조건으로 추가. extract_excluded_services 가 추출한 키워드가
+        # 사업명에 포함된 문서를 검색 단계에서 사전 제외.
+        # (OKMS는 BUSINESS_NAME_KO, GOV_OKMS는 SERVICE_NAME_KO가 사업명 토큰 색인 필드)
+        if excluded_business_keywords:
+            _biz_excluded = [
+                str(k).strip()
+                for k in excluded_business_keywords
+                if str(k or "").strip()
+            ]
+            if _biz_excluded:
+                logger.info(
+                    "[Mariner/GOV_OKMS] SERVICE_NAME_KO 배제 키워드 적용: %s",
+                    _biz_excluded,
+                )
+                for kw in _biz_excluded:
+                    where_set_array += [
+                        jpkg_query.WhereSet(OP_NOT),
+                        jpkg_query.WhereSet("SERVICE_NAME_KO", OP_HASANY, kw, 0),
+                    ]
 
         query.setWhere(where_set_array)
 
