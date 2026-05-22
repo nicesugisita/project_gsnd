@@ -17,8 +17,8 @@ from app.core.constants import (
     OP_BRACE_CLOSE,
     OP_AND,
     OP_NOT,
-    OP_INT_SUMMATION,
     OP_HASANY,
+    OP_INT_SUMMATION,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
