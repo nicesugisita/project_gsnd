@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     # 압축본(원본 대비 60~83% 단축)을 운영에 적용할 때 켠다. 기본 False 로 회귀 위험 차단.
     USE_SHORT_PROMPTS: bool = False
 
+    # 응답 트레이스 토글 — 매 응답 생성마다 (사용자 질문 / 참조문서 / 최종 프롬프트 / 응답 본문)
+    # 을 JSONL + xlsx 두 파일에 기록한다. 디버그·QA 목적. 운영에선 비활성 권장.
+    RESPONSE_TRACE_ENABLED: bool = False
+    # 트레이스 출력 디렉토리. 없으면 자동 생성. JSONL: response_trace.jsonl, xlsx: response_trace.xlsx
+    RESPONSE_TRACE_DIR: str = "log/response_trace"
+
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555

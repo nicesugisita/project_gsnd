@@ -8,9 +8,24 @@ uvicorn --reload는 .py만 감시하므로, .txt 변경 시 lru_cache가 옛 내
 
 import os
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 한국은 DST가 없으므로 UTC+9 고정. zoneinfo/tzdata 의존을 피해 Windows 호환.
+_KST = timezone(timedelta(hours=9))
+_KOREAN_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
+
+
+def _today_kst_placeholders() -> Dict[str, str]:
+    """system_prompt.txt 의 날짜 자리표시자를 KST 기준 오늘 값으로 채운다."""
+    now = datetime.now(_KST)
+    return {
+        "{오늘날짜}": now.strftime("%Y-%m-%d"),
+        "{오늘요일}": _KOREAN_WEEKDAYS[now.weekday()],
+        "{현재연도}": str(now.year),
+    }
 
 # prompt_loader.py: src/app/shared/utils/ → 4단계 상위가 프로젝트 루트
 _PROMPT_BASE_DIR = os.path.normpath(os.path.join(
@@ -70,9 +85,16 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
 
 def load_system_prompt() -> str:
-    """Load system prompt from file."""
+    """Load system prompt from file.
+
+    `{오늘날짜}`, `{오늘요일}`, `{현재연도}` 자리표시자는 KST 기준으로 매 호출 치환한다.
+    (캐시는 파일 내용 자체에만 적용되므로 날짜 자리표시자가 캐시되어 굳지 않는다.)
+    """
     default_prompt = "당신은 경상남도청의 AI 어시스턴트입니다."
-    return _load_prompt_file('system_prompt.txt', default_prompt)
+    content = _load_prompt_file('system_prompt.txt', default_prompt)
+    for placeholder, value in _today_kst_placeholders().items():
+        content = content.replace(placeholder, value)
+    return content
 
 
 def load_query_reform_prompt() -> str:
@@ -237,3 +259,18 @@ def load_pre_check_prompt() -> str:
 def load_excluded_service_extraction_prompt() -> str:
     """Load Excluded Service Extraction prompt from file."""
     return _load_prompt_file('excluded_service_extraction_prompt.txt')
+
+
+def load_contextual_query_rewriter_multi_turn_prompt() -> str:
+    """Load ContextualQueryRewriter multi-turn system prompt from file."""
+    return _load_prompt_file('contextual_query_rewriter_multi_turn.txt')
+
+
+def load_contextual_query_rewriter_single_turn_prompt() -> str:
+    """Load ContextualQueryRewriter single-turn system prompt from file."""
+    return _load_prompt_file('contextual_query_rewriter_single_turn.txt')
+
+
+def load_contextual_query_rewriter_output_spec() -> str:
+    """Load ContextualQueryRewriter OUTPUT_SPEC (공통, 두 프롬프트에 concat) from file."""
+    return _load_prompt_file('contextual_query_rewriter_output_spec.txt')

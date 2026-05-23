@@ -27,6 +27,10 @@ VALID_INTENTS = _get_intent_names()
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
 POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})
+EXCLUSION_INTENTS = frozenset({
+    "NONE", "PURE_EXCLUSION", "ANCHOR_COMPARISON",
+    "RESIDUAL_CATEGORY", "SUBSTITUTION",
+})
 
 
 def _raw_search_target_from_parsed(parsed: Dict[str, Any]) -> Any:
@@ -154,6 +158,42 @@ def _normalize_policy_priority_tag(raw: Any) -> Optional[str]:
     return None
 
 
+def _normalize_exclusion_intent(raw: Any) -> str:
+    """LLM JSON의 exclusion_intent 정규화. 누락/불명이면 NONE으로 폴백."""
+    if raw is None:
+        return "NONE"
+    value = str(raw).strip().upper()
+    if value in EXCLUSION_INTENTS:
+        return value
+    logger.warning("[UnifiedPreprocess] 알 수 없는 exclusion_intent=%r → NONE", raw)
+    return "NONE"
+
+
+def _normalize_str_list(raw: Any) -> List[str]:
+    """배열 → strip + 빈 문자열·중복 제거된 문자열 리스트. None/타입 불일치는 []."""
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for v in raw:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _read_field(parsed: Dict[str, Any], *keys: str) -> Any:
+    """스네이크/카멜 모두 허용. 첫 비-None 값 반환."""
+    for k in keys:
+        if k in parsed and parsed[k] is not None:
+            return parsed[k]
+    return None
+
+
 async def unified_preprocess(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
@@ -269,6 +309,19 @@ async def unified_preprocess(
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
     policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
     detail_requested = _normalize_detail_requested(parsed)
+
+    # [작업 6] 배제 의도 분석 — rewrite 모드 프롬프트에서만 채워짐. expand 모드 폴백 시 안전 default.
+    exclusion_intent = _normalize_exclusion_intent(_read_field(parsed, "exclusion_intent", "exclusionIntent"))
+    raw_vector_query = _read_field(parsed, "vector_query", "vectorQuery")
+    vector_query = str(raw_vector_query).strip() if raw_vector_query else (reformed or query)
+    must_not_keywords = _normalize_str_list(_read_field(parsed, "must_not_keywords", "mustNotKeywords"))
+    anchor_entities = _normalize_str_list(_read_field(parsed, "anchor_entities", "anchorEntities"))
+    # ANCHOR_COMPARISON: must_not 은 검색을 차단하므로 강제 비움 (LLM이 잘못 채워 보내도 무력화).
+    if exclusion_intent == "ANCHOR_COMPARISON":
+        must_not_keywords = []
+    # ANCHOR_COMPARISON 외에는 anchor_entities 의미 없음 — 강제 비움.
+    if exclusion_intent != "ANCHOR_COMPARISON":
+        anchor_entities = []
     # DB 변별 키워드로 사후 무력화 (예: "치매"가 포함되면 elderly_benefits를 None으로 강제)
     try:
         from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
@@ -292,11 +345,16 @@ async def unified_preprocess(
         "search_target":    search_target,
         "policy_priority_tag": policy_priority_tag,
         "detail_requested": detail_requested,
+        "exclusion_intent": exclusion_intent,
+        "vector_query":     vector_query,
+        "must_not_keywords": must_not_keywords,
+        "anchor_entities":  anchor_entities,
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | use_rag(input)=%s",
-        query[:50], intent, search_target, policy_priority_tag, detail_requested, use_rag,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | exclusion_intent=%s | mustNot=%s | anchor=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, policy_priority_tag, detail_requested,
+        exclusion_intent, must_not_keywords, anchor_entities, use_rag,
     )
     return result
 
@@ -311,4 +369,8 @@ def _make_fallback(user_query: str) -> Dict[str, Any]:
         "keywords":         [],
         "search_target":    None,
         "policy_priority_tag": None,
+        "exclusion_intent": "NONE",
+        "vector_query":     user_query,
+        "must_not_keywords": [],
+        "anchor_entities":  [],
     }
