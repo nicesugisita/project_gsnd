@@ -144,7 +144,7 @@ def query_gov_okms_documents(
         ks = JString(search_string)
 
         _TOP_N       = 5   # 반환 문서 수
-        _THRESHOLD   = 0.2  # 샘플 코드 기준값 (Config.MARINER_THRESHOLD=0.5보다 낮게 유지)
+        _THRESHOLD   = 0.0
         _RESULT_SIZE = 50   # 벡터 검색 풀 크기 (샘플 코드 기준값)
 
         query.setResult(0, _TOP_N - 1)

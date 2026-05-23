@@ -160,7 +160,7 @@ class Settings(BaseSettings):
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555
     MARINER_TIMEOUT: int = 60000
-    MARINER_THRESHOLD: float = 0.5
+    MARINER_THRESHOLD: float = 0.0
     MARINER_MAX_RESULTS: int = 5
     MARINER_LOCAL_HOST: str = "localhost"
     MARINER_LOCAL_PORT: str = "5555"
