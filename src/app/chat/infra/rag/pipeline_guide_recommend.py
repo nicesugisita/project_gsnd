@@ -290,13 +290,15 @@ async def process_rag_guide_recommend(
         # 사례 확인됨 → 결정적 post-filter 로 보강. 사용자 lifecycle 없으면 필터 안 함.
         _gov_okms_pool = _deduplicate_documents(gov_okms_docs)
         _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle)
-        gov_okms_top_docs = sorted(
+        # B1: GOV 쿼터(3)보다 큰 후보 풀을 유지한다 — off-topic GOV 가 관련성 필터에 떨려도
+        # 생존분에서 3건을 확보하기 위함. 쿼터 cap 은 필터 뒤로 미룬다.
+        gov_okms_candidates = sorted(
             _gov_okms_pool,
             key=lambda x: float(x.get("WEIGHT", 0) or 0),
             reverse=True,
-        )[:_GR_GOV_OKMS_TOP_N]
-        logger.info(f"[RAG/guide_recommend_v2] [GOV_OKMS] 쿼터 확정: {len(gov_okms_top_docs)}개 (수집 {len(gov_okms_docs)}개)")
-        for idx, doc in enumerate(gov_okms_top_docs, 1):
+        )
+        logger.info(f"[RAG/guide_recommend_v2] [GOV_OKMS] 후보: {len(gov_okms_candidates)}개 (수집 {len(gov_okms_docs)}개, 쿼터 {_GR_GOV_OKMS_TOP_N})")
+        for idx, doc in enumerate(gov_okms_candidates, 1):
             logger.debug(
                 f"[RAG/guide_recommend_v2] [GOV_OKMS] #{idx}"
                 f"  NAME={doc.get('NAME', '')}"
@@ -307,8 +309,9 @@ async def process_rag_guide_recommend(
         # Step D: OKMS 쿼터 → top N (필터 ON: 5, 필터 OFF: 8)
         # RELEVANCE_FILTER_ENABLED=False 시 dedupe 만으로 노이즈 흡수 가능한지 측정용 보상값.
         _GR_FINAL_TOP_N = 5 if Config.RELEVANCE_FILTER_ENABLED else 8
-        gr_top_docs = gr_group_a_top[:_GR_FINAL_TOP_N]
-        logger.info(f"[RAG/guide_recommend_v2] [OKMS] 쿼터 확정: {len(gr_top_docs)}개")
+        # B1: 쿼터(5)보다 큰 OKMS 후보 풀(최대 _GR_GA_TOP_N=10)을 필터에 태운다. cap 은 필터 뒤로.
+        gr_top_docs = list(gr_group_a_top)
+        logger.info(f"[RAG/guide_recommend_v2] [OKMS] 후보: {len(gr_top_docs)}개 (쿼터 {_GR_FINAL_TOP_N})")
         for i, doc in enumerate(gr_top_docs, 1):
             logger.debug(
                 f"[RAG/guide_recommend_v2] [OKMS] #{i} "
@@ -350,49 +353,51 @@ async def process_rag_guide_recommend(
             )
             logger.info("[TIMING][guide_recommend] StepD-F OKMS Fallback 검색(병렬): %.3fs", time.monotonic() - _t)
 
-            # 기존 결과 + Fallback 결과 합산 → 중복 제거 → top 5
+            # 기존 후보 + Fallback 후보 합산 → 중복 제거 (B1: 여기선 cap 하지 않음 — 필터 뒤 cap)
             gr_top_docs = sorted(
                 _deduplicate_documents(gr_top_docs + gr_fb_a_docs),
                 key=lambda x: float(x.get("WEIGHT", 0) or 0),
                 reverse=True,
-            )[:_GR_FINAL_TOP_N]
-            logger.info(f"[RAG/guide_recommend_v2] OKMS Fallback 후: {len(gr_top_docs)}개 (FB-A {len(gr_fb_a_docs)}개 추가)")
+            )
+            logger.info(f"[RAG/guide_recommend_v2] OKMS Fallback 후 후보: {len(gr_top_docs)}개 (FB-A {len(gr_fb_a_docs)}개 추가)")
 
-        # OKMS 결과 정렬 (OKMS 쿼터 내) — reserve pool 도 함께 보존
-        # top 5 외 잔여 후보(rank 6~)는 재귀 보강 직전에 무료 재활용 대상으로 보관.
-        _okms_pool_sorted = sorted(
-            _deduplicate_documents(gr_top_docs),
-            key=lambda x: float(x.get("WEIGHT", 0) or 0),
-            reverse=True,
-        )
-        gr_top_docs = _okms_pool_sorted[:_GR_FINAL_TOP_N]
-        _okms_reserve_pool: List[Dict[str, Any]] = _okms_pool_sorted[_GR_FINAL_TOP_N:]
+        # ====================================================================
+        # Step D-1 (B1): 후보 병합 → 정책부스트 → 관련성 필터 → 풀별 쿼터 cap
+        # 필터를 큰 후보풀(OKMS≤10 + GOV 수집분)에 먼저 적용하고 cap 을 뒤로 미뤄,
+        # 필터가 일부를 떨궈도 생존분에서 쿼터(OKMS 5 + GOV 3)를 채운다.
+        # ====================================================================
+        _gov_cand_ids = {d.get("CHUNK_ID") for d in gov_okms_candidates if d.get("CHUNK_ID")}
+        _merged_candidates = list(gr_top_docs) + list(gov_okms_candidates)
 
-        # GOV_OKMS_V1 쿼터 추가 (OKMS와 독립, 뒤에 병합)
-        gr_top_docs = gr_top_docs + gov_okms_top_docs
-        logger.info(
-            f"[RAG/guide_recommend_v2] 최종 문서: {len(gr_top_docs)}개 "
-            f"(OKMS {_GR_FINAL_TOP_N}개 쿼터 + GOV_OKMS {len(gov_okms_top_docs)}개 쿼터)"
-        )
-
-        # Step D-1: LLM 관련성 필터 (무관 문서 제거) — 비활성화
         if status_callback:
             await status_callback("검색 결과를 검증하고 있습니다")
         _t = time.monotonic()
-        gr_top_docs = apply_policy_priority_to_documents(
+        _merged_candidates = apply_policy_priority_to_documents(
             precomputed_policy_priority_tag,
-            gr_top_docs,
+            _merged_candidates,
             log_prefix="[RAG/guide_recommend_v2]",
             apply_enabled=not _skip_policy_boost,
         )
         # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
-        _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")]
+        _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in _merged_candidates if d.get("CHUNK_ID")]
         if Config.RELEVANCE_FILTER_ENABLED:
-            gr_top_docs = await filter_irrelevant_docs(reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters)
+            _survivors = await filter_irrelevant_docs(reformed_query, _merged_candidates, sigun_filters=gr_sigun_filters)
             logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/guide_recommend_v2] 관련성 필터 후: {len(gr_top_docs)}개 문서")
         else:
-            logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(gr_top_docs))
+            _survivors = _merged_candidates
+            logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(_merged_candidates))
+
+        # 풀별 쿼터 cap (필터 뒤): GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS. reserve 는 OKMS 생존 잔여.
+        _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
+        _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
+        gov_okms_top_docs = _gov_surv[:_GR_GOV_OKMS_TOP_N]
+        _okms_reserve_pool: List[Dict[str, Any]] = _okms_surv[_GR_FINAL_TOP_N:]
+        gr_top_docs = _okms_surv[:_GR_FINAL_TOP_N] + gov_okms_top_docs
+        logger.info(
+            f"[RAG/guide_recommend_v2] 관련성 필터 후 쿼터 확정: {len(gr_top_docs)}개 "
+            f"(OKMS {min(len(_okms_surv), _GR_FINAL_TOP_N)}/{_GR_FINAL_TOP_N} + GOV {len(gov_okms_top_docs)}/{_GR_GOV_OKMS_TOP_N} "
+            f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
+        )
 
         # D-1 SLM 필터가 전부 제거하면 reserve·재귀 생략 — 컬렉션 자체에 해당 쿼리와
         # 관련된 문서가 없다는 신호이므로 추가 검색해도 의미 없다.
