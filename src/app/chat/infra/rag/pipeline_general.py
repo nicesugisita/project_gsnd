@@ -39,6 +39,7 @@ from app.chat.infra.rag import (
     _build_search_queries,
     filter_okms_keywords,
 )
+from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
     expand_query,
@@ -470,13 +471,31 @@ async def process_rag_general(
         # ====================================================================
         # Step 7 합산: OKMS + GSND
         # ====================================================================
-        top_docs = sorted(
-            _deduplicate_documents(okms_final + gsnd_top),
-            key=lambda x: float(x.get("WEIGHT", 0) or 0),
-            reverse=True,
-        )
-
-        logger.info(f"[RAG/general_v2] 최종 선택: {len(top_docs)}개 문서")
+        if Config.RRF_FUSION_ENABLED:
+            # 서로 다른 소스(OKMS 사업 / GSND)를 풀별 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합.
+            # 두 컬렉션의 WEIGHT 스케일 편향을 제거한다(search center/tel 융합과 동일 취지).
+            okms_sorted = sorted(
+                _deduplicate_documents(okms_final),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            gsnd_sorted = sorted(
+                _deduplicate_documents(gsnd_top),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            top_docs = rerank_by_rrf(okms_sorted, gsnd_sorted)
+            logger.info(
+                "[RAG/general_v2] 최종 선택(RRF 융합): %d개 (OKMS=%d, GSND=%d)",
+                len(top_docs), len(okms_sorted), len(gsnd_sorted),
+            )
+        else:
+            top_docs = sorted(
+                _deduplicate_documents(okms_final + gsnd_top),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            logger.info(f"[RAG/general_v2] 최종 선택: {len(top_docs)}개 문서")
         for i, doc in enumerate(top_docs, 1):
             logger.debug(f"[RAG/general_v2] #{i} NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
 

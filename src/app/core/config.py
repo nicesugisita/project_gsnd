@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
 
+    # search 양쪽 풀(center/tel) 병합 시 RRF(rank fusion) 사용 여부.
+    # False(기본): 두 풀을 합쳐 WEIGHT 절대점수로 정렬.
+    # True       : 풀별로 정렬 후 rank 기반 RRF 융합 — 출처 간 WEIGHT 스케일 편향 제거.
+    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후 top_docs/응답 비교.
+    RRF_FUSION_ENABLED: bool = False
+
     # Query Rewriting 모드 토글.
     # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
     # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
