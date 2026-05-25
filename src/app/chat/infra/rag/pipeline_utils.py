@@ -206,6 +206,40 @@ def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any
     return unique_docs
 
 
+def prioritize_general_household(
+    pool: List[Dict[str, Any]],
+    target: int,
+    min_keep: int,
+) -> List[Dict[str, Any]]:
+    """기본(일반가구) 질의 후처리 — HOUSE_SITUATION 에 '일반가구' 토큰이 없는 문서를 완전 제외.
+
+    가구상황 미명시(기본값 '일반가구') 질의에서, 저소득/다문화·탈북민 등 특정계층 '단독' 태그
+    제도가 일반 질의 답변에 섞이지 않도록 제거한다. 단 일반가구 문서만으로 min_keep 미달이면
+    제외분 중 WEIGHT 상위로 백필해 답변이 3~4건으로 쪼그라드는 것을 막는다.
+
+    Args:
+        pool: 후보 문서 (중복 제거된 상태 권장). 각 문서는 HOUSE_SITUATION / WEIGHT 보유.
+        target: 일반가구 문서를 채울 상한 (예: 8).
+        min_keep: 최소 보장 건수 — 일반가구가 이보다 적으면 제외분에서 백필.
+    """
+    def _w(d: Dict[str, Any]) -> float:
+        try:
+            return float(d.get("WEIGHT", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_general(d: Dict[str, Any]) -> bool:
+        return "일반가구" in str(d.get("HOUSE_SITUATION", "") or "")
+
+    general = sorted([d for d in pool if _is_general(d)], key=_w, reverse=True)
+    others = sorted([d for d in pool if not _is_general(d)], key=_w, reverse=True)
+
+    result = general[:target]
+    if len(result) < min_keep:
+        result += others[: max(0, min_keep - len(result))]
+    return result
+
+
 def _okms_dual_query_for_search(
     vector_q: str,
     keyword_q: str,

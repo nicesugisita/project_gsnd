@@ -52,6 +52,7 @@ from .pipeline_utils import (
     collect_okms_groupa_fallback_docs,
     collect_okms_groupa_and_gov_fallback_docs,
     filter_gov_okms_docs_by_lifecycle,
+    prioritize_general_household,
 )
 logger = logging.getLogger(__name__)
 
@@ -224,6 +225,8 @@ async def process_rag_guide_recommend(
                     year_filters=gr_year_filters or None,
                     sigun_filters=gr_sigun_filters,
                     lifecycle_filter=lifecycle or None,
+                    hshd_sttn_filter=gr_hshd_sttn or None,
+                    hshd_sttn_synonyms=gr_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
                     excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
@@ -334,6 +337,9 @@ async def process_rag_guide_recommend(
                         year_filters=gr_year_filters or None,
                         sigun_filters=gr_sigun_filters,
                         lifecycle_filter=None,
+                        # 소프트부스트라 recall 을 줄이지 않으므로 fallback 에서도 일반가구 부스트 유지
+                        hshd_sttn_filter=gr_hshd_sttn or None,
+                        hshd_sttn_synonyms=gr_hshd_synonyms or None,
                         excluded_chunk_ids=excluded_chunk_ids,
                         excluded_business_keywords=llm_excluded_services,
                         apply_business_anchor=False,
@@ -564,6 +570,8 @@ async def process_rag_guide_recommend(
                             year_filters=_yr_v,
                             sigun_filters=gr_sigun_filters,
                             lifecycle_filter=_lc_v,
+                            hshd_sttn_filter=gr_hshd_sttn or None,
+                            hshd_sttn_synonyms=gr_hshd_synonyms or None,
                             excluded_chunk_ids=_excl,
                             excluded_business_keywords=llm_excluded_services,
                             apply_business_anchor=False,
@@ -698,6 +706,28 @@ async def process_rag_guide_recommend(
             )
         elif _recur_added:
             logger.info("[RAG/guide_recommend_v2] StepD-1.6 재귀 후 재필터 SKIP (RELEVANCE_FILTER_ENABLED=False)")
+
+        # Step D-1.7: 일반가구 후처리 (기본 가구상황 질의 한정)
+        # 가구상황 미명시(기본값 '일반가구') 질의면, 저소득/다문화·탈북민 등 특정계층 '단독' 태그
+        # 제도를 답변에서 완전 제외한다. 단 일반가구만으로 부족하면(_GR_GENERAL_MIN_KEEP 미달)
+        # 제외분에서 WEIGHT 상위로 백필해 답변이 3~4건으로 줄어드는 것을 방지.
+        # 사용자가 "저소득/다문화" 등을 명시한 경우(gr_hshd_sttn != '일반가구')엔 적용하지 않는다.
+        _GR_GENERAL_MIN_KEEP = 5
+        if gr_hshd_sttn == "일반가구" and gr_top_docs:
+            _pool = _deduplicate_documents(list(gr_top_docs) + list(_survivors))
+            if excluded_chunk_ids or excluded_service_names:
+                _pool = filter_excluded_docs(_pool, excluded_chunk_ids or [], excluded_service_names)
+            _before = len(gr_top_docs)
+            gr_top_docs = prioritize_general_household(
+                _pool, target=_GR_TARGET_TOTAL, min_keep=_GR_GENERAL_MIN_KEEP
+            )
+            _excluded_n = sum(
+                1 for d in gr_top_docs if "일반가구" not in str(d.get("HOUSE_SITUATION", "") or "")
+            )
+            logger.info(
+                f"[RAG/guide_recommend_v2] 일반가구 후처리: {_before} → {len(gr_top_docs)}건 "
+                f"(비-일반가구 단독태그 제외, 백필 {_excluded_n}건)"
+            )
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순
         gr_top_docs = sort_weight_top30_then_year(gr_top_docs)

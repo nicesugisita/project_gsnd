@@ -16,9 +16,11 @@ from app.core.constants import (
     OP_OR,
     OP_BRACE_CLOSE,
     OP_AND,
+    OP_WEIGHTAND,
     OP_NOT,
     OP_HASANY,
     OP_INT_SUMMATION,
+    MARINER_WEIGHT_MED,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
@@ -136,6 +138,7 @@ def query_gov_okms_documents(
             "WEIGHT",               # 10
             "SERVICE_DESCRIPTION",  # 11
             "APPLICATION_PERIOD",   # 12
+            "HOUSE_SITUATION",      # 13 (가구상황 — 부스트/후처리용, 결과에도 노출)
         ]
         select_set_array = [jpkg_query.SelectSet(JString(f), num, 0) for f in select_field_names]
         field_indexes = {f: i for i, f in enumerate(select_field_names)}
@@ -203,11 +206,13 @@ def query_gov_okms_documents(
                 jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
             ]
 
-        # HOUSE_SITUATION(가구상황) 스크립틀릿 필터 — LIFE_CYCLE 동일 패턴 (op=34)
+        # HOUSE_SITUATION(가구상황) 소프트 부스트 — 하드필터(OP_AND must-match)가 아니라
+        # OP_WEIGHTAND 로 좌측 결과를 보존하고 일반가구 등 매칭 문서에만 가중치를 준다.
+        # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
         if hshd_sttn_filter:
             where_set_array += [
-                jpkg_query.WhereSet(OP_AND),
-                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
+                jpkg_query.WhereSet(OP_WEIGHTAND),
+                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
             ]
 
         # CHUNK_ID(SERVICE_ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)

@@ -19,6 +19,7 @@ from app.core.constants import (
     OP_OR,
     OP_BRACE_CLOSE,
     OP_AND,
+    OP_WEIGHTAND,
     OP_NOT,
     OP_HASANY,
     OP_HASALL,
@@ -239,7 +240,7 @@ def _query_dual_documents(
 
         # SELECT 필드 (OKMS 컬렉션 전용)
         num = MARINER_SELECT_FIELD_NUM
-        select_field_names = ["ID", "YEAR", "SIGUN", "CONTENT", "WEIGHT", "LIFE_CYCLE", "DEPARTMENT", "APPLICATION_PERIOD", "PURPOSE", "TEL", "BUSINESS_NAME", "ORG_NM", "PATH"]
+        select_field_names = ["ID", "YEAR", "SIGUN", "CONTENT", "WEIGHT", "LIFE_CYCLE", "DEPARTMENT", "APPLICATION_PERIOD", "PURPOSE", "TEL", "BUSINESS_NAME", "ORG_NM", "PATH", "HOUSE_SITUATION"]
 
         normalized_user_id = str(user_id or "").strip()
         normalized_conv_id = str(conv_id or "").strip()
@@ -399,13 +400,15 @@ def _query_dual_documents(
                     jpkg_query.WhereSet("LIFE_CYCLE", 34, lifecycle_filter, 0),
                 ]
 
-            # HOUSE_SITUATION(가구상황) 스크립틀릿 필터
-            # DB 셀이 "저소득,한부모·조손,장애인" 처럼 CSV 멀티값이라
-            # LIFE_CYCLE 과 동일하게 op=34 (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭.
+            # HOUSE_SITUATION(가구상황) 소프트 부스트
+            # DB 셀이 "저소득,한부모·조손,장애인" 처럼 CSV 멀티값이라 op=34
+            # (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭하되, OP_AND must-match 가 아니라
+            # OP_WEIGHTAND 로 좌측 결과를 보존하고 매칭 문서에만 가중치를 준다.
+            # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
             if hshd_sttn_filter:
                 where_set_array += [
-                    jpkg_query.WhereSet(OP_AND),
-                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
+                    jpkg_query.WhereSet(OP_WEIGHTAND),
+                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
                 ]
 
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
