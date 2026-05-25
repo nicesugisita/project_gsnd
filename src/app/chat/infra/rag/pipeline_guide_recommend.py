@@ -425,7 +425,12 @@ async def process_rag_guide_recommend(
         # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
         _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in _merged_candidates if d.get("CHUNK_ID")]
         if Config.RELEVANCE_FILTER_ENABLED:
-            _survivors = await filter_irrelevant_docs(reformed_query, _merged_candidates, sigun_filters=gr_sigun_filters)
+            # 확장 후보 풀(OKMS 15 + GOV 15)을 기본 10건 캡으로 잘라버리면 풀 확대 효과가 사라진다.
+            # 상위 20건까지 판단해 적합 생존분을 늘린다(D-1.7 백필 재료도 함께 확대).
+            _survivors = await filter_irrelevant_docs(
+                reformed_query, _merged_candidates, sigun_filters=gr_sigun_filters,
+                max_judgment_docs=20,
+            )
             logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
         else:
             _survivors = _merged_candidates

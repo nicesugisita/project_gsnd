@@ -232,6 +232,15 @@ def prioritize_general_household(
         require_general: 일반가구 태그 요구 여부 (명시 가구상황 질의면 False).
         lifecycle: 요구 생애주기 ('' / None 이면 생애주기 미적용).
     """
+    # 파이프라인 생애주기 라벨("노인")과 문서 LIFE_CYCLE 표준값("노년")이 다르므로
+    # 비교 전에 문서 표준 토큰으로 매핑한다. 미매핑 시 노인 질의에서 모든 문서가
+    # 부적합 판정돼 min_keep 으로만 백필되는 버그가 발생한다.
+    try:
+        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
+        _lc_target = (_map_lifecycle_for_gov_okms(lifecycle) or "").strip() if lifecycle else ""
+    except Exception:
+        _lc_target = str(lifecycle or "").strip()
+
     def _w(d: Dict[str, Any]) -> float:
         try:
             return float(d.get("WEIGHT", 0) or 0)
@@ -241,7 +250,7 @@ def prioritize_general_household(
     def _fit(d: Dict[str, Any]) -> bool:
         if require_general and "일반가구" not in str(d.get("HOUSE_SITUATION", "") or ""):
             return False
-        if lifecycle and lifecycle not in str(d.get("LIFE_CYCLE", "") or ""):
+        if _lc_target and _lc_target not in str(d.get("LIFE_CYCLE", "") or ""):
             return False
         return True
 
