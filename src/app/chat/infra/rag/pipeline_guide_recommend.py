@@ -57,6 +57,21 @@ from .pipeline_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _extract_sigun_from_history(messages: Optional[list]) -> list:
+    """대화 히스토리(user 메시지)에서 가장 최근 시군을 역순 스캔. 없으면 [].
+
+    extract_lifecycle_from_history 와 동일한 sticky 패턴 — 새 시군이 안 나온 동안
+    직전 시군을 유지하기 위함. (현재 턴 우선은 호출부에서 message 를 먼저 확인.)
+    """
+    for m in reversed(messages or []):
+        if m.get("role") != "user":
+            continue
+        raws = _extract_sigun_from_message(m.get("content", "") or "")
+        if raws:
+            return raws
+    return []
+
+
 async def process_rag_guide_recommend(
     message: str,
     reformed_query: str,
@@ -116,7 +131,13 @@ async def process_rag_guide_recommend(
             sigun_raws = [s.replace("경상남도 ", "") for s in sigun_filters]
             logger.debug(f"[RAG/guide_recommend_v2] 외부 sigun_filters 사용: {gr_sigun_filters}")
         else:
-            sigun_raws = _extract_sigun_from_message(message) or _extract_sigun_from_message(reformed_query)
+            # 시군: 현재 message 우선(새 시군이면 즉시 교체) → 없으면 history 역순 스캔으로
+            # 직전 시군 유지(sticky) → 그래도 없으면 reformed_query 보강.
+            sigun_raws = (
+                _extract_sigun_from_message(message)
+                or _extract_sigun_from_history(messages)
+                or _extract_sigun_from_message(reformed_query)
+            )
             logger.debug(f"[RAG/guide_recommend_v2] 추출된 시군: {sigun_raws}")
             _gr_normalized = [normalize_sigun(r) for r in sigun_raws if r != "경남"]
             _gr_city_filters = [s for s in _gr_normalized if s.startswith("경상남도 ")]
@@ -129,12 +150,17 @@ async def process_rag_guide_recommend(
             lifecycle = _birth_year_to_lifecycle(birth_year)
             logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
         else:
-            # 멀티턴: 최신 message(예: "창원")엔 생애주기 키워드가 없을 수 있어 reformed_query 로 폴백
-            # (sigun 추출과 동일 패턴 — 119줄). 폴백 없으면 생애주기 필터가 통째로 꺼져 인접
-            # 생애주기('초등학생' 질의에 '고등학교 무상교육' 등)가 유입된다.
-            lifecycle = _extract_lifecycle_from_message(message) or _extract_lifecycle_from_message(reformed_query)
+            # 생애주기: 현재 message 우선(새 생애주기면 즉시 교체) → 없으면 history 역순 스캔으로
+            # 직전 생애주기 유지(sticky). 폴백 없으면 시군 되묻기 턴(message="창원")에서 생애주기가
+            # 비어 lifecycle 필터가 꺼지고 인접 생애주기('고등학교 무상교육' 등)가 유입된다.
+            from app.chat.lifecycle import extract_lifecycle_from_history
+            lifecycle = (
+                _extract_lifecycle_from_message(message)
+                or extract_lifecycle_from_history(messages or [])
+                or _extract_lifecycle_from_message(reformed_query)
+            )
             if lifecycle:
-                logger.debug(f"[RAG/guide_recommend_v2] 생애주기 키워드 직접 추출: '{lifecycle}'")
+                logger.debug(f"[RAG/guide_recommend_v2] 생애주기 추출(현재→history→reformed): '{lifecycle}'")
             else:
                 logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
 
