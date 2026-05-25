@@ -45,6 +45,7 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
+from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .policy_priority import resolve_policy_boost_keywords
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
@@ -387,17 +388,36 @@ async def process_rag_guide_recommend(
             _survivors = _merged_candidates
             logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(_merged_candidates))
 
-        # 풀별 쿼터 cap (필터 뒤): GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS. reserve 는 OKMS 생존 잔여.
+        # 필터 생존분을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
         _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
         _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
-        gov_okms_top_docs = _gov_surv[:_GR_GOV_OKMS_TOP_N]
-        _okms_reserve_pool: List[Dict[str, Any]] = _okms_surv[_GR_FINAL_TOP_N:]
-        gr_top_docs = _okms_surv[:_GR_FINAL_TOP_N] + gov_okms_top_docs
-        logger.info(
-            f"[RAG/guide_recommend_v2] 관련성 필터 후 쿼터 확정: {len(gr_top_docs)}개 "
-            f"(OKMS {min(len(_okms_surv), _GR_FINAL_TOP_N)}/{_GR_FINAL_TOP_N} + GOV {len(gov_okms_top_docs)}/{_GR_GOV_OKMS_TOP_N} "
-            f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
-        )
+        _okms_reserve_pool: List[Dict[str, Any]]
+        if Config.RRF_FUSION_GUIDE_ENABLED:
+            # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+            # 쿼터(OKMS 5 + GOV 3) 미보장 — 융합 순위 상위 _GR_TARGET_TOTAL 건 선택, 나머지는 reserve.
+            # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
+            _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
+            _cap = _GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N
+            gr_top_docs = _fused[:_cap]
+            _okms_reserve_pool = _fused[_cap:]
+            _gov_in_top = sum(1 for d in gr_top_docs if d.get("CHUNK_ID") in _gov_cand_ids)
+            logger.info(
+                f"[RAG/guide_recommend_v2] 관련성 필터 후 RRF 융합: {len(gr_top_docs)}개 "
+                f"(OKMS {len(gr_top_docs) - _gov_in_top} + GOV {_gov_in_top} | 쿼터 미보장 "
+                f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
+            )
+        else:
+            # 풀별 쿼터 cap (필터 뒤): reserve 는 OKMS 생존 잔여.
+            gov_okms_top_docs = _gov_surv[:_GR_GOV_OKMS_TOP_N]
+            _okms_reserve_pool = _okms_surv[_GR_FINAL_TOP_N:]
+            gr_top_docs = _okms_surv[:_GR_FINAL_TOP_N] + gov_okms_top_docs
+            logger.info(
+                f"[RAG/guide_recommend_v2] 관련성 필터 후 쿼터 확정: {len(gr_top_docs)}개 "
+                f"(OKMS {min(len(_okms_surv), _GR_FINAL_TOP_N)}/{_GR_FINAL_TOP_N} + GOV {len(gov_okms_top_docs)}/{_GR_GOV_OKMS_TOP_N} "
+                f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
+            )
 
         # D-1 SLM 필터가 전부 제거하면 reserve·재귀 생략 — 컬렉션 자체에 해당 쿼리와
         # 관련된 문서가 없다는 신호이므로 추가 검색해도 의미 없다.
@@ -647,13 +667,14 @@ async def process_rag_guide_recommend(
                     f"(신규 {len(new_docs)}건 추가)"
                 )
 
-            # 8건 초과 시 WEIGHT 기준 상위 8건만 유지
+            # 8건 초과 시 상위 8건만 유지
             if len(gr_top_docs) > _GR_TARGET_TOTAL:
-                gr_top_docs = sorted(
-                    gr_top_docs,
-                    key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                    reverse=True,
-                )[:_GR_TARGET_TOTAL]
+                if Config.RRF_FUSION_GUIDE_ENABLED:
+                    # 융합 순위(rrf_score) 보존 — 재귀로 추가된 미융합 문서는 rrf_score 없음(0)이라 후순위.
+                    _cap_key = lambda x: float(x.get("rrf_score", 0.0) or 0.0)
+                else:
+                    _cap_key = lambda x: float(x.get("WEIGHT", 0) or 0)
+                gr_top_docs = sorted(gr_top_docs, key=_cap_key, reverse=True)[:_GR_TARGET_TOTAL]
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 후 상위 {_GR_TARGET_TOTAL}건 캡: {len(gr_top_docs)}건")
             else:
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 종료: 최종 {len(gr_top_docs)}건")
