@@ -335,6 +335,22 @@ async def unified_preprocess(
     except Exception as e:
         logger.warning("[UnifiedPreprocess] exclude check failed: %s", e)
 
+    # LLM이 None을 주거나 excludes로 무력화된 경우, 룰 기반 fallback으로 anchor 검색을
+    # 항상 발동시킨다. 같은 질문에 매 호출마다 다른 tag가 나와 검색 결과 셋이 흔들리는
+    # LLM 비결정성을 보정. 자세한 검증 데이터는 policy_priority_tag_fallback_handoff.md 참고.
+    if policy_priority_tag is None:
+        try:
+            from app.chat.infra.rag.policy_priority import infer_policy_priority_tag_by_keywords
+            inferred = infer_policy_priority_tag_by_keywords(query)
+            if inferred:
+                policy_priority_tag = inferred
+                logger.info(
+                    "[UnifiedPreprocess] policy_priority_tag 룰 fallback: None → %s",
+                    inferred,
+                )
+        except Exception as e:
+            logger.warning("[UnifiedPreprocess] tag inference fallback failed: %s", e)
+
     result = {
         "query":            query,
         "intent":           intent,
