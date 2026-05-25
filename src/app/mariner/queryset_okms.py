@@ -186,6 +186,7 @@ def _query_dual_documents(
     excluded_chunk_ids: Optional[List[str]] = None,
     excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
+    max_results: Optional[int] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     QuerySet(2) 듀얼 검색 공통 로직 — OKMS 컬렉션 전용.
@@ -223,7 +224,7 @@ def _query_dual_documents(
     try:
         timeout = Config.MARINER_TIMEOUT
         threshold = Config.MARINER_THRESHOLD
-        max_top_n = Config.MARINER_MAX_RESULTS
+        max_top_n = max_results if max_results is not None else Config.MARINER_MAX_RESULTS
 
         ensure_jvm_thread()
 
@@ -596,6 +597,7 @@ def query_group_a_documents(
     excluded_chunk_ids: Optional[List[str]] = None,
     excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
+    max_results: Optional[int] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Group A — 듀얼 검색 (QuerySet(2))
@@ -621,4 +623,5 @@ def query_group_a_documents(
         excluded_chunk_ids=excluded_chunk_ids,
         excluded_business_keywords=excluded_business_keywords,
         apply_business_anchor=apply_business_anchor,
+        max_results=max_results,
     )

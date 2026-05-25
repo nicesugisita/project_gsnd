@@ -66,6 +66,7 @@ def query_gov_okms_documents(
     excluded_business_keywords: Optional[List[str]] = None,
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
+    max_results: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     GOV_OKMS_V1 단일 검색 (QuerySet(1))
@@ -146,7 +147,7 @@ def query_gov_okms_documents(
         query = jpkg_query.Query("", "")
         ks = JString(search_string)
 
-        _TOP_N       = 5   # 반환 문서 수
+        _TOP_N       = max_results if max_results is not None else 5   # 반환 문서 수
         _THRESHOLD   = 0.0
         _RESULT_SIZE = 50   # 벡터 검색 풀 크기 (샘플 코드 기준값)
 

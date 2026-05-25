@@ -129,13 +129,18 @@ async def process_rag_guide_recommend(
             lifecycle = _birth_year_to_lifecycle(birth_year)
             logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
         else:
-            lifecycle = _extract_lifecycle_from_message(message)
+            # 멀티턴: 최신 message(예: "창원")엔 생애주기 키워드가 없을 수 있어 reformed_query 로 폴백
+            # (sigun 추출과 동일 패턴 — 119줄). 폴백 없으면 생애주기 필터가 통째로 꺼져 인접
+            # 생애주기('초등학생' 질의에 '고등학교 무상교육' 등)가 유입된다.
+            lifecycle = _extract_lifecycle_from_message(message) or _extract_lifecycle_from_message(reformed_query)
             if lifecycle:
                 logger.debug(f"[RAG/guide_recommend_v2] 생애주기 키워드 직접 추출: '{lifecycle}'")
             else:
                 logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
 
-        gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        # 멀티턴: 가구상황도 message+reformed_query 결합 텍스트에서 추출 (저소득/한부모 등 유실 방지).
+        # 기본값 '일반가구'라 단순 or 폴백이 안 되므로 두 텍스트를 합쳐 키워드를 스캔한다.
+        gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(f"{message} {reformed_query}")
         if gr_hshd_sttn:
             logger.debug(
                 f"[RAG/guide_recommend_v2] 가구상황 추출: '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
@@ -209,10 +214,13 @@ async def process_rag_guide_recommend(
                 logger.debug(f"[RAG/guide_recommend_v2] [키워드검색어] #{i}: {sq}")
 
         # Step B: Group A — 균등 가중치 듀얼 검색 (병렬)
-        # per_query_limit 은 Mariner 한 호출에서 받는 행 수 — 검색식은 동일하고
-        # 결과 N만 늘어나 비용이 거의 증가하지 않는 선에서 8로 상향(재귀 트리거 빈도 ↓).
-        _GR_GA_PER_QUERY   = 8
-        _GR_GA_TOP_N       = 10
+        # 관련성 필터(D-1)·일반가구/생애주기 후처리(D-1.7)가 후보를 크게 줄이므로,
+        # 후처리 후 8건을 확보하려면 후보 풀을 넓혀야 한다(재귀 완화로 메우면 비적합 유입).
+        # _GR_GA_MAX_RESULTS: Mariner 한 쿼리 반환 행 수(전역 MARINER_MAX_RESULTS=5 를
+        # guide_recommend 한정 상향). per_query_limit·TOP_N 도 함께 올려 필터 입력을 키운다.
+        _GR_GA_MAX_RESULTS = 15
+        _GR_GA_PER_QUERY   = 15
+        _GR_GA_TOP_N       = 15
         _GR_GOV_OKMS_TOP_N = 3   # GOV_OKMS_V1 독립 쿼터
         if status_callback:
             await status_callback("질문을 분석하고 있습니다")
@@ -230,6 +238,7 @@ async def process_rag_guide_recommend(
                     excluded_chunk_ids=excluded_chunk_ids,
                     excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
+                    max_results=_GR_GA_MAX_RESULTS,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] Group A 쿼리 검색 실패: {e}")
@@ -247,6 +256,7 @@ async def process_rag_guide_recommend(
                     excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=gr_hshd_sttn or None,
                     hshd_sttn_synonyms=gr_hshd_synonyms or None,
+                    max_results=_GR_GA_MAX_RESULTS,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/guide_recommend_v2] GOV_OKMS 쿼리 실패: {e}")
@@ -343,6 +353,7 @@ async def process_rag_guide_recommend(
                         excluded_chunk_ids=excluded_chunk_ids,
                         excluded_business_keywords=llm_excluded_services,
                         apply_business_anchor=False,
+                        max_results=_GR_GA_MAX_RESULTS,
                     )
                 except Exception as e:
                     logger.warning(f"[RAG/guide_recommend_v2] Group A Fallback 검색 실패: {e}")
@@ -575,6 +586,7 @@ async def process_rag_guide_recommend(
                             excluded_chunk_ids=_excl,
                             excluded_business_keywords=llm_excluded_services,
                             apply_business_anchor=False,
+                            max_results=_GR_GA_MAX_RESULTS,
                         )
                     except Exception as e:
                         _record_failure("group_a", e)
@@ -591,6 +603,7 @@ async def process_rag_guide_recommend(
                             excluded_business_keywords=llm_excluded_services,
                             hshd_sttn_filter=gr_hshd_sttn or None,
                             hshd_sttn_synonyms=gr_hshd_synonyms or None,
+                            max_results=_GR_GA_MAX_RESULTS,
                         )
                     except Exception as e:
                         _record_failure("gov", e)
