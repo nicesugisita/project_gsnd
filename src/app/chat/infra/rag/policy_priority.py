@@ -529,6 +529,45 @@ def _repeat_for_vector_boost(keyword: str, n: int = _POLICY_BOOST_VECTOR_REPEAT)
 POLICY_PRIORITY_TAGS: FrozenSet[str] = frozenset({"implant", "low_income", "elderly_benefits"})
 
 
+# 우선순위 — 더 좁은(specific) 태그가 앞.
+# 노인 + 임플란트 동시 매칭 시 "임플란트 의료 지원"이 더 정밀한 anchor이므로 implant 우선.
+_TAG_FALLBACK_PRIORITY: Tuple[str, ...] = ("implant", "low_income", "elderly_benefits")
+
+
+def infer_policy_priority_tag_by_keywords(user_query: str) -> str | None:
+    """LLM이 policy_priority_tag=None을 줄 때 호출되는 룰 기반 fallback.
+
+    DB(gsnd_policy_priority)에 등록된 태그별 키워드를 가져와 user_query에 부분일치 검사.
+    매칭된 태그가 하나면 그것, 둘 이상이면 _TAG_FALLBACK_PRIORITY 순서로 1개 선택.
+    매칭 없으면 None.
+
+    이 함수는 LLM 비결정성에 의해 같은 질문에 매번 다른 tag가 나오는 문제를 보정한다.
+    """
+    q = (user_query or "").strip()
+    if not q:
+        return None
+    try:
+        tag_keywords = _get_tag_keywords_map()
+    except Exception as e:
+        logger.warning("[PolicyBoost] fallback inference: keyword map load failed: %s", e)
+        return None
+    if not tag_keywords:
+        return None
+
+    matched: List[str] = []
+    for tag in _TAG_FALLBACK_PRIORITY:
+        keywords = tag_keywords.get(tag, ())
+        if not keywords:
+            continue
+        if any(kw and kw in q for kw in keywords):
+            matched.append(tag)
+
+    if not matched:
+        return None
+    # 매칭이 여러 개여도 _TAG_FALLBACK_PRIORITY 순서로 첫 항목 반환
+    return matched[0]
+
+
 def _normalize_policy_priority_tags(raw: Any) -> FrozenSet[str]:
     if raw is None:
         return frozenset()
