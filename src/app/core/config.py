@@ -121,6 +121,15 @@ class Settings(BaseSettings):
     # 흔들리는 비결정성의 주원인이라 기본 비활성화. (filter-off 시 guide FINAL_TOP_N 5→8 상향)
     RELEVANCE_FILTER_ENABLED: bool = False
 
+    # guide_recommend 가변 개수 정책: 고정 top-N(=항상 8~11 채움) 대신 주제어 존재 +
+    # 점수 임계로 노출 개수를 가변화한다. 관련 풀이 작으면 적게, 크면 많이.
+    # 결정적(LLM 없음)이라 회차 일관성 유지. 상세 설계는 plans/hazy-knitting-lark.md Part E.
+    GUIDE_VARIABLE_COUNT_ENABLED: bool = True
+    GUIDE_KEEP_RATIO: float = 0.55   # 광역(주제어 없음) 질의 점수 비율 floor
+    GUIDE_GAP_DROP: float = 0.6      # 직전 점수 대비 이 비율 미만이면 급락 절벽으로 보고 컷
+    GUIDE_MIN_RESULTS: int = 3       # 노출 하한 (너무 적게 나오지 않도록)
+    GUIDE_MAX_RESULTS: int = 11      # 노출 상한
+
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
     DEEPSERVER_TIMEOUT: float = 30.0
