@@ -206,6 +206,63 @@ def _deduplicate_documents(doc_list: List[Dict[str, Any]]) -> List[Dict[str, Any
     return unique_docs
 
 
+def prioritize_general_household(
+    pool: List[Dict[str, Any]],
+    target: int,
+    min_keep: int,
+    *,
+    require_general: bool = True,
+    lifecycle: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """가구상황·생애주기 적합 문서를 우선하고 부적합 문서를 제외하는 최종 후처리.
+
+    - require_general=True(기본 일반가구 질의): HOUSE_SITUATION 에 '일반가구' 토큰이 없는
+      특정계층(저소득/다문화·탈북민 등) '단독' 태그 제도를 제외.
+    - lifecycle 지정 시: LIFE_CYCLE 에 해당 생애주기(예: '아동')를 포함하지 않는 문서를 제외
+      (예: '초등학생' 질의에 '청소년' 단독 대상 '고등학교 무상교육' 이 섞이는 것 방지).
+      멀티값('아동,청소년')은 포함하므로 유지된다.
+
+    둘 다 만족(적합)하는 문서를 WEIGHT 순으로 target 까지 채우고, 적합 문서가 min_keep 미달이면
+    부적합 문서 중 WEIGHT 상위로 백필해 답변이 3~4건으로 쪼그라드는 것을 막는다.
+
+    Args:
+        pool: 후보 문서 (중복 제거 권장). HOUSE_SITUATION / LIFE_CYCLE / WEIGHT 보유.
+        target: 적합 문서를 채울 상한 (예: 8).
+        min_keep: 최소 보장 건수 — 적합 문서가 이보다 적으면 부적합분에서 백필.
+        require_general: 일반가구 태그 요구 여부 (명시 가구상황 질의면 False).
+        lifecycle: 요구 생애주기 ('' / None 이면 생애주기 미적용).
+    """
+    # 파이프라인 생애주기 라벨("노인")과 문서 LIFE_CYCLE 표준값("노년")이 다르므로
+    # 비교 전에 문서 표준 토큰으로 매핑한다. 미매핑 시 노인 질의에서 모든 문서가
+    # 부적합 판정돼 min_keep 으로만 백필되는 버그가 발생한다.
+    try:
+        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
+        _lc_target = (_map_lifecycle_for_gov_okms(lifecycle) or "").strip() if lifecycle else ""
+    except Exception:
+        _lc_target = str(lifecycle or "").strip()
+
+    def _w(d: Dict[str, Any]) -> float:
+        try:
+            return float(d.get("WEIGHT", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _fit(d: Dict[str, Any]) -> bool:
+        if require_general and "일반가구" not in str(d.get("HOUSE_SITUATION", "") or ""):
+            return False
+        if _lc_target and _lc_target not in str(d.get("LIFE_CYCLE", "") or ""):
+            return False
+        return True
+
+    fit = sorted([d for d in pool if _fit(d)], key=_w, reverse=True)
+    unfit = sorted([d for d in pool if not _fit(d)], key=_w, reverse=True)
+
+    result = fit[:target]
+    if len(result) < min_keep:
+        result += unfit[: max(0, min_keep - len(result))]
+    return result
+
+
 def _okms_dual_query_for_search(
     vector_q: str,
     keyword_q: str,

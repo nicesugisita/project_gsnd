@@ -7,6 +7,8 @@ Uses Pydantic for validation and serialization.
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, validator
 
+from app.core.config import Config
+
 
 # ============================================================================
 # Request Models
@@ -85,8 +87,8 @@ class ChatRequest(BaseModel):
         description="Maximum tokens for completion"
     )
     seed: Optional[int] = Field(
-        default=None,
-        description="Random seed for reproducibility"
+        default=Config.FIXED_LLM_SEED,
+        description="Random seed for reproducibility (기본값 고정 → 동일 질문 동일 답변)"
     )
     stream: Optional[bool] = Field(
         default=False,

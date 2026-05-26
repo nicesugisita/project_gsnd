@@ -51,6 +51,7 @@ from ._pipeline_steps import (
     PreprocessResult,
     run_pre_check,
     run_early_sigun_check,
+    run_topic_clarify_check,
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
@@ -58,6 +59,7 @@ from ._pipeline_steps import (
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
+from app.shared.utils import get_second_last_user_message
 from ._streaming import _streaming_chat_flow
 
 logger = logging.getLogger(__name__)
@@ -357,6 +359,22 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             resolved_sigun_filters = early_sigun.filters
             logger.info("[SigunCheck/non-stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
+        # [2.5] 분야 되묻기: 원질문이 정보량 0("알려줘" 등)이면 query_recreation 전 1회 되묻기.
+        # MORE_INFO/주제전환 분기는 직전 검색 컨텍스트를 재사용하므로 생략.
+        if not more_detected and not more_topic_switch:
+            _original_q_for_topic = get_second_last_user_message(chat_request.messages) or original_user_message
+            topic_clarify = run_topic_clarify_check(
+                _original_q_for_topic,
+                chat_request.messages,
+                use_rag,
+                is_clarification,
+                current_user_message=user_message,
+            )
+            if topic_clarify is not None and topic_clarify.need_clarify:
+                logger.info("[TopicClarify/non-stream] 정보량 0 원질문 감지 → 분야 되묻기")
+                await asyncio.to_thread(_save_chat_history, chat_request, topic_clarify.ask_message, original_user_message)
+                return await _handle_clarify_response(original_user_message, topic_clarify.ask_message, chat_request, stream)
+
         # [3] 쿼리 재구성 (MORE_INFO 또는 general 후속 경로는 reformed_query를 직접 사용하므로 생략)
         # NEW_SEARCH/REFINE_SEARCH(주제 전환)도 스킵 — 직전 주제로 오염 방지
         if not more_detected and not more_blocked_followup and not more_topic_switch:
@@ -458,12 +476,18 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
         else:
             # 짧은 후속·되묻기 재구성 직후에도 항상 전체 메시지를 넘김 → 스레드 길이(로그인/비로그인)와 무관하게 동일 형식 입력
-            # run_unified_preprocess: LLM 1회 호출로 intent/reformed_query/expanded_queries/search_target/policy_priority_tag 등을 한 번에 추출
-            # run_extract_excluded_services: "○○ 외/말고/제외하고" 명시 배제 표현 → 배제 사업명 리스트 (병렬 호출)
-            preprocess, llm_excluded_services = await asyncio.gather(
-                run_unified_preprocess(user_message, chat_request.messages, use_rag),
-                run_extract_excluded_services(user_message, chat_request.messages, use_rag),
-            )
+            # rewrite 모드: unified_preprocess가 must_not_keywords/exclusion_intent를 함께 산출 → 별도 extract 호출 생략 (32B 1회 절약).
+            # expand 모드: unified는 배제 분석을 안 하므로 기존대로 extract LLM과 병렬 호출.
+            if Config.QUERY_REWRITING_ENABLED:
+                preprocess = await run_unified_preprocess(
+                    user_message, chat_request.messages, use_rag
+                )
+                llm_excluded_services = list(preprocess.must_not_keywords or [])
+            else:
+                preprocess, llm_excluded_services = await asyncio.gather(
+                    run_unified_preprocess(user_message, chat_request.messages, use_rag),
+                    run_extract_excluded_services(user_message, chat_request.messages, use_rag),
+                )
 
         # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
         # (MORE_DETAIL은 기존 축 유지)

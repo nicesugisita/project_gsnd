@@ -24,6 +24,7 @@ from app.shared.utils import build_chat_response, load_system_prompt, shorten_te
 from ._pipeline_steps import (
     run_pre_check,
     run_early_sigun_check,
+    run_topic_clarify_check,
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
@@ -31,6 +32,7 @@ from ._pipeline_steps import (
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
+from app.shared.utils import get_second_last_user_message
 from app.shared.utils.status_messages import (
     build_status_message,
     STATUS_QUERY_RECREATION,
@@ -452,6 +454,31 @@ async def _streaming_chat_flow(
             resolved_sigun_filters = early_sigun.filters
             logger.info("[SigunCheck/stream] 조기 확정(is_clarification): %s", resolved_sigun_filters)
 
+        # [2.5] 분야 되묻기: 원질문이 정보량 0이면 query_recreation 전 1회 되묻기.
+        if not more.detected and not more.topic_switch:
+            _original_q_for_topic = get_second_last_user_message(chat_request.messages) or original_user_message
+            topic_clarify = run_topic_clarify_check(
+                _original_q_for_topic,
+                chat_request.messages,
+                use_rag,
+                is_clarification,
+                current_user_message=user_message,
+            )
+            if topic_clarify is not None and topic_clarify.need_clarify:
+                logger.info("[TopicClarify/stream] 정보량 0 원질문 감지 → 분야 되묻기")
+                await asyncio.to_thread(_save_chat_history, chat_request, topic_clarify.ask_message, original_user_message)
+                assistant_content = topic_clarify.ask_message
+                resp = build_chat_response(
+                    response_message=topic_clarify.ask_message,
+                    user_message=user_message,
+                    model_name=Config.MODEL_NAME,
+                    is_clarification=True,
+                )
+                yield f"data: {json.dumps({'is_clarification': True}, ensure_ascii=False)}\n\n"
+                async for chunk in _build_streaming_response(resp["choices"][0]["message"]["content"], resp):
+                    yield chunk
+                return
+
         # [3] 쿼리 재구성 (NEW_SEARCH/REFINE_SEARCH면 직전 주제로 오염되지 않도록 스킵)
         if more.topic_switch:
             logger.info(
@@ -551,12 +578,18 @@ async def _streaming_chat_flow(
                 logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (stream)")
             else:
                 yield build_status_message("질문을 재구성하고 있습니다")
-                # run_unified_preprocess와 run_extract_excluded_services를 병렬 호출하여
-                # 배제 사업명("○○ 외/말고/제외하고") 추출 — 후속에서 filter_excluded_docs로 합류
-                pp, llm_excluded_services = await asyncio.gather(
-                    run_unified_preprocess(user_message, chat_request.messages, use_rag),
-                    run_extract_excluded_services(user_message, chat_request.messages, use_rag),
-                )
+                # rewrite 모드: unified가 must_not_keywords를 함께 산출 → extract 호출 생략 (32B 1회 절약).
+                # expand 모드: 기존대로 extract LLM을 병렬 호출.
+                if Config.QUERY_REWRITING_ENABLED:
+                    pp = await run_unified_preprocess(
+                        user_message, chat_request.messages, use_rag
+                    )
+                    llm_excluded_services = list(pp.must_not_keywords or [])
+                else:
+                    pp, llm_excluded_services = await asyncio.gather(
+                        run_unified_preprocess(user_message, chat_request.messages, use_rag),
+                        run_extract_excluded_services(user_message, chat_request.messages, use_rag),
+                    )
             _timings["t_unified_preprocess"] = pp.elapsed
             user_message = pp.query
             await _update_user_message(chat_request.messages, user_message)

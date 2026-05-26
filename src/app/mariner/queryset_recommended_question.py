@@ -317,7 +317,7 @@ def query_gov_okms_documents_by_display_name(
 
     _top_n = int(max_results or 8)
     _top_n = max(1, min(_top_n, 20))
-    _threshold = 0.2
+    _threshold = 0.0
     _result_size = 50
 
     try:

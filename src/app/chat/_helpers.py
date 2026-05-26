@@ -284,7 +284,8 @@ async def _handle_rag_mode(
                 repetition_penalty=getattr(chat_request, 'repetition_penalty', 1.0),
                 top_p=chat_request.top_p,
                 top_k=getattr(chat_request, 'top_k', 1),
-                seed=chat_request.seed,
+                # 클라이언트가 seed를 명시 null로 보내도 재현성 보장 (생략 시엔 스키마 기본 42)
+                seed=chat_request.seed if chat_request.seed is not None else Config.FIXED_LLM_SEED,
                 tools=chat_request.tools,
                 status_callback=emit_status,
                 intent=intent,

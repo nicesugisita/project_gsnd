@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
 
+    # search 양쪽 풀(center/tel) 병합 시 RRF(rank fusion) 사용 여부.
+    # False(기본): 두 풀을 합쳐 WEIGHT 절대점수로 정렬.
+    # True       : 풀별로 정렬 후 rank 기반 RRF 융합 — 출처 간 WEIGHT 스케일 편향 제거.
+    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후 top_docs/응답 비교.
+    RRF_FUSION_ENABLED: bool = False
+
+    # guide_recommend OKMS/GOV 풀 병합 시 RRF(rank fusion) 사용 여부 (독립 토글).
+    # False(기본): OKMS 쿼터 5 + GOV 쿼터 3 을 각각 WEIGHT 정렬·cap 후 concat (혼합 보장).
+    # True       : 두 풀을 풀별 정렬 후 rank 기반 RRF 융합 → 쿼터 미보장, 융합 순위 상위 8건 선택.
+    # search/general 의 RRF_FUSION_ENABLED 와 독립 — guide_recommend 만 단독 A/B·롤백 가능.
+    RRF_FUSION_GUIDE_ENABLED: bool = False
+
     # Query Rewriting 모드 토글.
     # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
     # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
@@ -150,11 +162,17 @@ class Settings(BaseSettings):
     # 압축본(원본 대비 60~83% 단축)을 운영에 적용할 때 켠다. 기본 False 로 회귀 위험 차단.
     USE_SHORT_PROMPTS: bool = False
 
+    # 응답 트레이스 토글 — 매 응답 생성마다 (사용자 질문 / 참조문서 / 최종 프롬프트 / 응답 본문)
+    # 을 JSONL + xlsx 두 파일에 기록한다. 디버그·QA 목적. 운영에선 비활성 권장.
+    RESPONSE_TRACE_ENABLED: bool = False
+    # 트레이스 출력 디렉토리. 없으면 자동 생성. JSONL: response_trace.jsonl, xlsx: response_trace.xlsx
+    RESPONSE_TRACE_DIR: str = "log/response_trace"
+
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555
     MARINER_TIMEOUT: int = 60000
-    MARINER_THRESHOLD: float = 0.5
+    MARINER_THRESHOLD: float = 0.0
     MARINER_MAX_RESULTS: int = 5
     MARINER_LOCAL_HOST: str = "localhost"
     MARINER_LOCAL_PORT: str = "5555"

@@ -236,7 +236,7 @@ def _extract_hshd_sttn_from_message(message: str) -> Tuple[str, List[str]]:
 
     매칭은 긴 키워드 우선(예: "기초생활수급자" → "수급자"보다 먼저 매칭). 동일
     길이일 때는 dict 선언 순서가 tie-breaker (수급자 계열 우선). 매칭 없으면
-    ("", []) 반환.
+    기본값 ("일반가구", [...]) 반환 (빈 message 는 ("", []) — 필터 미적용).
 
     동의어 리스트는 OKMS BUSINESS_NAME/TEXT_CHUNK 부스팅 전용. HSHD_STTN_NM 필터값
     자체는 정규화값(첫 번째 반환) 하나만 사용한다.
@@ -247,7 +247,9 @@ def _extract_hshd_sttn_from_message(message: str) -> Tuple[str, List[str]]:
         if keyword in message:
             norm = _HSHD_STTN_KEYWORD_MAP[keyword]
             return norm, list(_HSHD_STTN_SYNONYM_GROUPS.get(norm, []))
-    return "", []
+    # 가구상황 키워드 미검출 시 기본값 "일반가구" — 특정계층(저소득/다문화 등) 신호가
+    # 없는 일반 질문이 특정계층 전용 제도로 쏠리지 않도록 일반가구 가구상황을 적용한다.
+    return "일반가구", list(_HSHD_STTN_SYNONYM_GROUPS.get("일반가구", []))
 
 
 def _birth_year_to_lifecycle(birth_year: int, current_year: int = None) -> str:

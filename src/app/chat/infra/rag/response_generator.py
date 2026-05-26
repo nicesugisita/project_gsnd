@@ -35,6 +35,10 @@ from app.shared.utils.prompt_loader import (
     load_classification_search_prompt,
 )
 from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_prompt
+from app.chat.infra.rag.trace_sink import (
+    record_response_trace,
+    wrap_stream_with_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +392,40 @@ async def generate_final_response_v2(
             seed=seed,
             tools=tools,
         )
+
+        # 응답 트레이스 (Config.RESPONSE_TRACE_ENABLED 시): 사용자 질문 / 참조문서 /
+        # 최종 system+user 프롬프트 / 응답 본문을 JSONL+xlsx 로 dump.
+        # 비스트리밍은 즉시 dump, 스트리밍은 generator wrap 으로 chunk 누적 후 dump.
+        _trace_extras = {
+            "policy_priority_tag": policy_priority_tag,
+            "detail_requested": bool(detail_requested),
+            "more_info_mode": bool(more_info_mode),
+            "lifecycle": lifecycle or "",
+            "user_region": user_region or "",
+            "user_birth_year": user_birth_year or "",
+            "use_llm_recommended_prompt": bool(use_llm_recommended_prompt),
+            "welfare_docs_count": len(welfare_docs or []),
+        }
+        if stream:
+            response = wrap_stream_with_trace(
+                response,
+                user_question=message,
+                top_docs=top_docs,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                intent=intent,
+                extras=_trace_extras,
+            )
+        else:
+            record_response_trace(
+                user_question=message,
+                top_docs=top_docs,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                intent=intent,
+                response_text=str(response or ""),
+                extras=_trace_extras,
+            )
 
         logger.info("[Final Response v2] 응답 생성 완료")
         return response
