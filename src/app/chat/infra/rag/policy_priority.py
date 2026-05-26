@@ -649,7 +649,12 @@ def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) ->
 
     vector 컴포넌트는 임베딩 부스트를 위해 anchor를 N회 반복 삽입한다.
     keyword 컴포넌트는 OP_HASANY 토큰 매칭이라 anchor 1회만 유지한다.
+
+    Config.POLICY_EXTRA_SEARCH_ENABLED=False 면 추가검색을 완전히 비활성화한다
+    (메인 듀얼의 anchor 부스트는 augment_okms_dual_query 에서 별도로 유지됨).
     """
+    if not getattr(Config, "POLICY_EXTRA_SEARCH_ENABLED", True):
+        return []
     tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
     rq = (reformed_query or "").strip()
     tag_keywords = _get_tag_keywords_map()

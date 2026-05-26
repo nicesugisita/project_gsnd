@@ -424,6 +424,12 @@ async def process_rag_guide_recommend(
         )
         # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
         _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in _merged_candidates if d.get("CHUNK_ID")]
+        # [단계 진단] 리랭킹 전 후보풀 (관련성 필터·RRF 융합 직전)
+        try:
+            from app.chat.infra.rag.stage_trace import record_docs as _stage_rec_docs
+            _stage_rec_docs("rerank_before", _merged_candidates)
+        except Exception:  # noqa: BLE001
+            pass
         if Config.RELEVANCE_FILTER_ENABLED:
             # 확장 후보 풀(OKMS 15 + GOV 15)을 기본 10건 캡으로 잘라버리면 풀 확대 효과가 사라진다.
             # 상위 20건까지 판단해 적합 생존분을 늘린다(D-1.7 백필 재료도 함께 확대).
@@ -466,6 +472,13 @@ async def process_rag_guide_recommend(
                 f"(OKMS {min(len(_okms_surv), _GR_FINAL_TOP_N)}/{_GR_FINAL_TOP_N} + GOV {len(gov_okms_top_docs)}/{_GR_GOV_OKMS_TOP_N} "
                 f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
             )
+
+        # [단계 진단] 리랭킹 후 (관련성 필터 생존분 → RRF 융합/쿼터 cap 결과)
+        try:
+            from app.chat.infra.rag.stage_trace import record_docs as _stage_rec_docs
+            _stage_rec_docs("rerank_after", gr_top_docs)
+        except Exception:  # noqa: BLE001
+            pass
 
         # D-1 SLM 필터가 전부 제거하면 reserve·재귀 생략 — 컬렉션 자체에 해당 쿼리와
         # 관련된 문서가 없다는 신호이므로 추가 검색해도 의미 없다.

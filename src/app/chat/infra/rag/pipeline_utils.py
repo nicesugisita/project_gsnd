@@ -299,37 +299,38 @@ async def collect_okms_groupa_and_gov_docs(
         if policy_search_boost_enabled
         else []
     )
-    ga_pair_futures = [
-        loop.run_in_executor(
-            None,
-            run_group_a,
-            *_okms_dual_query_for_search(
-                eq, sq if sq else "",
-                policy_priority_tag=policy_priority_tag,
-                policy_search_boost_enabled=policy_search_boost_enabled,
-            ),
+    # OKMS Group A 듀얼 쿼리 쌍 (vector, keyword) — 정책 부스트 포함.
+    # GOV_OKMS 도 동일 쿼리를 쓰도록 여기서 한 번 만들어 공유한다.
+    ga_query_pairs = [
+        _okms_dual_query_for_search(
+            eq, sq if sq else "",
+            policy_priority_tag=policy_priority_tag,
+            policy_search_boost_enabled=policy_search_boost_enabled,
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
+    ]
+    ga_pair_futures = [
+        loop.run_in_executor(None, run_group_a, v, k) for v, k in ga_query_pairs
     ]
     ga_policy_extra_futures = [
         loop.run_in_executor(None, run_group_a, v, k)
         for v, k in policy_extra_pairs
     ]
 
-    # GOV_OKMS는 핵심어(tri_built)만 사용한다.
-    # - expanded_queries 제외: "복지", "지원" 같은 공통 토큰이 OP_HASANY로 매칭돼
-    #   치매 질의에 산림복지·장애인지원 같은 무관 서비스가 상위 차지하는 오매칭 방지.
-    # - policy_extra anchor 제외: GOV_OKMS는 sigun 필터 없는 전국 DB라
-    #   "기초연금" 같은 anchor가 토크나이저에서 「연금」 토큰으로 분해돼
-    #   농업인연금/국민연금 등 무관 서비스를 광범위하게 매칭시킴.
-    #   정책 boost 는 sigun 필터로 범위가 좁혀지는 OKMS 에서만 적용.
-    # - stopword 제거: 광범위 일반어("복지/지원/서비스" 등)는 OP_HASANY 노이즈 유발 →
-    #   GOV_OKMS 전송 직전에 제거.
-    _raw_gov_strings = [sq for sq in tri_built if sq]
-    if not _raw_gov_strings and reformed_query.strip():
-        _raw_gov_strings = [reformed_query.strip()]
-    gov_strings = [_filter_gov_okms_stopwords(s) for s in _raw_gov_strings]
-    gov_strings = [s for s in gov_strings if s]
+    # GOV_OKMS: OKMS 와 동일한 검색쿼리(vector/keyword 레그 + 정책 부스트)로 검색한다.
+    # (과거엔 명사 핵심어만·stopword 제거·anchor 제외했으나, OKMS 검색식과 동일화 요청으로 폐기.
+    #  GOV 는 SIGUN/YEAR 색인이 없어 필드 구조만 4-field 로 다를 뿐, 입력 검색어는 OKMS 와 같다.
+    #  트레이드오프: 전국 DB 라 anchor("기초연금"→「연금」)·일반어가 광역 매칭될 수 있음.)
+    _gov_seen: set = set()
+    gov_strings: List[str] = []
+    for vec, kw in [*ga_query_pairs, *policy_extra_pairs]:
+        for s in (vec, kw):
+            s = (s or "").strip()
+            if s and s not in _gov_seen:
+                _gov_seen.add(s)
+                gov_strings.append(s)
+    if not gov_strings and reformed_query.strip():
+        gov_strings = [reformed_query.strip()]
     gov_okms_futures = [loop.run_in_executor(None, run_gov, s) for s in gov_strings]
 
     if status_callback:

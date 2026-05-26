@@ -281,6 +281,11 @@ def query_welfare_tel_documents(
                     )
                 where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("WELFARE_TEL", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         queryset = jpkg_query.QuerySet(1)

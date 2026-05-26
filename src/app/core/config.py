@@ -117,7 +117,9 @@ class Settings(BaseSettings):
     # 후처리 dedupe 만으로 노이즈 문서를 흡수할 수 있는지 측정한다.
     # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후
     # referenced_documents / 최종 응답을 비교 (RELEVANCE_FILTER_ENABLED=true/false).
-    RELEVANCE_FILTER_ENABLED: bool = True
+    # [2026-05-26] 답변 일관성 우선 — SLM(8B) 관련성 판정이 회차마다 뒤집혀 문서 셋·개수가
+    # 흔들리는 비결정성의 주원인이라 기본 비활성화. (filter-off 시 guide FINAL_TOP_N 5→8 상향)
+    RELEVANCE_FILTER_ENABLED: bool = False
 
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
@@ -167,6 +169,11 @@ class Settings(BaseSettings):
     RESPONSE_TRACE_ENABLED: bool = False
     # 트레이스 출력 디렉토리. 없으면 자동 생성. JSONL: response_trace.jsonl, xlsx: response_trace.xlsx
     RESPONSE_TRACE_DIR: str = "log/response_trace"
+
+    # 정책 anchor 추가검색 토글. True 면 policy_priority_tag 별로 anchor 전용 OKMS/GOV
+    # 추가 검색쌍(keyword+vector)을 더 던져 해당 제도 문서를 풀에 확실히 넣는다.
+    # False 면 메인 듀얼(키워드1+벡터1)만 사용 — 검색 횟수↓. (메인 쿼리의 anchor 부스트는 유지)
+    POLICY_EXTRA_SEARCH_ENABLED: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""

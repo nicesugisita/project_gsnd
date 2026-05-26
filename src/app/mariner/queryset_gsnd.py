@@ -268,6 +268,11 @@ def query_GSND_general_documents(
                     jpkg_query.WhereSet(id_field, OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("GSND", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         # COMPLI_DT FilterSet (감지된 연도의 최소~최대 범위, 없으면 올해)
