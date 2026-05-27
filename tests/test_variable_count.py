@@ -35,6 +35,13 @@ def test_extract_topic_terms_dedup_and_numeric_filter():
     assert extract_topic_terms(kws) == ["월세", "관절"]
 
 
+def test_extract_topic_terms_excludes_region_despite_suffix_mismatch():
+    # exclude 는 "창원시"인데 keyword 는 명사추출이 접미사를 떼어 "창원"으로 온다.
+    # 접미사 정규화로 지역명이 주제어로 새지 않아야 한다 (광역 질의 → 빈 주제어).
+    kws = ["창원", "65세", "복지", "추천"]
+    assert extract_topic_terms(kws, exclude=["창원시"]) == []
+
+
 # ── topical_hit ────────────────────────────────────────────────────────
 
 def test_topical_hit_matches_name_and_content():

@@ -37,6 +37,17 @@ _BLOB_KEYS: tuple[str, ...] = (
     "CONTENT", "TEXT_CHUNK", "TEXT_CHUNK_KO", "PURPOSE", "_snippet",
 )
 
+# 행정구역 접미사 — 시군명 비교 시 정규화한다.
+# exclude 는 정규화된 시군명("창원시")으로 오는데 keywords 는 명사추출이 접미사를 떼어
+# "창원"으로 주므로, 접미사를 무시하고 비교하지 않으면 지역명이 주제어로 새어든다.
+_REGION_SUFFIX: tuple[str, ...] = ("시", "군", "구")
+
+
+def _strip_region_suffix(s: str) -> str:
+    if len(s) > 1 and s.endswith(_REGION_SUFFIX):
+        return s[:-1]
+    return s
+
 
 def extract_topic_terms(
     keywords: Sequence[str],
@@ -52,11 +63,12 @@ def extract_topic_terms(
         e = (e or "").strip()
         if e:
             excl.add(e)
+            excl.add(_strip_region_suffix(e))  # "창원시" → "창원" 도 함께 제외
     out: List[str] = []
     seen: set[str] = set()
     for k in keywords or ():
         k = (k or "").strip()
-        if not k or k in excl:
+        if not k or k in excl or _strip_region_suffix(k) in excl:
             continue
         if len(k) < 2:
             continue
