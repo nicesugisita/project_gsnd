@@ -811,14 +811,15 @@ async def process_rag_guide_recommend(
                 f"(require_general={_gr_require_general}, lifecycle={lifecycle or None})"
             )
 
-        # Step D-1.75 (LLM 선별 모드 전용): 주제어 결정적 관련성 게이트.
-        # 정책 태그 키워드(동의어 큐레이션) + 질의 주제어가 문서에 하나도 없으면 주제 무관으로 보고
-        # LLM 전에 컷한다. 게이트라 환각 원천 차단(없는 문서는 LLM이 볼 수 없음). 개수 룰(3~11)이 아니다.
-        # 전멸 방지: 주제어가 없거나(광역 질의) 매칭이 0건이면 미적용(전량 유지).
-        if _llm_select and gr_top_docs:
+        # Step D-1.75 (LLM 선별 모드 + 정책 태그 질의 전용): 주제어 결정적 관련성 게이트.
+        # 정책 태그가 있는 '좁은 제도' 질의(임플란트·기초연금 등)에만 적용 — 태그의 큐레이션된
+        # 키워드(+동의어)로 주제 무관 문서를 LLM 전에 컷한다. 태그 없는 대상/영역 질의(대학생·노인 등)는
+        # 게이트를 걸지 않고 완화 선별 프롬프트(recall)에 맡긴다(과잉컷 방지). 환각도 원천 차단.
+        # 전멸 방지: 매칭 0건이면 미적용(전량 유지).
+        if _llm_select and precomputed_policy_priority_tag and gr_top_docs:
             from .variable_count import extract_topic_terms as _extract_topic_terms, topical_hit
             _gate_tags, _gate_boost_kw = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
-            # 태그 키워드 동의어 갭 보강(예: implant 키워드에 틀니·의치보철 누락) — 게이트 정밀도용.
+            # 태그 키워드 동의어 갭 보강(예: implant 키워드에 틀니·의치보철 누락).
             _GATE_SYNONYMS = {"implant": ("틀니", "의치", "의치보철")}
             _extra_syn = [s for t in _gate_tags for s in _GATE_SYNONYMS.get(t, ())]
             _gate_kw = precomputed_keywords or extract_nouns(reformed_query)
@@ -827,10 +828,10 @@ async def process_rag_guide_recommend(
             ))
             if _gate_terms:
                 _gate_hits = [d for d in gr_top_docs if topical_hit(d, _gate_terms) > 0]
-                if _gate_hits:  # 1건이라도 맞을 때만 컷 (동의어 누락으로 정답까지 떨구는 사고 방지)
+                if _gate_hits:  # 1건이라도 맞을 때만 컷 (전멸 방지)
                     logger.info(
-                        "[RAG/guide_recommend_v2] 주제어 게이트: %d → %d건 (terms=%s)",
-                        len(gr_top_docs), len(_gate_hits), _gate_terms,
+                        "[RAG/guide_recommend_v2] 주제어 게이트(태그=%s): %d → %d건 (terms=%s)",
+                        precomputed_policy_priority_tag, len(gr_top_docs), len(_gate_hits), _gate_terms,
                     )
                     gr_top_docs = _gate_hits
                 else:

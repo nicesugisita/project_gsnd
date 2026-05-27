@@ -179,16 +179,22 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="처음 N개만")
     ap.add_argument("--multiturn-only", action="store_true", help="멀티턴 대화만, 전체 턴 replay")
     ap.add_argument("--endpoint", default="http://127.0.0.1:8000/v1/chat/completions")
+    ap.add_argument("--src", default=None, help="입력 xlsx 경로(기본: 260513 gsnd_total 데이터셋). 시트 gsnd_total / no·question·clarified·follow_up 스키마.")
+    ap.add_argument("--tag", default=None, help="출력 파일명에 끼울 식별 태그(예: problems) — 결과를 따로 저장.")
     args = ap.parse_args()
 
+    global SRC_XLSX
+    if args.src:
+        SRC_XLSX = Path(args.src)
     if not SRC_XLSX.exists():
         print(f"[error] 입력 파일 없음: {SRC_XLSX}"); sys.exit(1)
 
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     suffix = "mt" if args.multiturn_only else "single"
-    cap_jsonl = OUT_DIR / f"gsnd_consistency_{suffix}_{ts}.jsonl"
-    out_xlsx = OUT_DIR / f"gsnd_consistency_{suffix}_{ts}.xlsx"
+    _tag = f"{args.tag}_" if args.tag else ""
+    cap_jsonl = OUT_DIR / f"gsnd_consistency_{_tag}{suffix}_{ts}.jsonl"
+    out_xlsx = OUT_DIR / f"gsnd_consistency_{_tag}{suffix}_{ts}.xlsx"
     print(f"[run] ⚠ 서버 RESPONSE_TRACE_ENABLED=True 필요. trace={TRACE_JSONL}")
 
     captured: list[dict] = []
