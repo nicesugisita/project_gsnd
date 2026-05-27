@@ -19,6 +19,7 @@ from app.core.constants import (
     OP_OR,
     OP_BRACE_CLOSE,
     OP_AND,
+    OP_WEIGHTAND,
     OP_NOT,
     OP_HASANY,
     OP_HASALL,
@@ -183,7 +184,9 @@ def _query_dual_documents(
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
+    max_results: Optional[int] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     QuerySet(2) 듀얼 검색 공통 로직 — OKMS 컬렉션 전용.
@@ -221,7 +224,7 @@ def _query_dual_documents(
     try:
         timeout = Config.MARINER_TIMEOUT
         threshold = Config.MARINER_THRESHOLD
-        max_top_n = Config.MARINER_MAX_RESULTS
+        max_top_n = max_results if max_results is not None else Config.MARINER_MAX_RESULTS
 
         ensure_jvm_thread()
 
@@ -238,7 +241,7 @@ def _query_dual_documents(
 
         # SELECT 필드 (OKMS 컬렉션 전용)
         num = MARINER_SELECT_FIELD_NUM
-        select_field_names = ["ID", "YEAR", "SIGUN", "CONTENT", "WEIGHT", "LIFE_CYCLE", "DEPARTMENT", "APPLICATION_PERIOD", "PURPOSE", "TEL", "BUSINESS_NAME", "ORG_NM", "PATH"]
+        select_field_names = ["ID", "YEAR", "SIGUN", "CONTENT", "WEIGHT", "LIFE_CYCLE", "DEPARTMENT", "APPLICATION_PERIOD", "PURPOSE", "TEL", "BUSINESS_NAME", "ORG_NM", "PATH", "HOUSE_SITUATION"]
 
         normalized_user_id = str(user_id or "").strip()
         normalized_conv_id = str(conv_id or "").strip()
@@ -398,13 +401,15 @@ def _query_dual_documents(
                     jpkg_query.WhereSet("LIFE_CYCLE", 34, lifecycle_filter, 0),
                 ]
 
-            # HOUSE_SITUATION(가구상황) 스크립틀릿 필터
-            # DB 셀이 "저소득,한부모·조손,장애인" 처럼 CSV 멀티값이라
-            # LIFE_CYCLE 과 동일하게 op=34 (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭.
+            # HOUSE_SITUATION(가구상황) 소프트 부스트
+            # DB 셀이 "저소득,한부모·조손,장애인" 처럼 CSV 멀티값이라 op=34
+            # (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭하되, OP_AND must-match 가 아니라
+            # OP_WEIGHTAND 로 좌측 결과를 보존하고 매칭 문서에만 가중치를 준다.
+            # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
             if hshd_sttn_filter:
                 where_set_array += [
-                    jpkg_query.WhereSet(OP_AND),
-                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
+                    jpkg_query.WhereSet(OP_WEIGHTAND),
+                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
                 ]
 
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -430,6 +435,31 @@ def _query_dual_documents(
                         jpkg_query.WhereSet("ID", OP_INT_SUMMATION, chunk_id, 0),
                     ]
 
+            # 사용자 명시 배제 사업명(예: "의료급여 외") 추출값을 BUSINESS_NAME_KO 토큰
+            # 정확 부정 조건으로 추가. extract_excluded_services 가 추출한 키워드가
+            # 사업명에 포함된 문서를 검색 단계에서 사전 제외.
+            if excluded_business_keywords:
+                _biz_excluded = [
+                    str(k).strip()
+                    for k in excluded_business_keywords
+                    if str(k or "").strip()
+                ]
+                if _biz_excluded:
+                    logger.info(
+                        "[Mariner/%s] BUSINESS_NAME_KO 배제 키워드 적용: %s",
+                        log_label, _biz_excluded,
+                    )
+                    for kw in _biz_excluded:
+                        where_set_array += [
+                            jpkg_query.WhereSet(OP_NOT),
+                            jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY, kw, 0),
+                        ]
+
+            try:
+                from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+                _stage_rec_sq(f"OKMS#{i}", where_set_array)
+            except Exception:  # noqa: BLE001
+                pass
             query.setWhere(where_set_array)
 
             # YEAR FilterSet (사용자가 명시한 경우만 필터, 없으면 전체 연도)
@@ -570,7 +600,9 @@ def query_group_a_documents(
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     apply_business_anchor: bool = True,
+    max_results: Optional[int] = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Group A — 듀얼 검색 (QuerySet(2))
@@ -594,5 +626,7 @@ def query_group_a_documents(
         hshd_sttn_filter=hshd_sttn_filter,
         hshd_sttn_synonyms=hshd_sttn_synonyms,
         excluded_chunk_ids=excluded_chunk_ids,
+        excluded_business_keywords=excluded_business_keywords,
         apply_business_anchor=apply_business_anchor,
+        max_results=max_results,
     )

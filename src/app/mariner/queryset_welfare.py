@@ -287,6 +287,11 @@ def query_welfare_center_documents(
 
             # ADDRESS는 검색색인 대상이 아니므로 WHERE에 사용하지 않는다.
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("WELFARE", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         order_set_array = [jpkg_query.OrderBySet(False, "WEIGHT", jpype.JByte(_ORDERBY_WEIGHT_DESC))]

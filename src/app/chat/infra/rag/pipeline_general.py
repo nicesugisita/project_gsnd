@@ -13,6 +13,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.core.config import Config
+from app.core.constants import GUIDE_RECOMMEND_MAX_TOKENS
 
 # general 전용 Mariner 쿼리셋
 from app.mariner.queryset_okms import query_group_a_documents
@@ -38,6 +39,7 @@ from app.chat.infra.rag import (
     _build_search_queries,
     filter_okms_keywords,
 )
+from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
     expand_query,
@@ -74,9 +76,11 @@ async def process_rag_general(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
     more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -145,6 +149,7 @@ async def process_rag_general(
         # sigun_filters가 외부에서 전달된 경우(히스토리/위치명 기반 확정값) 그대로 사용
         if sigun_filters is not None:
             gen_sigun_filters = sigun_filters
+            gen_sigun_raws = [s.replace("경상남도 ", "") for s in sigun_filters]
             logger.debug(f"[RAG/general_v2] 외부 sigun_filters 사용: {gen_sigun_filters}")
         else:
             gen_sigun_raws = _extract_sigun_from_message(message)
@@ -192,6 +197,7 @@ async def process_rag_general(
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                 )
             except Exception as e:
                 logger.warning(f"[RAG/general_v2] Group A 쿼리 검색 실패: {e}")
@@ -208,6 +214,7 @@ async def process_rag_general(
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -223,6 +230,7 @@ async def process_rag_general(
                     lifecycle_filter=gen_lifecycle or None,
                     sigun_filters=gen_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=gen_hshd_sttn or None,
                     hshd_sttn_synonyms=gen_hshd_synonyms or None,
                 )
@@ -262,6 +270,23 @@ async def process_rag_general(
         else:
             logger.info("[RAG/general_v2] GSND 연도 필터 미적용 (기본값: 올해)")
 
+        # service_target에 따라 GSND 컬렉션 분기.
+        # citizen 컬렉션이 미설정(.env 누락 등)이면 official로 안전 폴백.
+        _is_citizen = (service_target or "official").strip().lower() == "citizen"
+        _gsnd_collection = (
+            Config.RAG_CITIZEN_COLLECTION
+            if _is_citizen and Config.RAG_CITIZEN_COLLECTION
+            else Config.RAG_COLLECTION
+        )
+        if _is_citizen and not Config.RAG_CITIZEN_COLLECTION:
+            logger.warning(
+                "[RAG/general_v2] service_target=citizen 이지만 RAG_CITIZEN_COLLECTION 미설정 → RAG_COLLECTION 폴백"
+            )
+        logger.info(
+            "[RAG/general_v2] GSND 컬렉션 선택: service_target=%s → %s",
+            service_target, _gsnd_collection,
+        )
+
         def _run_gsnd_query(query: str) -> Tuple[List[Dict[str, Any]], bool]:
             for attempt in range(2):
                 try:
@@ -271,7 +296,7 @@ async def process_rag_general(
                     # 균일하지 않아 시군 필터를 적용하면 Mariner 서버 단계에서 통째로
                     # 제외되는 문제가 있다. 진단/완화를 위해 시군 필터 미적용.
                     docs = query_GSND_general_documents(
-                        query, Config.RAG_COLLECTION,
+                        query, _gsnd_collection,
                         sigun_filters=None,
                         year_filters=gsnd_year_filters or None,
                         excluded_chunk_ids=excluded_chunk_ids,
@@ -394,7 +419,11 @@ async def process_rag_general(
         # ====================================================================
         # Step 6: OKMS GroupA → top N
         # ====================================================================
-        _GEN_FINAL_TOP_N = 15 if more_detail else 8
+        # 필터 ON: 15/8, 필터 OFF: 20/12 (필터 제거 보상)
+        if Config.RELEVANCE_FILTER_ENABLED:
+            _GEN_FINAL_TOP_N = 15 if more_detail else 8
+        else:
+            _GEN_FINAL_TOP_N = 20 if more_detail else 12
         _FALLBACK_THRESHOLD = 1
         okms_final = okms_group_a_top[:_GEN_FINAL_TOP_N]
         logger.info(f"[RAG/general_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(okms_group_a_top)}개)")
@@ -442,13 +471,31 @@ async def process_rag_general(
         # ====================================================================
         # Step 7 합산: OKMS + GSND
         # ====================================================================
-        top_docs = sorted(
-            _deduplicate_documents(okms_final + gsnd_top),
-            key=lambda x: float(x.get("WEIGHT", 0) or 0),
-            reverse=True,
-        )
-
-        logger.info(f"[RAG/general_v2] 최종 선택: {len(top_docs)}개 문서")
+        if Config.RRF_FUSION_ENABLED:
+            # 서로 다른 소스(OKMS 사업 / GSND)를 풀별 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합.
+            # 두 컬렉션의 WEIGHT 스케일 편향을 제거한다(search center/tel 융합과 동일 취지).
+            okms_sorted = sorted(
+                _deduplicate_documents(okms_final),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            gsnd_sorted = sorted(
+                _deduplicate_documents(gsnd_top),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            top_docs = rerank_by_rrf(okms_sorted, gsnd_sorted)
+            logger.info(
+                "[RAG/general_v2] 최종 선택(RRF 융합): %d개 (OKMS=%d, GSND=%d)",
+                len(top_docs), len(okms_sorted), len(gsnd_sorted),
+            )
+        else:
+            top_docs = sorted(
+                _deduplicate_documents(okms_final + gsnd_top),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            logger.info(f"[RAG/general_v2] 최종 선택: {len(top_docs)}개 문서")
         for i, doc in enumerate(top_docs, 1):
             logger.debug(f"[RAG/general_v2] #{i} NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
 
@@ -464,14 +511,17 @@ async def process_rag_general(
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        top_docs = await filter_irrelevant_docs(
-            reformed_query,
-            top_docs,
-            sigun_filters=gen_sigun_filters,
-            max_judgment_docs=20 if more_detail else None,
-        )
-        logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        if Config.RELEVANCE_FILTER_ENABLED:
+            top_docs = await filter_irrelevant_docs(
+                reformed_query,
+                top_docs,
+                sigun_filters=gen_sigun_filters,
+                max_judgment_docs=20 if more_detail else None,
+            )
+            logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
+            logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        else:
+            logger.info("[RAG/general_v2] Step7-C 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
 
         # ====================================================================
         # Step 7-C-3: 관련성 필터 0건 → GroupA 하위 문서 재시도
@@ -490,9 +540,13 @@ async def process_rag_general(
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
                 )
-                top_docs = await filter_irrelevant_docs(
-                    reformed_query, lower_docs, sigun_filters=gen_sigun_filters
-                )
+                if Config.RELEVANCE_FILTER_ENABLED:
+                    top_docs = await filter_irrelevant_docs(
+                        reformed_query, lower_docs, sigun_filters=gen_sigun_filters
+                    )
+                else:
+                    top_docs = lower_docs
+                    logger.info("[RAG/general_v2] Step7-C-3 관련성 필터 SKIP — lower_docs %d건 그대로", len(top_docs))
                 logger.info(
                     "[TIMING][general] Step7-C-3 GroupA 하위 재시도: %.3fs", time.monotonic() - _t
                 )
@@ -552,9 +606,13 @@ async def process_rag_general(
                 )
 
                 _t = time.monotonic()
-                top_docs = await filter_irrelevant_docs(
-                    reformed_query, fb_pool, sigun_filters=gen_sigun_filters
-                )
+                if Config.RELEVANCE_FILTER_ENABLED:
+                    top_docs = await filter_irrelevant_docs(
+                        reformed_query, fb_pool, sigun_filters=gen_sigun_filters
+                    )
+                else:
+                    top_docs = fb_pool
+                    logger.info("[RAG/general_v2] Step7-C-4 재검색 관련성 필터 SKIP — fb_pool %d건 그대로", len(top_docs))
                 logger.info(
                     "[TIMING][general] Step7-C-4 재검색 관련성 필터: %.3fs", time.monotonic() - _t
                 )
@@ -588,12 +646,23 @@ async def process_rag_general(
         # ====================================================================
         _t = time.monotonic()
         _final_user_msg = (final_user_message or "").strip() or message
+        # general도 guide_recommend 카드 형식으로 답하므로 토큰 하한·메타(지역/출생연도/policy)도 동일하게 적용
+        user_region = " ".join(r for r in gen_sigun_raws if r != "경남") or ""
+        _gen_max_tokens = max(max_tokens or 0, GUIDE_RECOMMEND_MAX_TOKENS)
+        if _gen_max_tokens != max_tokens:
+            logger.info(
+                "[general] max_tokens floor 적용: %s → %s",
+                max_tokens, _gen_max_tokens,
+            )
         response = await generate_final_response_v2(
-            _final_user_msg, top_docs, temperature, max_tokens, stream,
+            _final_user_msg, top_docs, temperature, _gen_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
             lifecycle=gen_lifecycle,
             messages=messages,
+            policy_priority_tag=precomputed_policy_priority_tag,
+            user_region=user_region,
+            user_birth_year=str(gen_birth_year) if gen_birth_year else "",
             more_info_mode=more_detail or bool(excluded_chunk_ids or excluded_service_names),
             detail_requested=bool(more_detail),
         )

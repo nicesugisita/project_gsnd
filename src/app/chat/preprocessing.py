@@ -14,7 +14,9 @@ from app.chat.infra.rag.query_builder import (
 )
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm import call_llm_api
+from app.chat.infra.llm.classifier_fallback import call_classifier_with_fallback
 from app.shared.utils.prompt_loader import load_unified_preprocessing_prompt
+from app.chat.routing import KEYWORD_BOOST_MAP, _apply_keyword_boost
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,10 @@ VALID_INTENTS = _get_intent_names()
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
 POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})
+EXCLUSION_INTENTS = frozenset({
+    "NONE", "PURE_EXCLUSION", "ANCHOR_COMPARISON",
+    "RESIDUAL_CATEGORY", "SUBSTITUTION",
+})
 
 
 def _raw_search_target_from_parsed(parsed: Dict[str, Any]) -> Any:
@@ -152,6 +158,42 @@ def _normalize_policy_priority_tag(raw: Any) -> Optional[str]:
     return None
 
 
+def _normalize_exclusion_intent(raw: Any) -> str:
+    """LLM JSON의 exclusion_intent 정규화. 누락/불명이면 NONE으로 폴백."""
+    if raw is None:
+        return "NONE"
+    value = str(raw).strip().upper()
+    if value in EXCLUSION_INTENTS:
+        return value
+    logger.warning("[UnifiedPreprocess] 알 수 없는 exclusion_intent=%r → NONE", raw)
+    return "NONE"
+
+
+def _normalize_str_list(raw: Any) -> List[str]:
+    """배열 → strip + 빈 문자열·중복 제거된 문자열 리스트. None/타입 불일치는 []."""
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for v in raw:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _read_field(parsed: Dict[str, Any], *keys: str) -> Any:
+    """스네이크/카멜 모두 허용. 첫 비-None 값 반환."""
+    for k in keys:
+        if k in parsed and parsed[k] is not None:
+            return parsed[k]
+    return None
+
+
 async def unified_preprocess(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
@@ -170,6 +212,13 @@ async def unified_preprocess(
         search_target   : str | None (intent=search일 때만 admin_local_office | welfare_facility | ambiguous)
         policy_priority_tag: str | None (implant | low_income | elderly_benefits)
     """
+    # [단계 진단] 요청 시작 — 이전 요청 잔여 단계 데이터 제거 (RESPONSE_TRACE_ENABLED 시만 동작)
+    try:
+        from app.chat.infra.rag.stage_trace import reset as _stage_reset
+        _stage_reset()
+    except Exception:  # noqa: BLE001
+        pass
+
     prompt_template = load_unified_preprocessing_prompt()
     if not prompt_template:
         logger.error("[UnifiedPreprocess] 프롬프트 로드 실패 — 폴백 반환")
@@ -190,28 +239,22 @@ async def unified_preprocess(
     final_prompt = prompt_template.replace("{사용자 질문}", prompt_input)
 
     try:
-        raw = await call_llm_api(
+        parsed, raw, used_32b = await call_classifier_with_fallback(
+            classifier_name="UnifiedPreprocess",
             message=final_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL,
             extra_system_prompts=[],
         )
-
-        stripped = raw.strip()
-        if stripped.startswith("```"):
-            stripped = (
-                stripped.removeprefix("```json")
-                        .removeprefix("```")
-                        .removesuffix("```")
-                        .strip()
+        if parsed is None:
+            logger.warning(
+                "[UnifiedPreprocess] SLM/32B 양쪽 모두 JSON 파싱 실패 → 폴백 반환 (used_32b=%s)",
+                used_32b,
             )
+            return _make_fallback(user_query)
+        if used_32b:
+            logger.info("[UnifiedPreprocess] 32B 폴백 응답으로 파싱 성공")
 
-        parsed = json.loads(stripped)
-
-    except json.JSONDecodeError as e:
-        logger.warning("[UnifiedPreprocess] JSON 파싱 실패: %s", e)
-        return _make_fallback(user_query)
     except Exception as e:
         logger.error("[UnifiedPreprocess] LLM 호출 실패: %s", e, exc_info=True)
         return _make_fallback(user_query)
@@ -242,9 +285,23 @@ async def unified_preprocess(
         expanded = [q for q in expanded if q]
         if not expanded:
             expanded = [reformed] if reformed else [user_query]
+        # KEYWORD_BOOST_MAP 후처리: unified_preprocess LLM이 reformed_query/expanded_queries에서
+        # 부스팅 키워드(예: 실직→긴급지원제도)를 떨어뜨리는 경우가 있어 검색 직전 한 번 더 복원한다.
+        # 트리거 매칭은 user_query·reformed 양쪽에서 평가해 LLM이 트리거 단어 자체를 다른 표현으로
+        # 바꿔도 부스팅이 발동되도록 함.
+        boost_basis = f"{user_query} {reformed}"
+        reformed = _apply_keyword_boost(reformed)
+        expanded = [_apply_keyword_boost(q) for q in expanded]
         try:
             raw_keywords = extract_nouns(reformed)
             keywords = sanitize_disability_keywords(raw_keywords, user_query)
+            # 부스팅 사업명이 명사 분해로 토큰화돼도 Mariner keyword 검색에서 정확히 잡히도록
+            # 원본 사업명을 keywords 풀에도 보장 주입한다.
+            for trigger, boost_terms in KEYWORD_BOOST_MAP.items():
+                if trigger in boost_basis:
+                    for term in boost_terms:
+                        if term and term not in keywords:
+                            keywords.append(term)
             if raw_reformed != reformed or raw_expanded != expanded or raw_keywords != keywords:
                 logger.info(
                     "[UnifiedPreprocess] 대상집단 가드 적용 | reformed_changed=%s | expanded_changed=%s | keywords_changed=%s",
@@ -259,6 +316,19 @@ async def unified_preprocess(
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
     policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
     detail_requested = _normalize_detail_requested(parsed)
+
+    # [작업 6] 배제 의도 분석 — rewrite 모드 프롬프트에서만 채워짐. expand 모드 폴백 시 안전 default.
+    exclusion_intent = _normalize_exclusion_intent(_read_field(parsed, "exclusion_intent", "exclusionIntent"))
+    raw_vector_query = _read_field(parsed, "vector_query", "vectorQuery")
+    vector_query = str(raw_vector_query).strip() if raw_vector_query else (reformed or query)
+    must_not_keywords = _normalize_str_list(_read_field(parsed, "must_not_keywords", "mustNotKeywords"))
+    anchor_entities = _normalize_str_list(_read_field(parsed, "anchor_entities", "anchorEntities"))
+    # ANCHOR_COMPARISON: must_not 은 검색을 차단하므로 강제 비움 (LLM이 잘못 채워 보내도 무력화).
+    if exclusion_intent == "ANCHOR_COMPARISON":
+        must_not_keywords = []
+    # ANCHOR_COMPARISON 외에는 anchor_entities 의미 없음 — 강제 비움.
+    if exclusion_intent != "ANCHOR_COMPARISON":
+        anchor_entities = []
     # DB 변별 키워드로 사후 무력화 (예: "치매"가 포함되면 elderly_benefits를 None으로 강제)
     try:
         from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
@@ -272,6 +342,22 @@ async def unified_preprocess(
     except Exception as e:
         logger.warning("[UnifiedPreprocess] exclude check failed: %s", e)
 
+    # LLM이 None을 주거나 excludes로 무력화된 경우, 룰 기반 fallback으로 anchor 검색을
+    # 항상 발동시킨다. 같은 질문에 매 호출마다 다른 tag가 나와 검색 결과 셋이 흔들리는
+    # LLM 비결정성을 보정. 자세한 검증 데이터는 policy_priority_tag_fallback_handoff.md 참고.
+    if policy_priority_tag is None:
+        try:
+            from app.chat.infra.rag.policy_priority import infer_policy_priority_tag_by_keywords
+            inferred = infer_policy_priority_tag_by_keywords(query)
+            if inferred:
+                policy_priority_tag = inferred
+                logger.info(
+                    "[UnifiedPreprocess] policy_priority_tag 룰 fallback: None → %s",
+                    inferred,
+                )
+        except Exception as e:
+            logger.warning("[UnifiedPreprocess] tag inference fallback failed: %s", e)
+
     result = {
         "query":            query,
         "intent":           intent,
@@ -282,12 +368,25 @@ async def unified_preprocess(
         "search_target":    search_target,
         "policy_priority_tag": policy_priority_tag,
         "detail_requested": detail_requested,
+        "exclusion_intent": exclusion_intent,
+        "vector_query":     vector_query,
+        "must_not_keywords": must_not_keywords,
+        "anchor_entities":  anchor_entities,
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | use_rag(input)=%s",
-        query[:50], intent, search_target, policy_priority_tag, detail_requested, use_rag,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | exclusion_intent=%s | mustNot=%s | anchor=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, policy_priority_tag, detail_requested,
+        exclusion_intent, must_not_keywords, anchor_entities, use_rag,
     )
+
+    # [단계 진단] 전처리 산출(재구성/의도/리라이팅/키워드/정책태그/벡터쿼리) 기록
+    try:
+        from app.chat.infra.rag.stage_trace import record_preprocess as _stage_record_preprocess
+        _stage_record_preprocess(result)
+    except Exception:  # noqa: BLE001
+        pass
+
     return result
 
 
@@ -301,4 +400,8 @@ def _make_fallback(user_query: str) -> Dict[str, Any]:
         "keywords":         [],
         "search_target":    None,
         "policy_priority_tag": None,
+        "exclusion_intent": "NONE",
+        "vector_query":     user_query,
+        "must_not_keywords": [],
+        "anchor_entities":  [],
     }

@@ -12,8 +12,10 @@ from typing import List, Optional
 from app.chat.service import unified_preprocess
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm.judgment import pre_check
+from app.chat.infra.llm.excluded_service import extract_excluded_services
 from app.chat.lifecycle import check_lifecycle
 from app.chat.sigun import check_sigun, check_out_of_scope_region
+from app.chat.topic_clarify import check_topic_clarification, last_assistant_is_topic_ask
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,12 @@ class SigunCheckResult:
 
 
 @dataclass
+class TopicClarifyResult:
+    need_clarify: bool = False
+    ask_message: str = ""
+
+
+@dataclass
 class PreprocessResult:
     query: str = ""
     intent: str = "general"
@@ -44,6 +52,11 @@ class PreprocessResult:
     search_target: Optional[str] = None
     policy_priority_tag: Optional[str] = None
     detail_requested: bool = False
+    # 작업 6: 배제 의도 분석 (rewrite 모드 unified_preprocess에서만 의미 있게 채워짐)
+    exclusion_intent: str = "NONE"
+    vector_query: str = ""
+    must_not_keywords: List[str] = field(default_factory=list)
+    anchor_entities: List[str] = field(default_factory=list)
 
 
 async def run_pre_check(
@@ -80,6 +93,38 @@ def run_early_sigun_check(
         return None
     filters, need_ask, ask_msg = check_sigun(user_message, messages)
     return SigunCheckResult(filters=filters or None, need_clarify=need_ask, ask_message=ask_msg)
+
+
+def run_topic_clarify_check(
+    original_user_question: str,
+    messages: list,
+    use_rag: bool,
+    is_clarification: bool,
+    *,
+    current_user_message: str = "",
+) -> Optional[TopicClarifyResult]:
+    """[2.5단계] 정보량 0 입력에 대해 회차별 분야 되묻기.
+
+    호출 케이스:
+    1) 시군 확정 직후(is_clarification=True): 원질문(`original_user_question`)을
+       기준으로 1회차 메시지 발동.
+    2) topic_clarify 후속 turn(직전 assistant 가 topic_ask 마커): is_clarification
+       이 False여도(메시지가 '?'로 안 끝남) 게이트 우회. 현재 user 메시지
+       (`current_user_message`)를 기준으로 2회차/3회차/fallback 진행.
+
+    `use_rag=False` 면 항상 None.
+    회차에 cap이 없고, 풀 초과 시 fallback 메시지가 반복된다(`topic_clarify`).
+    """
+    if not use_rag:
+        return None
+    is_followup = last_assistant_is_topic_ask(messages)
+    if not (is_clarification or is_followup):
+        return None
+    base_query = current_user_message if is_followup else original_user_question
+    need_ask, ask_msg = check_topic_clarification(base_query, messages)
+    if not need_ask:
+        return None
+    return TopicClarifyResult(need_clarify=True, ask_message=ask_msg)
 
 
 def run_out_of_scope_check(user_message: str, use_rag: bool) -> tuple[bool, str]:
@@ -144,7 +189,35 @@ async def run_unified_preprocess(
         search_target=result.get("search_target"),
         policy_priority_tag=result.get("policy_priority_tag"),
         detail_requested=bool(result.get("detail_requested", False)),
+        exclusion_intent=result.get("exclusion_intent", "NONE"),
+        vector_query=result.get("vector_query") or result.get("reformed_query") or user_message,
+        must_not_keywords=result.get("must_not_keywords") or [],
+        anchor_entities=result.get("anchor_entities") or [],
     )
+
+
+async def run_extract_excluded_services(
+    user_message: str,
+    messages: Optional[list],
+    use_rag: bool,
+) -> List[str]:
+    """[5단계 병렬] 배제 사업명 추출.
+
+    `unified_preprocess`와 `asyncio.gather`로 병렬 실행되도록 설계.
+    use_rag=False면 LLM 호출 생략하고 즉시 [] 반환.
+    실패 시 [] 반환 — 답변 차단 사유 아님.
+    """
+    if not use_rag:
+        return []
+    _t = time.monotonic()
+    try:
+        result = await extract_excluded_services(user_message, messages)
+    except Exception as e:
+        logger.warning("[ExcludedServiceExtract] 예외 → 빈 리스트 폴백: %s", e)
+        result = []
+    elapsed = round(time.monotonic() - _t, 3)
+    logger.info("[TIMING] extract_excluded_services: %.3fs | count=%d", elapsed, len(result))
+    return result
 
 
 def run_lifecycle_check(user_message: str, messages: list, use_rag: bool, intent: str) -> None:

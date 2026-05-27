@@ -38,3 +38,6 @@ jpype1==1.7.0
 cachetools==5.3.3
 async-lru==2.0.4
 
+# Excel I/O (response trace dump)
+openpyxl==3.1.5
+

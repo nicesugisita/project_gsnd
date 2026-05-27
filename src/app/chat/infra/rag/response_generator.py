@@ -28,7 +28,6 @@ from app.chat.infra.rag.document import (
 from app.chat.infra.llm import call_llm_api
 from app.chat.infra.db.welfare_tel import has_unregistered_contact
 from app.shared.utils.prompt_loader import (
-    load_system_prompt,
     load_classification_general_prompt,
     load_classification_comparison_prompt,
     load_classification_recommended_prompt,
@@ -36,6 +35,10 @@ from app.shared.utils.prompt_loader import (
     load_classification_search_prompt,
 )
 from app.chat.infra.rag.policy_priority import soft_priority_instruction_for_prompt
+from app.chat.infra.rag.trace_sink import (
+    record_response_trace,
+    wrap_stream_with_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,22 +163,30 @@ async def generate_final_response_v2(
             )
 
         # intent별 프롬프트 선택
+        # - general: classification_general_prompt (형식 A 기본, detail_requested=True면 [추가 규칙]로 형식 B 강제)
+        # - guide_recommend: classification_recommended_prompt (use_llm_recommended_prompt=True면 LLM 추천 프롬프트)
         if intent == "comparison":
             final_prompt = load_classification_comparison_prompt()
             logger.info("[Final Response v2] Comparison 프롬프트 사용")
+        elif intent == "general":
+            final_prompt = load_classification_general_prompt()
+            logger.info(
+                "[Final Response v2] General 프롬프트 사용 (intent=general, detail_requested=%s)",
+                detail_requested,
+            )
         elif intent == "guide_recommend":
             if use_llm_recommended_prompt:
                 final_prompt = load_classification_llm_recommended_prompt()
-                logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용")
+                logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용 (intent=%s)", intent)
             else:
                 final_prompt = load_classification_recommended_prompt()
-                logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용")
+                logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용 (intent=%s)", intent)
         elif intent == "search":
             final_prompt = load_classification_search_prompt()
             logger.info("[Final Response v2] Search 프롬프트 사용")
         else:
             final_prompt = load_classification_general_prompt()
-            logger.info("[Final Response v2] General 프롬프트 사용")
+            logger.info("[Final Response v2] General 프롬프트 사용 (fallback)")
 
         if not final_prompt:
             logger.warning(f"[Final Response v2] {intent} 프롬프트 로드 실패 - 기본 LLM 사용")
@@ -228,6 +239,8 @@ async def generate_final_response_v2(
                 facility_content += _format_facility_for_prompt(wdoc, i)
 
         # user_message 구성
+        # guide_recommend 프롬프트만 메타(지역/출생연도/생애주기) 슬롯을 사용한다.
+        # general(classification_general_prompt)·comparison·search·fallback은 단순 형태로 구성한다.
         if intent == "guide_recommend":
             user_life_stage = lifecycle if lifecycle else "정보 없음"
             region_display = user_region if user_region else "정보 없음"
@@ -243,12 +256,10 @@ async def generate_final_response_v2(
         retrieved_documents:
         {doc_content}"""
 
-        # 형식 B(4단계 구조) 강제 여부는 detail_requested 단일 신호로만 판단한다.
-        # detail_requested는 두 경로로 set된다:
-        #   1) unified_preprocess의 detail_requested 필드 (첫 메시지의 "자세히" 요청 등)
-        #   2) NextIntent의 MORE_DETAIL 분류 (이전 대화 기반 후속 상세 요청)
-        # 둘 다 LLM이 의미 기반으로 판단하므로, 코드에서 추가 키워드 검사를 하지 않는다.
-        force_form_b = intent == "general" and bool(detail_requested)
+        # general + 자세히 요청(MORE_DETAIL 후속 또는 unified_preprocess.detail_requested)일 때만
+        # classification_general 프롬프트에 [추가 규칙] 블록으로 형식 B(4단계 구조)를 강제한다.
+        # guide_recommend 는 자체 추천 카드 형식을 사용하므로 형식 B 주입 대상이 아니다.
+        force_form_b = (intent == "general") and bool(detail_requested)
 
         logger.info(
             "[ResponseGen] more_info_mode=%s intent=%s detail_requested=%s → force_form_b=%s",
@@ -258,8 +269,25 @@ async def generate_final_response_v2(
             logger.info("[ResponseGen] [추가 규칙] 4단계 구조(형식 B) 주입 ✓")
             user_message += (
                 "\n\n[추가 규칙]\n"
-                "이번 응답은 사용자의 '자세히' 요청입니다. 반드시 형식 B(4단계 구조)로 자세히 답변하십시오.\n"
+                "이번 응답은 사용자의 '자세히' 요청입니다. 기본적으로 형식 B(4단계 구조)로 답변하십시오.\n"
+                "\n"
+                "[최우선 — 형식 C 전환 규칙]\n"
+                "단, 사용자가 묻는 **핵심 항목**(예: 얼마/금액, 언제/기간, 어떻게/신청 방법, 누가/대상, 어디서/장소, 조건 등)이 "
+                "retrieved_documents에 **구체적으로 명시되어 있지 않으면**, 4단계 구조를 사용하지 말고 "
+                "다음 형식 C(3부 구조)로 답변하십시오. 이 규칙이 아래 형식 B 지시보다 우선합니다.\n"
+                "\n"
+                "(1) 첫 줄: 사용자가 물은 핵심 항목이 문서에 없음을 한 문장으로 명시.\n"
+                "    예: '긴급지원제도의 구체적인 지원 금액은 안내 문서에 명시되어 있지 않습니다.'\n"
+                "(2) 본문: 문서에 적힌 관련 정보만 2~4문장으로 간결히 안내. 4단계 헤더(1. 사업 개요 …) 사용 금지. "
+                "일반론·추정('항목별로 상이합니다', '세부 금액은 별도 안내가 필요합니다' 등)으로 채우지 말 것.\n"
+                "(3) 마지막 줄: 문서에 적힌 문의처로 정중하게 안내. "
+                "예: '정확한 지원 금액은 문의처(055-225-3825)로 문의해 주시면 친절히 안내받으실 수 있습니다.' "
+                "문서에 문의처가 없을 때에만 '해당 내용은 문서에 안내되어 있지 않아 별도 확인이 필요합니다.'로 대체.\n"
+                "형식 C 톤: 공손하고 예의바른 말투를 유지하고 사과 표현('죄송합니다')은 한 번만 사용합니다.\n"
+                "\n"
+                "[형식 B(4단계 구조) — 핵심 항목이 문서에 충분히 있을 때만 사용]\n"
                 "출력 형식:\n"
+                "{선행 응답: 사용자가 물은 핵심 물음(자격·금액·시기·신청 방법 등)에 1~2문장으로 직접 답하는 도입부 — 시스템 프롬프트의 [선행 규칙]을 따른다}\n\n"
                 "{기준연도} 기준 {지역} {서비스/제도명} 사업 안내입니다.\n\n"
                 "1. 사업 개요\n"
                 "- {사업 목적과 핵심 내용을 한두 문장으로}\n\n"
@@ -277,7 +305,7 @@ async def generate_final_response_v2(
                 "- {제출 서류}\n"
                 "- {문의처 / 연락처}\n\n"
                 "섹션 헤더는 마크다운 강조(#, **) 없이 '1. 사업 개요' 형태로만 작성합니다.\n"
-                "문서에 없는 내용은 '정보 없음'으로 명시합니다.\n"
+                "문의처 번호는 문서에 적힌 값만 사용하고 임의 생성은 금지합니다.\n"
                 "답변 말미에 '자세히 알려줘'를 다시 안내하지 마십시오 (이미 자세한 답변입니다).\n"
             )
         elif more_info_mode and intent not in ("recommended_question",):
@@ -289,20 +317,6 @@ async def generate_final_response_v2(
                 "- 이전 답변과의 중복 여부는 추정하지 말고, 문서에 적힌 내용으로 안내 가능하면 포함합니다.\n"
                 "- 문서를 검토한 뒤 안내할 근거가 없을 때에만 짧은 안내를 덧붙일 수 있으며, "
                 "그 경우에도 답변 전체를 한 줄·한 문장으로만 제한하지 마세요.\n"
-            )
-        elif intent == "general":
-            logger.info("[ResponseGen] [추가 규칙] 형식 A 강제 주입 ✓")
-            user_message += (
-                "\n\n[추가 규칙]\n"
-                "- 반드시 형식 A(간결한 한두 문장 또는 단순 나열)로 답변하십시오.\n"
-                "- '1. 사업 개요', '2. 상세 요건', '3. 지원 혜택', '4. 신청 안내' 같은 번호 섹션을 절대 사용하지 마십시오.\n"
-                "- '{연도}년 기준 ... 사업 안내입니다' 형태의 도입부를 절대 쓰지 마십시오.\n"
-                "- 사용자 질문에 '사업', '지원', '안내' 단어가 있더라도 형식 B로 전환하지 마십시오. 이 요청은 일반 설명 요청입니다.\n"
-                "- 답변 마지막에 'retrieved_documents의 문의처'(전화번호·기관명)를 그대로 인용해 한 줄로 안내하십시오. "
-                "예: '자세한 사항은 {문서에 적힌 기관명}({문서에 적힌 전화번호})으로 문의해 주세요.'\n"
-                "- 문서에 문의처가 여러 개면 가장 직접 담당으로 보이는 1개만 인용합니다.\n"
-                "- 문서에 문의처가 전혀 없으면 마지막 안내 줄을 생략합니다. 문의처를 임의로 생성·추측하지 마십시오.\n"
-                "- '자세히 알려줘라고 말씀해 주세요' 같은 안내는 절대 덧붙이지 마십시오.\n"
             )
 
         if facility_content:
@@ -318,12 +332,9 @@ async def generate_final_response_v2(
         logger.debug("[Final Response v2] system_prompt:\n%s", system_prompt)
         logger.debug("[Final Response v2] messages:\n%s", final_messages)
 
-        # intent별 전용 프롬프트가 있을 때는 general system_prompt 제외
-        # (general system_prompt의 "비교 금지" 등 규칙이 comparison 등과 충돌)
-        if intent == "general":
-            combined_prompts = [load_system_prompt(), system_prompt]
-        else:
-            combined_prompts = [system_prompt]
+        # general도 추천 프롬프트를 쓰므로 모든 intent에서 분류 프롬프트만 사용한다.
+        # (system_prompt의 일부 규칙이 추천 카드 형식과 충돌하던 회귀 차단)
+        combined_prompts = [system_prompt]
 
         # 풀 페이로드 직렬화는 디버그 시에만 수행 (TTFT 절감)
         # INFO에는 핵심 카운트만 남겨 운영 가시성을 유지한다.
@@ -381,6 +392,46 @@ async def generate_final_response_v2(
             seed=seed,
             tools=tools,
         )
+
+        # 응답 트레이스 (Config.RESPONSE_TRACE_ENABLED 시): 사용자 질문 / 참조문서 /
+        # 최종 system+user 프롬프트 / 응답 본문을 JSONL+xlsx 로 dump.
+        # 비스트리밍은 즉시 dump, 스트리밍은 generator wrap 으로 chunk 누적 후 dump.
+        _trace_extras = {
+            "policy_priority_tag": policy_priority_tag,
+            "detail_requested": bool(detail_requested),
+            "more_info_mode": bool(more_info_mode),
+            "lifecycle": lifecycle or "",
+            "user_region": user_region or "",
+            "user_birth_year": user_birth_year or "",
+            "use_llm_recommended_prompt": bool(use_llm_recommended_prompt),
+            "welfare_docs_count": len(welfare_docs or []),
+        }
+        # [단계 진단] 전처리·검색식 단계 산출을 extras 에 병합 (회차별 일관성 비교용)
+        try:
+            from app.chat.infra.rag.stage_trace import snapshot as _stage_snapshot
+            _trace_extras.update(_stage_snapshot())
+        except Exception:  # noqa: BLE001
+            pass
+        if stream:
+            response = wrap_stream_with_trace(
+                response,
+                user_question=message,
+                top_docs=top_docs,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                intent=intent,
+                extras=_trace_extras,
+            )
+        else:
+            record_response_trace(
+                user_question=message,
+                top_docs=top_docs,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                intent=intent,
+                response_text=str(response or ""),
+                extras=_trace_extras,
+            )
 
         logger.info("[Final Response v2] 응답 생성 완료")
         return response

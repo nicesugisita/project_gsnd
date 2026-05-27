@@ -1,0 +1,17 @@
+suite: unified_preprocess · slm 회귀 (260519)
+runner: unified_preprocess
+
+cases:
+  - name: regression_slm_no75_family_situation_guide_recommend
+    tags: [regression, slm_regression, intent, gsnd_260519]
+    notes: |
+      qa_test/260519_gsnd_total_result.xlsx no=75.
+      "창원시 30대 맞벌이 부부, 아이 1명" + "받을 수 있는 복지 최대한 알려줘"는
+      가구 상황 기반 탐색/추천 → intent=guide_recommend.
+      SLM(8B)이 의도를 놓쳐 빈 응답이 나간 회귀 (이전 32B 분류기에서는 정상 안내).
+    inputs:
+      user_query: "창원시에 사는 30대 맞벌이 부부이고 아이 1명 있는데 받을 수 있는 복지 최대한 알려줘"
+      messages: []
+    asserts:
+      - { op: equals, field: intent, value: guide_recommend }
+      - { op: contains, field: reformed_query, value: "창원" }

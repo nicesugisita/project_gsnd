@@ -18,6 +18,7 @@ from typing import Dict, Any, List, Optional, Sequence
 from app.core.config import Config
 from app.core.constants import ROLE_USER, ROLE_ASSISTANT
 from app.chat.infra.llm import call_llm_api
+from app.chat.infra.llm.classifier_fallback import call_classifier_with_fallback
 from .more_results import get_base_user_query_from_history
 from app.chat.infra.deepserver.client import (
     deepserver_expand_query,
@@ -31,6 +32,29 @@ from app.shared.utils.helpers import shorten_text
 
 logger = logging.getLogger(__name__)
 
+
+# 키워드 → 부스팅 검색어 매핑. final_query에 키워드가 포함되어 있으면
+# 매핑된 사업/제도명을 검색 질의에 추가하여 RAG 검색 시 노출 가능성을 높인다.
+KEYWORD_BOOST_MAP: Dict[str, List[str]] = {
+    "실직": ["긴급지원제도"],
+}
+
+
+def _apply_keyword_boost(query: str) -> str:
+    """final_query에 등록된 키워드가 있으면 매핑된 부스팅 검색어를 덧붙여 반환."""
+    if not query:
+        return query
+    boosts: List[str] = []
+    for keyword, terms in KEYWORD_BOOST_MAP.items():
+        if keyword in query:
+            for term in terms:
+                if term and term not in query and term not in boosts:
+                    boosts.append(term)
+    if not boosts:
+        return query
+    boosted = f"{query} {' '.join(boosts)}"
+    logger.info("[Query Recreation] 키워드 부스팅 적용: +%s", boosts)
+    return boosted
 
 
 async def query_recreation(
@@ -70,23 +94,26 @@ async def query_recreation(
         ]
         logger.info(f"[query_recreation] initial_query: {initial_query}")
         logger.info(f"[query_recreation] messages: {messages}")
-        response = await call_llm_api(
+        parsed, response, used_32b = await call_classifier_with_fallback(
+            classifier_name="QueryRecreation",
+            validate=lambda d: isinstance(d, dict) and isinstance(d.get("final_query"), str) and bool(d.get("final_query").strip()),
             temperature=0,
             messages=llm_messages,
             extra_system_prompts=[recreation_prompt],
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL
         )
+        if used_32b:
+            logger.info("[Query Recreation] 32B 폴백 응답 사용")
 
         final_query = ""
-        try:
-            parsed = json.loads(response)
-            rq = parsed.get("final_query") if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            rq = parsed.get("final_query")
             if isinstance(rq, str):
                 final_query = rq.strip()
-        except Exception:
+        if not final_query and isinstance(response, str):
             final_query = response.strip()
-        
+
+        final_query = _apply_keyword_boost(final_query)
         logger.info("[Query Recreation] 완성 질의: %s", shorten_text(final_query, 200))
         return final_query
         
@@ -195,24 +222,27 @@ async def classify_next_intent(
             .replace("{is_clarification_question}", is_clarify_str)
         )
 
-        response = await call_llm_api(
+        parsed, response, used_32b = await call_classifier_with_fallback(
+            classifier_name="NextIntent",
             message=formatted_prompt,
             temperature=0,
             response_format={"type": "json_object"},
-            api_url=Config.LLM_API_URL,
             extra_system_prompts=[],
         )
-
-        text = str(response or "").strip()
-        if text.startswith("```"):
-            text = (
-                text.removeprefix("```json")
-                    .removeprefix("```")
-                    .removesuffix("```")
-                    .strip()
-            )
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        parsed = json.loads(match.group(0) if match else text)
+        if parsed is None:
+            # 마지막 방어선: raw 응답에서 { ... } 패턴 추출 후 재파싱
+            text = str(response or "").strip()
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except Exception:
+                    parsed = None
+        if not isinstance(parsed, dict):
+            logger.warning("[NextIntent] SLM/32B 모두 파싱 실패 → OTHER 폴백 (used_32b=%s)", used_32b)
+            return fallback
+        if used_32b:
+            logger.info("[NextIntent] 32B 폴백 응답 사용")
 
         raw_intent = str(parsed.get("intent", "OTHER")).upper()
         if raw_intent in _VALID_NEXT_INTENTS:

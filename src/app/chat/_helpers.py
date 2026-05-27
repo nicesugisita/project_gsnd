@@ -211,6 +211,7 @@ async def _handle_rag_mode(
     policy_priority_tag: str | None = None,
     excluded_chunk_ids: list | None = None,
     excluded_service_names: list | None = None,
+    llm_excluded_services: list | None = None,
     final_user_message: str | None = None,
     more_info: bool = False,
     more_detail: bool = False,
@@ -283,7 +284,8 @@ async def _handle_rag_mode(
                 repetition_penalty=getattr(chat_request, 'repetition_penalty', 1.0),
                 top_p=chat_request.top_p,
                 top_k=getattr(chat_request, 'top_k', 1),
-                seed=chat_request.seed,
+                # 클라이언트가 seed를 명시 null로 보내도 재현성 보장 (생략 시엔 스키마 기본 42)
+                seed=chat_request.seed if chat_request.seed is not None else Config.FIXED_LLM_SEED,
                 tools=chat_request.tools,
                 status_callback=emit_status,
                 intent=intent,
@@ -295,6 +297,7 @@ async def _handle_rag_mode(
                 precomputed_policy_priority_tag=policy_priority_tag,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
+                llm_excluded_services=llm_excluded_services,
                 final_user_message=final_user_message,
             )
             if intent == "general":
@@ -434,6 +437,7 @@ async def _handle_rag_mode(
             precomputed_policy_priority_tag=policy_priority_tag,
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
+            llm_excluded_services=llm_excluded_services,
             final_user_message=final_user_message,
             **{k: v for k, v in llm_kwargs.items() if k != "messages"},
         )

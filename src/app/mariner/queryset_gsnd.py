@@ -43,7 +43,11 @@ def _uses_okms_document_schema(collection: Optional[str]) -> bool:
 
 
 def _uses_gsnd_v7_schema(collection: Optional[str]) -> bool:
-    return (collection or "").strip().upper() == Config.RAG_COLLECTION.upper()
+    # GSND_DATASET_V8 (official)과 GSND_DATASET_V8_CITIZEN (citizen)은 동일 스키마
+    name = (collection or "").strip().upper()
+    return name == Config.RAG_COLLECTION.upper() or (
+        bool(Config.RAG_CITIZEN_COLLECTION) and name == Config.RAG_CITIZEN_COLLECTION.upper()
+    )
 
 
 def _uses_welfare_center_schema(collection: Optional[str]) -> bool:
@@ -264,6 +268,11 @@ def query_GSND_general_documents(
                     jpkg_query.WhereSet(id_field, OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("GSND", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         # COMPLI_DT FilterSet (감지된 연도의 최소~최대 범위, 없으면 올해)

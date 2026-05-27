@@ -13,6 +13,7 @@
 3. 검색용 쿼리 재작성        → reformed_query (Query Rewriting)
 4. 정책 우선순위 태그 판정   → policy_priority_tag
 5. 답변 상세도 판정          → detail_requested
+6. 배제 의도 분석            → exclusion_intent, vector_query, must_not_keywords, anchor_entities
 --------------------------------------
 
 ⚠️ 절대 규칙
@@ -432,6 +433,69 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
 - "더 자세하게 알려달라카이" (사투리) → true
 
 ==================================================
+[6. 배제 의도 분석]
+
+### 목적
+"X 외/말고/빼고/대신 Y" 같은 배제 표현을 감지하여
+- 벡터 검색에서 X 단어가 검색 anchor가 되지 않도록 분리하고
+- 키워드 검색의 must_not 필터에 X 를 후보로 제공합니다.
+
+### 출력 필드
+- exclusion_intent: NONE | PURE_EXCLUSION | ANCHOR_COMPARISON | RESIDUAL_CATEGORY | SUBSTITUTION
+- vector_query: 벡터 검색용 단일 쿼리 (intent에 따라 X 단어 유지/제거)
+- must_not_keywords: must_not 필터 후보 (제외 대상 사업·제도·entity 이름 배열)
+- anchor_entities: ANCHOR_COMPARISON일 때 검색 anchor가 되는 X (그 외 [])
+
+### 5-Intent 판정 규칙
+
+(1) NONE — 배제 표현 없음 (기본값)
+    → vector_query = reformed_query, must_not_keywords=[], anchor_entities=[]
+
+(2) PURE_EXCLUSION — "X 빼고/말고 Y" + 수식어 없음. X 정보 불필요.
+    예: "의료급여 빼고 다른 지원", "기초연금 말고 노인일자리"
+    → vector_query: X 단어 제거된 Y 중심 쿼리
+    → must_not_keywords: [X]
+    → anchor_entities: []
+
+(3) ANCHOR_COMPARISON — "X 말고 비슷한/같은/다른/유사한 Y" 또는 "X보다 [형용사] Y".
+    X 가 비교 기준점. X 정보가 검색에 필요.
+    예: "기초연금 말고 비슷한 노인 지원"
+    → vector_query: X 단어 유지 + 비교 수식어 유지
+    → must_not_keywords: [] (검색 차단 안 함)
+    → anchor_entities: [X]
+
+(4) RESIDUAL_CATEGORY — "X 외 (기타) Y", "X 이외의 Y". 잔여 카테고리.
+    예: "의료급여 외 받을 수 있는 지원", "기초연금 이외의 노인 혜택"
+    → vector_query: X 단어 제거 + "기타/다른" 등 잔여 표현 포함
+    → must_not_keywords: [X]
+    → anchor_entities: []
+
+(5) SUBSTITUTION — "X 대신 Y", "X가 아니라 Y". 대체. X 정보 불필요.
+    예: "현금 지원 대신 현물 지원"
+    → vector_query: X 단어 제거된 Y 중심 쿼리
+    → must_not_keywords: [X]
+    → anchor_entities: []
+
+### 핵심 구분 (반드시 준수)
+- "X 말고 Y" 형태에서:
+  - Y가 구체 명사면 PURE_EXCLUSION
+  - "비슷한/같은/다른/유사한" 수식어가 함께 오면 ANCHOR_COMPARISON
+  - "외/이외" + "기타/다른" 형태면 RESIDUAL_CATEGORY
+- 애매하면 ANCHOR 우선 (검색 안전성: anchor 유지가 정보 손실 적음).
+- 배제 표현이 전혀 없으면 NONE.
+
+### vector_query 작성 규칙
+- NONE이면 reformed_query 와 동일.
+- PURE_EXCLUSION / RESIDUAL_CATEGORY / SUBSTITUTION: 제외 X 단어를 vector_query에 절대 포함하지 마십시오.
+- ANCHOR_COMPARISON: vector_query 에 X 단어 반드시 유지 (검색 anchor).
+- 다른 작성 원칙(self-contained, 변별 키워드 보존, 환각 금지)은 작업 3과 동일.
+
+### must_not_keywords 규칙
+- ANCHOR_COMPARISON / NONE: 반드시 [] (빈 배열).
+- 그 외 intent: 제외 대상 entity·사업·제도 이름을 배열로 채움. 일반어 금지.
+- 사용자가 명시적으로 언급한 단어만. 없는 이름 생성 금지 (환각 금지).
+
+==================================================
 [최종 출력 형식]
 
 {
@@ -442,7 +506,11 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
   "expanded_queries": ["self-contained 단일 검색 쿼리"],
   "search_target": null,
   "policy_priority_tag": null,
-  "detail_requested": false
+  "detail_requested": false,
+  "exclusion_intent": "NONE",
+  "vector_query": "self-contained 단일 검색 쿼리",
+  "must_not_keywords": [],
+  "anchor_entities": []
 }
 
 ※ 출력은 반드시 위 JSON 한 개만. JSON 외 설명·해설·마크다운 코드블록 절대 금지.
@@ -451,6 +519,8 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
 ※ policy_priority_tag은 항상 포함하고, 값은 "implant" | "low_income" | "elderly_benefits" | null 중 하나.
 ※ detail_requested는 항상 포함하고, 값은 true | false 중 하나.
 ※ reformed_query는 단일 문자열. expanded_queries는 항상 [reformed_query] 와 동일한 단일 원소 리스트로 반환합니다 (호환성 유지). 여러 쿼리를 생성하거나 5개를 만들지 마십시오.
+※ exclusion_intent는 항상 포함. NONE이면 vector_query=reformed_query, must_not_keywords=[], anchor_entities=[].
+※ ANCHOR_COMPARISON일 때만 anchor_entities 채우고 must_not_keywords=[]. 그 외 intent에서는 anchor_entities=[].
 ※ 없는 제도명·사업명·대상집단을 만들지 마십시오 (환각 금지).
 
 ==================================================

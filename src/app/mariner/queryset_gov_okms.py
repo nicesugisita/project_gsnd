@@ -16,8 +16,11 @@ from app.core.constants import (
     OP_OR,
     OP_BRACE_CLOSE,
     OP_AND,
+    OP_WEIGHTAND,
     OP_NOT,
+    OP_HASANY,
     OP_INT_SUMMATION,
+    MARINER_WEIGHT_MED,
 )
 from app.core.exceptions import RAGServiceError
 from app.mariner.jvm_manager import ensure_jvm_thread
@@ -60,8 +63,10 @@ def query_gov_okms_documents(
     lifecycle_filter: Optional[str] = None,
     sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
+    excluded_business_keywords: Optional[List[str]] = None,
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
+    max_results: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     GOV_OKMS_V1 단일 검색 (QuerySet(1))
@@ -134,6 +139,7 @@ def query_gov_okms_documents(
             "WEIGHT",               # 10
             "SERVICE_DESCRIPTION",  # 11
             "APPLICATION_PERIOD",   # 12
+            "HOUSE_SITUATION",      # 13 (가구상황 — 부스트/후처리용, 결과에도 노출)
         ]
         select_set_array = [jpkg_query.SelectSet(JString(f), num, 0) for f in select_field_names]
         field_indexes = {f: i for i, f in enumerate(select_field_names)}
@@ -141,8 +147,8 @@ def query_gov_okms_documents(
         query = jpkg_query.Query("", "")
         ks = JString(search_string)
 
-        _TOP_N       = 5   # 반환 문서 수
-        _THRESHOLD   = 0.2  # 샘플 코드 기준값 (Config.MARINER_THRESHOLD=0.5보다 낮게 유지)
+        _TOP_N       = max_results if max_results is not None else 5   # 반환 문서 수
+        _THRESHOLD   = 0.0
         _RESULT_SIZE = 50   # 벡터 검색 풀 크기 (샘플 코드 기준값)
 
         query.setResult(0, _TOP_N - 1)
@@ -201,11 +207,13 @@ def query_gov_okms_documents(
                 jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
             ]
 
-        # HOUSE_SITUATION(가구상황) 스크립틀릿 필터 — LIFE_CYCLE 동일 패턴 (op=34)
+        # HOUSE_SITUATION(가구상황) 소프트 부스트 — 하드필터(OP_AND must-match)가 아니라
+        # OP_WEIGHTAND 로 좌측 결과를 보존하고 일반가구 등 매칭 문서에만 가중치를 준다.
+        # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
         if hshd_sttn_filter:
             where_set_array += [
-                jpkg_query.WhereSet(OP_AND),
-                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, 0),
+                jpkg_query.WhereSet(OP_WEIGHTAND),
+                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
             ]
 
         # CHUNK_ID(SERVICE_ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -230,6 +238,32 @@ def query_gov_okms_documents(
                     jpkg_query.WhereSet("SERVICE_ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
+        # 사용자 명시 배제 사업명(예: "의료급여 외") 추출값을 SERVICE_NAME_KO 토큰
+        # 정확 부정 조건으로 추가. extract_excluded_services 가 추출한 키워드가
+        # 사업명에 포함된 문서를 검색 단계에서 사전 제외.
+        # (OKMS는 BUSINESS_NAME_KO, GOV_OKMS는 SERVICE_NAME_KO가 사업명 토큰 색인 필드)
+        if excluded_business_keywords:
+            _biz_excluded = [
+                str(k).strip()
+                for k in excluded_business_keywords
+                if str(k or "").strip()
+            ]
+            if _biz_excluded:
+                logger.info(
+                    "[Mariner/GOV_OKMS] SERVICE_NAME_KO 배제 키워드 적용: %s",
+                    _biz_excluded,
+                )
+                for kw in _biz_excluded:
+                    where_set_array += [
+                        jpkg_query.WhereSet(OP_NOT),
+                        jpkg_query.WhereSet("SERVICE_NAME_KO", OP_HASANY, kw, 0),
+                    ]
+
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("GOV_OKMS", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         queryset = jpkg_query.QuerySet(1)

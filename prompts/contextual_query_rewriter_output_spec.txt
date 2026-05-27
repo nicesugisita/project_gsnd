@@ -1,0 +1,57 @@
+EXCLUSION INTENT CLASSIFICATION (가장 중요):
+
+같은 "X 말고/빼고/외 Y" 표현이라도 X 정보가 검색에 필요한지에 따라 다르게 처리한다.
+5가지 의도 중 1개로 분류:
+
+※ 아래 예시에서 X, Y, A, B는 임의의 명사/엔티티 변수. 도메인 무관(회사/제품/지표/지역/장르 등).
+  실제 사용자 입력은 다양한 도메인의 구체 명사로 들어온다.
+
+(1) NONE — exclusion 패턴 없음. 단순/자명 쿼리 또는 멀티턴 ellipsis 해소만.
+    예) "[주제 T] 사용법", 멀티턴 "T-1년은?" (history 있을 때 ellipsis 해소)
+
+(2) PURE_EXCLUSION — entity 정보 불필요. 단순 제외 후 다른 Y만 원함.
+    예) "A 빼고 B의 [지표]", "장르 X 말고 장르 Y 추천"
+    특징: "X 빼고/말고 + 구체적 다른 Y" (수식어·비교어 없음).
+    → vectorQuery: entity 단어 없음. mustNotKeywords: [X]. anchorEntities: [].
+
+(3) ANCHOR_COMPARISON — entity가 검색 기준점. 비교 수식어 동반.
+    예) "X 말고 비슷한 [속성] 다른 Y" (X의 속성값 알아야 비교)
+        "X 빼고 다른 [같은 카테고리] Y" (X 카테고리 비교)
+        "X보다 [형용사] Y" (X 기준값 알아야 비교)
+    특징: "X 말고/빼고/보다 + [비슷한/같은/다른/유사한/보다 형용사] Y".
+    "다른"은 anchor 신호일 가능성 큼 (X 카테고리 내에서 다른 항목 찾기).
+    → vectorQuery: entity 단어 유지 (검색 anchor). mustNotKeywords: [] (검색 차단 안 함).
+      anchorEntities: [X]. llmQuery: "X 제외 비슷한/다른 Y"로 의도 명시.
+
+(4) RESIDUAL_CATEGORY — 잔여 카테고리. "X 외 기타 Y".
+    예) "X 외 기타 [카테고리] Y", "X 이외의 [카테고리] Y"
+    특징: "X 외/이외 + (선택) 기타/다른 Y".
+    → vectorQuery: entity 단어 없음, "기타/다른" 등 잔여 표현 포함.
+      mustNotKeywords: [X]. anchorEntities: [].
+
+(5) SUBSTITUTION — 대체. X 불필요.
+    예) "X 대신 Y의 [지표]", "X가 아니라 Y"
+    특징: "X 대신/아니라 Y".
+    → vectorQuery: entity 단어 없음. mustNotKeywords: [X]. anchorEntities: [].
+
+CRITICAL OUTPUT FORMAT — STRICT JSON ONLY:
+```json
+{
+  "exclusionIntent": "NONE|PURE_EXCLUSION|ANCHOR_COMPARISON|RESIDUAL_CATEGORY|SUBSTITUTION",
+  "vectorQuery": "벡터 검색용 쿼리 (intent에 따라 entity 유지/제거)",
+  "llmQuery": "LLM 답변용 쿼리 (의도 명시적 자연어)",
+  "mustKeywords": ["positive 검색 키워드 배열 2~5개"],
+  "mustNotKeywords": ["must_not 절 키워드. ANCHOR_COMPARISON/NONE은 []"],
+  "anchorEntities": ["검색 anchor entity. ANCHOR_COMPARISON에서만 채움. 그 외 []"],
+  "hasExclusion": true|false
+}
+```
+
+RULES (반드시 준수):
+- PURE_EXCLUSION / RESIDUAL_CATEGORY / SUBSTITUTION: vectorQuery에 제외 entity 단어 절대 X.
+- ANCHOR_COMPARISON: vectorQuery에 anchor entity 단어 O. mustNotKeywords []. anchorEntities에 entity O.
+- llmQuery는 모든 intent에서 자연어 의도 명시 ("X 제외", "X 말고" 그대로).
+- hasExclusion: NONE이면 false, 나머지는 true.
+- 자명 쿼리(NONE): vectorQuery=llmQuery=원본, 모든 배열 [].
+
+Output ONLY the JSON.

@@ -72,9 +72,11 @@ async def process_rag_with_documents_v2(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — comparison 전용
@@ -84,6 +86,7 @@ async def process_rag_with_documents_v2(
     """
 
     _ = precomputed_search_target
+    _ = service_target  # comparison은 GSND 미사용 — 시그니처 호환 위해 받기만 함
     precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
@@ -190,6 +193,7 @@ async def process_rag_with_documents_v2(
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -205,6 +209,7 @@ async def process_rag_with_documents_v2(
                     sigun_filters=comp_sigun_filters,
                     lifecycle_filter=None,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     apply_business_anchor=False,
                 )
             except Exception as e:
@@ -220,6 +225,7 @@ async def process_rag_with_documents_v2(
                     lifecycle_filter=comp_lifecycle or None,
                     sigun_filters=comp_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
+                    excluded_business_keywords=llm_excluded_services,
                     hshd_sttn_filter=comp_hshd_sttn or None,
                     hshd_sttn_synonyms=comp_hshd_synonyms or None,
                 )
@@ -279,7 +285,7 @@ async def process_rag_with_documents_v2(
         # 8→10: 시군 N개 비교 시 한쪽 시군 사업이 cap 밖으로 밀려나는 케이스 완화
         # (예: "김해 아동수당 vs 진주 아동수당" 에서 진주 아동수당이 9위라 탈락)
         # ====================================================================
-        _COMP_FINAL_TOP_N = 10
+        _COMP_FINAL_TOP_N = 12
         _FALLBACK_THRESHOLD = 1
         okms_final = comp_group_a_top[:_COMP_FINAL_TOP_N]
         logger.info(f"[RAG/comparison_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(comp_group_a_top)}개)")
@@ -333,9 +339,12 @@ async def process_rag_with_documents_v2(
             log_prefix="[RAG/comparison_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
-        logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        logger.info(f"[RAG/comparison_v2] 관련성 필터 후: {len(top_docs)}개")
+        if Config.RELEVANCE_FILTER_ENABLED:
+            top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
+            logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
+            logger.info(f"[RAG/comparison_v2] 관련성 필터 후: {len(top_docs)}개")
+        else:
+            logger.info("[RAG/comparison_v2] Step7 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
 
         if excluded_chunk_ids or excluded_service_names:
             from .common import filter_excluded_docs

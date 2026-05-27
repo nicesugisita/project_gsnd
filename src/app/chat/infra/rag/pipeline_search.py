@@ -10,6 +10,8 @@ import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core.config import Config
+
 # Mariner 쿼리셋
 from app.mariner.queryset_welfare import query_welfare_center_documents
 from app.mariner.queryset_welfare_tel import query_welfare_tel_documents
@@ -19,6 +21,7 @@ from app.chat.infra.rag import (
     _get_document_name,
     _build_search_queries,
 )
+from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .common import (
     dedupe_cap_expanded_queries,
     apply_policy_priority_to_documents,
@@ -78,9 +81,11 @@ async def process_rag_search(
     precomputed_keywords: list = None,
     excluded_chunk_ids: List[str] = None,
     excluded_service_names: List[str] = None,
+    llm_excluded_services: List[str] = None,
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — search 전용
@@ -89,6 +94,7 @@ async def process_rag_search(
     welfare_facility → WELFARE_CENTER 만 Mariner 검색. ambiguous·미전달은 OUR_REGION_TEL.
     """
 
+    _ = service_target  # search는 GSND 미사용 — 시그니처 호환 위해 받기만 함
     precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
 
     try:
@@ -228,12 +234,31 @@ async def process_rag_search(
             )
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
-        top_docs = sorted(
-            _deduplicate_documents(all_docs),
-            key=lambda x: float(x.get("WEIGHT", 0) or 0),
-            reverse=True,
-        )
-        logger.info(f"[RAG/search_v2] 최종 선택: {len(top_docs)}개 (총 {len(all_docs)}개 수집)")
+        if Config.RRF_FUSION_ENABLED and _both_pool:
+            # 풀별로 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+            # RRF는 입력 리스트가 이미 정렬돼 있다고 가정하므로 풀별 사전 정렬이 필요하다.
+            center_sorted = sorted(
+                _deduplicate_documents(center_docs),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            tel_sorted = sorted(
+                _deduplicate_documents(tel_docs),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            top_docs = rerank_by_rrf(center_sorted, tel_sorted)
+            logger.info(
+                "[RAG/search_v2] 최종 선택(RRF 융합): %d개 (center=%d, tel=%d)",
+                len(top_docs), len(center_sorted), len(tel_sorted),
+            )
+        else:
+            top_docs = sorted(
+                _deduplicate_documents(all_docs),
+                key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                reverse=True,
+            )
+            logger.info(f"[RAG/search_v2] 최종 선택: {len(top_docs)}개 (총 {len(all_docs)}개 수집)")
         for i, doc in enumerate(top_docs, 1):
             source = doc.get("_source", "center")
             logger.debug(
@@ -258,7 +283,7 @@ async def process_rag_search(
                 len(top_docs),
             )
             logger.info("[TIMING][search] Step6 관련성 필터: 생략 (0s)")
-        else:
+        elif Config.RELEVANCE_FILTER_ENABLED:
             top_docs = await filter_irrelevant_docs(
                 reformed_query,
                 top_docs,
@@ -267,6 +292,9 @@ async def process_rag_search(
             )
             logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t_ref)
             logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
+        else:
+            # search: 필터 OFF 시 cap 없이 dedupe·정렬된 결과 전부 반환 (시설/연락처 조회 특성상 누락 방지)
+            logger.info("[RAG/search_v2] Step6 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — %d건 전체 반환", len(top_docs))
         logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 끝]-----------")
 
         if excluded_chunk_ids or excluded_service_names:

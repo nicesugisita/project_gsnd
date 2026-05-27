@@ -156,6 +156,11 @@ def query_mariner_documents(
             jpkg_query.WhereSet(OP_OR),
             jpkg_query.WhereSet("TEXT_CHUNK_MI", OP_VECTOR_SEARCH, keyword_string, mi_weight)
         ]
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("UPLOAD", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         queryset = jpkg_query.QuerySet(1)

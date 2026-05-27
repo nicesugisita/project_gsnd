@@ -7,6 +7,8 @@ Uses Pydantic for validation and serialization.
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, validator
 
+from app.core.config import Config
+
 
 # ============================================================================
 # Request Models
@@ -85,8 +87,8 @@ class ChatRequest(BaseModel):
         description="Maximum tokens for completion"
     )
     seed: Optional[int] = Field(
-        default=None,
-        description="Random seed for reproducibility"
+        default=Config.FIXED_LLM_SEED,
+        description="Random seed for reproducibility (기본값 고정 → 동일 질문 동일 답변)"
     )
     stream: Optional[bool] = Field(
         default=False,
@@ -100,6 +102,10 @@ class ChatRequest(BaseModel):
         default="text",
         description="Input type: 'text' or 'voice'"
     )
+    service_target: Optional[str] = Field(
+        default="official",
+        description="검색 대상 컬렉션 분기: 'official' (GSND_DATASET_V8) | 'citizen' (GSND_DATASET_V8_CITIZEN)",
+    )
     mode: Optional[str] = Field(
         default=None,
         description="Optional chat mode (e.g. 'guide_recommend'). /v1/chat/recommended-question 은 mode·의도와 무관하게 전용 경로만 탄다.",
@@ -111,6 +117,16 @@ class ChatRequest(BaseModel):
         if not v:
             raise ValueError('Messages list cannot be empty')
         return v
+
+    @validator('service_target')
+    def validate_service_target(cls, v):
+        """service_target은 'official' 또는 'citizen'만 허용. None/빈 문자열은 'official'로 정규화."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "official"
+        normalized = v.strip().lower()
+        if normalized not in ("official", "citizen"):
+            raise ValueError("service_target must be 'official' or 'citizen'")
+        return normalized
 
     def validate(self) -> tuple[bool, Optional[str]]:
         """
