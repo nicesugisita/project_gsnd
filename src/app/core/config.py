@@ -201,6 +201,14 @@ class Settings(BaseSettings):
     # ── 파일 업로드 ───────────────────────────────────────────────────────────
     UPLOAD_DIR: str = ""
 
+    # ── HWPX 파서 ─────────────────────────────────────────────────────────────
+    HWPX_TARGET_TABLE: str = "tbl_wlf_srvc"
+    HWPX_SOURCE_UUID_TABLE: str = "tbl_wlf_srvc"
+    HWPX_WELFARE_YEAR: str = "2026"
+    HWPX_REGION: str = ""           # 비어 있으면 유관기관(None)으로 처리
+    HWPX_FILE_DIR: str = ""         # DB FILE_DIR 컬럼에 들어갈 서버 배치 경로
+    HWPX_DELETE_EXISTING: bool = True
+
     # ── 원격 텍스트 전송 ──────────────────────────────────────────────────────
     UPLOADED_TEXT_REMOTE_ENABLED: bool = True
     UPLOADED_TEXT_REMOTE_HOST: str = ""
@@ -237,6 +245,13 @@ class Settings(BaseSettings):
     POLICY_PRIORITY_CHANGE_CHECK_SEC: int = 1800
     # 정책 정적 규칙 YAML(우선순위 tag 별 anchor_keywords 등). 프로젝트 루트 기준 상대경로 허용.
     POLICY_RULES_PATH: str = "config/policy_rules.yaml"
+
+    # ── 인증 ──────────────────────────────────────────────────────────────────
+    AUTH_CRYPT_KEY: str = ""          # SHA-512 SALT — .env 필수
+    JWT_SECRET_KEY: str = ""          # JWT 서명 키 — .env 필수
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    AUTH_DB_NAME: str = ""            # TB_USER가 있는 DB명 (비우면 DB_NAME 사용)
 
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10
