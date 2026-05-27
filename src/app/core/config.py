@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     # guide_recommend LLM 선별 모드: 룰베이스 개수 결정(가변개수/reserve/재귀)을 끄고
     # RRF 상위 N건을 그대로 최종응답 LLM에 넘겨, 관련 문서 선별을 LLM(선별 프롬프트)에 위임한다.
     # 생애주기/가구 하드필터(D-1.7)는 유지해 명백한 생애주기 누수만 결정적으로 차단한다.
-    GUIDE_LLM_RELEVANCE_SELECT_ENABLED: bool = False
+    GUIDE_LLM_RELEVANCE_SELECT_ENABLED: bool = True
     GUIDE_LLM_SELECT_MAX_DOCS: int = 11   # LLM에 넘길 RRF 상위 문서 수(안전 cap)
 
     # ── DeepServer ────────────────────────────────────────────────────────────
