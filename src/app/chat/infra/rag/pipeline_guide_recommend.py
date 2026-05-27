@@ -113,6 +113,10 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        # LLM 선별 모드: 룰베이스 개수 결정(reserve/재귀/가변개수)을 끄고 RRF 상위 N건을
+        # 그대로 최종응답 LLM에 넘긴다(관련 문서 선별은 선별 프롬프트가 담당).
+        # more_info 후속(excluded 존재)은 '더 보기' 의미라 이 모드에서 제외(기존 흐름 유지).
+        _llm_select = bool(Config.GUIDE_LLM_RELEVANCE_SELECT_ENABLED) and not _skip_policy_boost
         policy_tags, _ = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
         # guide_recommend에서 low_income 태그는 query-time 부스트를 끄고,
         # elderly/implant 등은 기존 우선 정책을 유지한다.
@@ -454,7 +458,8 @@ async def process_rag_guide_recommend(
             _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
             _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
             _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
-            _cap = _GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N
+            # LLM 선별 모드: RRF 상위 GUIDE_LLM_SELECT_MAX_DOCS 건을 그대로 LLM에 전달.
+            _cap = Config.GUIDE_LLM_SELECT_MAX_DOCS if _llm_select else (_GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N)
             gr_top_docs = _fused[:_cap]
             _okms_reserve_pool = _fused[_cap:]
             _gov_in_top = sum(1 for d in gr_top_docs if d.get("CHUNK_ID") in _gov_cand_ids)
@@ -519,7 +524,7 @@ async def process_rag_guide_recommend(
         # - Mariner 호출 0, SLM 필터 0 (reserve 는 초기 검색에서 WEIGHT 검증됨)
         # - D-1이 전부 필터링한 경우(컬렉션 전체 비관련)면 생략
         # ====================================================================
-        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
+        if not _variable_count_active and not _llm_select and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
             _need = _GR_TARGET_TOTAL - len(gr_top_docs)
             _held_chunk_ids = {d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")}
             _excl_set = (
@@ -558,7 +563,7 @@ async def process_rag_guide_recommend(
         # ====================================================================
         _GR_RECURSIVE_MAX_ITERS = 3
         _recur_added = False  # 재귀로 SLM 미검증 신규 문서가 추가됐는지 추적 (D-1.6 게이트)
-        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
+        if not _variable_count_active and not _llm_select and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
             logger.info(
                 f"[RAG/guide_recommend_v2] 관련성 필터 후 {len(gr_top_docs)}건 "
                 f"< {_GR_TARGET_TOTAL}건 → 재귀 보강 시작 (최대 {_GR_RECURSIVE_MAX_ITERS}회)"
@@ -783,13 +788,23 @@ async def process_rag_guide_recommend(
         _GR_GENERAL_MIN_KEEP = 5
         _gr_require_general = (gr_hshd_sttn == "일반가구")
         if gr_top_docs and (_gr_require_general or lifecycle):
-            _pool = _deduplicate_documents(list(gr_top_docs) + list(_survivors))
+            # LLM 선별 모드: 'RRF 상위 N건만' 보장 — _survivors 로 풀을 다시 키우지 않고
+            # 현재 gr_top_docs(=RRF 상위)만 생애주기/가구 하드필터에 태운다. target 도 cap 동일.
+            if _llm_select:
+                _pool = list(gr_top_docs)
+                _pp_target = Config.GUIDE_LLM_SELECT_MAX_DOCS
+            else:
+                _pool = _deduplicate_documents(list(gr_top_docs) + list(_survivors))
+                _pp_target = _GR_TARGET_TOTAL
             if excluded_chunk_ids or excluded_service_names:
                 _pool = filter_excluded_docs(_pool, excluded_chunk_ids or [], excluded_service_names)
             _before = len(gr_top_docs)
+            # LLM 선별 모드: 유지 대상은 '생애주기 가드'뿐. 가구상황 require_general 은 끈다
+            # (예: '저소득' 태그 임플란트 시술비 지원사업이 '일반가구' 강제로 LLM 전에 탈락하는 누수 방지).
+            _pp_require_general = _gr_require_general and not _llm_select
             gr_top_docs = prioritize_general_household(
-                _pool, target=_GR_TARGET_TOTAL, min_keep=_GR_GENERAL_MIN_KEEP,
-                require_general=_gr_require_general, lifecycle=lifecycle or None,
+                _pool, target=_pp_target, min_keep=_GR_GENERAL_MIN_KEEP,
+                require_general=_pp_require_general, lifecycle=lifecycle or None,
             )
             logger.info(
                 f"[RAG/guide_recommend_v2] 적합 후처리: {_before} → {len(gr_top_docs)}건 "
@@ -799,7 +814,7 @@ async def process_rag_guide_recommend(
         # Step D-1.8: 가변 개수 정책 — 고정 top-N(항상 8~11 채움) 대신 주제어 존재 +
         # 점수 임계로 노출 개수를 가변화. 관련 풀이 작으면 적게, 크면 많이.
         # (more_info 후속은 사용자가 "더"를 명시한 추가요청이라 가변 컷에서 제외 — 풀 그대로.)
-        if _variable_count_active and gr_top_docs:
+        if _variable_count_active and not _llm_select and gr_top_docs:
             _vc_keywords = precomputed_keywords or extract_nouns(reformed_query)
             _topic_terms = extract_topic_terms(_vc_keywords, exclude=sigun_raws)
             _vc_before = len(gr_top_docs)

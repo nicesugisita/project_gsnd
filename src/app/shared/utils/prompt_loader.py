@@ -201,6 +201,15 @@ def load_classification_recommended_prompt() -> str:
     return _load_prompt_file('classification_recommended_prompt.txt')
 
 
+def load_classification_recommended_select_prompt() -> str:
+    """Load Classification Recommended *선별* prompt (LLM relevance-select 모드) from file.
+
+    classification_recommended_prompt.txt(전수 안내)와 달리, retrieved_documents 중
+    user_query와 관련된 사업만 선별 출력하도록 지시한다.
+    """
+    return _load_prompt_file('classification_recommended_select_prompt.txt')
+
+
 def load_classification_llm_recommended_prompt() -> str:
     """Load LLM-style recommended-question final answer prompt from file."""
     return _load_prompt_file('classification_llm_recommended_prompt.txt')

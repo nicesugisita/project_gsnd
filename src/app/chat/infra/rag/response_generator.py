@@ -31,6 +31,7 @@ from app.shared.utils.prompt_loader import (
     load_classification_general_prompt,
     load_classification_comparison_prompt,
     load_classification_recommended_prompt,
+    load_classification_recommended_select_prompt,
     load_classification_llm_recommended_prompt,
     load_classification_search_prompt,
 )
@@ -175,9 +176,13 @@ async def generate_final_response_v2(
                 detail_requested,
             )
         elif intent == "guide_recommend":
+            from app.core.config import Config
             if use_llm_recommended_prompt:
                 final_prompt = load_classification_llm_recommended_prompt()
                 logger.info("[Final Response v2] Guide_Recommend LLM recommended 프롬프트 사용 (intent=%s)", intent)
+            elif getattr(Config, "GUIDE_LLM_RELEVANCE_SELECT_ENABLED", False):
+                final_prompt = load_classification_recommended_select_prompt()
+                logger.info("[Final Response v2] Guide_Recommend *선별* 프롬프트 사용 (LLM relevance-select, intent=%s)", intent)
             else:
                 final_prompt = load_classification_recommended_prompt()
                 logger.info("[Final Response v2] Guide_Recommend 프롬프트 사용 (intent=%s)", intent)
