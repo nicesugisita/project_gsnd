@@ -7,7 +7,7 @@ from app.auth.schemas import LoginRequest, LoginResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=LoginResponse)
