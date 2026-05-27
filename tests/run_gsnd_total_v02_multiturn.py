@@ -32,6 +32,11 @@ RETRY_BACKOFF_SEC = 5.0
 
 MULTITURN_PATTERN = re.compile(r"^\[(\d+)-(\d+)\]\s*")
 
+# 동시접속 제한은 user_id로 카운트되므로(server: _check_user_limit), 실행 내내
+# 고정 user_id 하나만 쓴다. 그러면 활성 사용자 1명으로만 잡혀 50명 한도에 안 걸린다.
+# 대화 격리는 conv_id가 담당하므로 user_id 공유는 안전하다. (cleanup: LIKE 'qa_v02_%')
+QA_USER_ID = "qa_v02_runner"
+
 
 def load_rows() -> list[dict]:
     wb = openpyxl.load_workbook(SRC_XLSX, read_only=True, data_only=True)
@@ -148,7 +153,7 @@ def main(limit: int | None = None, start_no: int = 1) -> None:
             try:
                 if turn == 1 or base_no not in sessions:
                     sess = {
-                        "user_id": f"qa_v02_{uuid.uuid4().hex[:8]}",
+                        "user_id": QA_USER_ID,
                         "conv_id": str(uuid.uuid4()),
                         "messages": [],
                         "base_follow_up": row["follow_up"],
@@ -164,9 +169,9 @@ def main(limit: int | None = None, start_no: int = 1) -> None:
                 sess["messages"].append({"role": "assistant", "content": ans})
                 final_answer = ans
 
-                # base 행에서만 시/군 되묻기 자동 후속 호출 (follow_up 컬럼 값 사용).
-                if turn == 1 and sess["base_clarified"] and is_clar and is_sigun_clarify(ans) and sess["base_follow_up"]:
-                    fu = sess["base_follow_up"]
+                # base 행에서 시/군 되묻기면 자동 후속 호출 (follow_up 컬럼 값, 없으면 "창원").
+                if turn == 1 and is_clar and is_sigun_clarify(ans):
+                    fu = sess["base_follow_up"] or "창원"
                     sess["messages"].append({"role": "user", "content": fu})
                     resp2 = post_chat(client, sess["messages"], sess["user_id"], sess["conv_id"])
                     ans2, _ = extract_content(resp2)

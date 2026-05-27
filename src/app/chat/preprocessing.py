@@ -212,6 +212,13 @@ async def unified_preprocess(
         search_target   : str | None (intent=search일 때만 admin_local_office | welfare_facility | ambiguous)
         policy_priority_tag: str | None (implant | low_income | elderly_benefits)
     """
+    # [단계 진단] 요청 시작 — 이전 요청 잔여 단계 데이터 제거 (RESPONSE_TRACE_ENABLED 시만 동작)
+    try:
+        from app.chat.infra.rag.stage_trace import reset as _stage_reset
+        _stage_reset()
+    except Exception:  # noqa: BLE001
+        pass
+
     prompt_template = load_unified_preprocessing_prompt()
     if not prompt_template:
         logger.error("[UnifiedPreprocess] 프롬프트 로드 실패 — 폴백 반환")
@@ -372,6 +379,14 @@ async def unified_preprocess(
         query[:50], intent, search_target, policy_priority_tag, detail_requested,
         exclusion_intent, must_not_keywords, anchor_entities, use_rag,
     )
+
+    # [단계 진단] 전처리 산출(재구성/의도/리라이팅/키워드/정책태그/벡터쿼리) 기록
+    try:
+        from app.chat.infra.rag.stage_trace import record_preprocess as _stage_record_preprocess
+        _stage_record_preprocess(result)
+    except Exception:  # noqa: BLE001
+        pass
+
     return result
 
 

@@ -455,6 +455,11 @@ def _query_dual_documents(
                             jpkg_query.WhereSet("BUSINESS_NAME_KO", OP_HASANY, kw, 0),
                         ]
 
+            try:
+                from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+                _stage_rec_sq(f"OKMS#{i}", where_set_array)
+            except Exception:  # noqa: BLE001
+                pass
             query.setWhere(where_set_array)
 
             # YEAR FilterSet (사용자가 명시한 경우만 필터, 없으면 전체 연도)

@@ -47,6 +47,7 @@ from app.shared.utils.year_filter import extract_year_filters
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .policy_priority import resolve_policy_boost_keywords
+from .variable_count import extract_topic_terms, select_variable_count
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
@@ -424,6 +425,12 @@ async def process_rag_guide_recommend(
         )
         # 관련성 필터 입력 chunk_id 스냅샷 — 거절된 문서를 재귀 보강 시 재탐색에서 제외
         _pre_filter_chunk_ids = [d.get("CHUNK_ID") for d in _merged_candidates if d.get("CHUNK_ID")]
+        # [단계 진단] 리랭킹 전 후보풀 (관련성 필터·RRF 융합 직전)
+        try:
+            from app.chat.infra.rag.stage_trace import record_docs as _stage_rec_docs
+            _stage_rec_docs("rerank_before", _merged_candidates)
+        except Exception:  # noqa: BLE001
+            pass
         if Config.RELEVANCE_FILTER_ENABLED:
             # 확장 후보 풀(OKMS 15 + GOV 15)을 기본 10건 캡으로 잘라버리면 풀 확대 효과가 사라진다.
             # 상위 20건까지 판단해 적합 생존분을 늘린다(D-1.7 백필 재료도 함께 확대).
@@ -467,6 +474,13 @@ async def process_rag_guide_recommend(
                 f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
             )
 
+        # [단계 진단] 리랭킹 후 (관련성 필터 생존분 → RRF 융합/쿼터 cap 결과)
+        try:
+            from app.chat.infra.rag.stage_trace import record_docs as _stage_rec_docs
+            _stage_rec_docs("rerank_after", gr_top_docs)
+        except Exception:  # noqa: BLE001
+            pass
+
         # D-1 SLM 필터가 전부 제거하면 reserve·재귀 생략 — 컬렉션 자체에 해당 쿼리와
         # 관련된 문서가 없다는 신호이므로 추가 검색해도 의미 없다.
         _d1_filtered_all = not bool(gr_top_docs)
@@ -489,6 +503,15 @@ async def process_rag_guide_recommend(
 
         _GR_TARGET_TOTAL = _GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N  # 5 + 3 = 8
 
+        # 가변 개수(D-1.8)가 적용될 턴에는 "11까지 채움"용 reserve/재귀 보강이 무의미하고,
+        # 재귀 보강(D-1.5)의 타임아웃 조기중단은 부하 따라 후보 풀을 흔드는 비결정성 원천이다.
+        # 따라서 가변 개수 활성 + non-more_info 턴이면 보강을 건너뛰어 개수를 결정적으로 만든다.
+        # (more_info 후속은 가변 컷에서 제외되므로 보강을 유지해 '더' 결과를 채운다.)
+        _variable_count_active = (
+            Config.GUIDE_VARIABLE_COUNT_ENABLED
+            and not (excluded_chunk_ids or excluded_service_names)
+        )
+
         # ====================================================================
         # Step D-1.4: Reserve pool 재활용 (재귀 전, 무료 보강)
         # 이미 검색된 OKMS 후보 중 top 5 외 잔여(_okms_reserve_pool)에서
@@ -496,7 +519,7 @@ async def process_rag_guide_recommend(
         # - Mariner 호출 0, SLM 필터 0 (reserve 는 초기 검색에서 WEIGHT 검증됨)
         # - D-1이 전부 필터링한 경우(컬렉션 전체 비관련)면 생략
         # ====================================================================
-        if not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
+        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
             _need = _GR_TARGET_TOTAL - len(gr_top_docs)
             _held_chunk_ids = {d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")}
             _excl_set = (
@@ -535,7 +558,7 @@ async def process_rag_guide_recommend(
         # ====================================================================
         _GR_RECURSIVE_MAX_ITERS = 3
         _recur_added = False  # 재귀로 SLM 미검증 신규 문서가 추가됐는지 추적 (D-1.6 게이트)
-        if not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
+        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
             logger.info(
                 f"[RAG/guide_recommend_v2] 관련성 필터 후 {len(gr_top_docs)}건 "
                 f"< {_GR_TARGET_TOTAL}건 → 재귀 보강 시작 (최대 {_GR_RECURSIVE_MAX_ITERS}회)"
@@ -771,6 +794,25 @@ async def process_rag_guide_recommend(
             logger.info(
                 f"[RAG/guide_recommend_v2] 적합 후처리: {_before} → {len(gr_top_docs)}건 "
                 f"(require_general={_gr_require_general}, lifecycle={lifecycle or None})"
+            )
+
+        # Step D-1.8: 가변 개수 정책 — 고정 top-N(항상 8~11 채움) 대신 주제어 존재 +
+        # 점수 임계로 노출 개수를 가변화. 관련 풀이 작으면 적게, 크면 많이.
+        # (more_info 후속은 사용자가 "더"를 명시한 추가요청이라 가변 컷에서 제외 — 풀 그대로.)
+        if _variable_count_active and gr_top_docs:
+            _vc_keywords = precomputed_keywords or extract_nouns(reformed_query)
+            _topic_terms = extract_topic_terms(_vc_keywords, exclude=sigun_raws)
+            _vc_before = len(gr_top_docs)
+            gr_top_docs = select_variable_count(
+                gr_top_docs, _topic_terms,
+                keep_ratio=Config.GUIDE_KEEP_RATIO,
+                gap_drop=Config.GUIDE_GAP_DROP,
+                min_results=Config.GUIDE_MIN_RESULTS,
+                max_results=Config.GUIDE_MAX_RESULTS,
+            )
+            logger.info(
+                "[RAG/guide_recommend_v2] 가변 개수: %d → %d건 (topic_terms=%s)",
+                _vc_before, len(gr_top_docs), _topic_terms,
             )
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순

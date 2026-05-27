@@ -406,6 +406,12 @@ async def generate_final_response_v2(
             "use_llm_recommended_prompt": bool(use_llm_recommended_prompt),
             "welfare_docs_count": len(welfare_docs or []),
         }
+        # [단계 진단] 전처리·검색식 단계 산출을 extras 에 병합 (회차별 일관성 비교용)
+        try:
+            from app.chat.infra.rag.stage_trace import snapshot as _stage_snapshot
+            _trace_extras.update(_stage_snapshot())
+        except Exception:  # noqa: BLE001
+            pass
         if stream:
             response = wrap_stream_with_trace(
                 response,

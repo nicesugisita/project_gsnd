@@ -220,6 +220,11 @@ def query_okms_documents_by_display_name(
                 )
             where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("RECOMMEND_Q_OKMS", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
 
         queryset = jpkg_query.QuerySet(1)
@@ -371,6 +376,11 @@ def query_gov_okms_documents_by_display_name(
                     jpkg_query.WhereSet("SERVICE_ID", OP_INT_SUMMATION, chunk_id, 0),
                 ]
 
+        try:
+            from app.chat.infra.rag.stage_trace import record_search_query as _stage_rec_sq
+            _stage_rec_sq("RECOMMEND_Q_GOV", where_set_array)
+        except Exception:  # noqa: BLE001
+            pass
         query.setWhere(where_set_array)
         queryset = jpkg_query.QuerySet(1)
         queryset.addQuery(query)
