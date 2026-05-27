@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 def register_routes(app: FastAPI) -> None:
     """모든 도메인 라우터를 FastAPI 앱에 등록한다."""
+    from app.auth.router import router as auth_router
     from app.chat.router import router as chat_router
     from app.conversation.router import router as conversation_router
     from app.document.router import router as document_router
@@ -18,6 +19,7 @@ def register_routes(app: FastAPI) -> None:
     from app.welfare_tel.router import router as welfare_tel_router
     from app.wlf_srvc.router import router as wlf_srvc_router
 
+    app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(rag_router)
     app.include_router(conversation_router)

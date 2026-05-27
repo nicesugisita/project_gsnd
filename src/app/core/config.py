@@ -199,6 +199,13 @@ class Settings(BaseSettings):
     # 정책 정적 규칙 YAML(우선순위 tag 별 anchor_keywords 등). 프로젝트 루트 기준 상대경로 허용.
     POLICY_RULES_PATH: str = "config/policy_rules.yaml"
 
+    # ── 인증 ──────────────────────────────────────────────────────────────────
+    AUTH_CRYPT_KEY: str = ""          # SHA-512 SALT — .env 필수
+    JWT_SECRET_KEY: str = ""          # JWT 서명 키 — .env 필수
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    AUTH_DB_NAME: str = ""            # TB_USER가 있는 DB명 (비우면 DB_NAME 사용)
+
     # ── 세션 ──────────────────────────────────────────────────────────────────
     SESSION_TIMEOUT_MINUTES: int = 10
     SESSION_TABLE: str = ""
