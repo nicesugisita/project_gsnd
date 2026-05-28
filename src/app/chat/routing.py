@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # 매핑된 사업/제도명을 검색 질의에 추가하여 RAG 검색 시 노출 가능성을 높인다.
 KEYWORD_BOOST_MAP: Dict[str, List[str]] = {
     "실직": ["긴급지원제도"],
+    "병원비": ["의료비", "진료비"],  # 구어 '병원비' → 복지 DB 표준어휘 동의어 확장(OR 매칭, recall↑)
 }
 
 
