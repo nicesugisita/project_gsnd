@@ -246,11 +246,6 @@ def load_pre_check_prompt() -> str:
     return _load_prompt_file('pre_check_prompt.txt')
 
 
-def load_excluded_service_extraction_prompt() -> str:
-    """Load Excluded Service Extraction prompt from file."""
-    return _load_prompt_file('excluded_service_extraction_prompt.txt')
-
-
 def load_contextual_query_rewriter_multi_turn_prompt() -> str:
     """Load ContextualQueryRewriter multi-turn system prompt from file."""
     return _load_prompt_file('contextual_query_rewriter_multi_turn.txt')
