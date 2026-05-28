@@ -177,7 +177,8 @@ def main() -> None:
     ap.add_argument("--no", type=int, default=None, help="특정 no(또는 멀티턴 base_no)만")
     ap.add_argument("--start-no", type=int, default=1, help="이 no 이상부터 (단일턴 resume)")
     ap.add_argument("--limit", type=int, default=None, help="처음 N개만")
-    ap.add_argument("--multiturn-only", action="store_true", help="멀티턴 대화만, 전체 턴 replay")
+    ap.add_argument("--multiturn-only", action="store_true", help="대화 단위로 전체 턴 replay (기본: 2턴 이상만)")
+    ap.add_argument("--keep-single", action="store_true", help="--multiturn-only 와 함께: 1턴 대화([N-1]만 있는 단일 질문)도 포함해 replay (단일+멀티 혼합 입력용)")
     ap.add_argument("--endpoint", default="http://127.0.0.1:8000/v1/chat/completions")
     ap.add_argument("--src", default=None, help="입력 xlsx 경로(기본: 260513 gsnd_total 데이터셋). 시트 gsnd_total / no·question·clarified·follow_up 스키마.")
     ap.add_argument("--tag", default=None, help="출력 파일명에 끼울 식별 태그(예: problems) — 결과를 따로 저장.")
@@ -200,11 +201,14 @@ def main() -> None:
     captured: list[dict] = []
     with httpx.Client() as client, cap_jsonl.open("w", encoding="utf-8") as fjl:
         if args.multiturn_only:
-            convs = load_conversations(multiturn_only=True)
+            convs = load_conversations(multiturn_only=not args.keep_single)
             if args.no is not None:
                 convs = [c for c in convs if c["base_no"] == args.no]
-            elif args.limit:
-                convs = convs[: args.limit]
+            else:
+                if args.start_no > 1:  # resume: 이 base_no 이상부터 (이미 끝낸 대화 건너뜀)
+                    convs = [c for c in convs if c["base_no"] >= args.start_no]
+                if args.limit:
+                    convs = convs[: args.limit]
             if not convs:
                 print("[error] 대상 멀티턴 대화 0개"); sys.exit(1)
             total_turns = sum(len(c["turns"]) for c in convs)
