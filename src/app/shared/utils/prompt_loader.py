@@ -47,23 +47,9 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
     Returns:
         Content of the prompt file or default value
-
-    Note:
-        Config.USE_SHORT_PROMPTS=True 이면 prompts/short/<filename> 가
-        존재할 때 그것을 우선 사용한다. 응답시간 실험용 토글.
     """
     try:
         prompt_file = os.path.join(_PROMPT_BASE_DIR, filename)
-
-        # 단축 프롬프트 우선 로드 (실험용 토글, 실패 시 일반 경로로 폴백)
-        try:
-            from app.core.config import Config
-            if getattr(Config, "USE_SHORT_PROMPTS", False):
-                short_file = os.path.join(_PROMPT_BASE_DIR, "short", filename)
-                if os.path.exists(short_file):
-                    prompt_file = short_file
-        except Exception:
-            pass
 
         if not os.path.exists(prompt_file):
             return default
