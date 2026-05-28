@@ -236,7 +236,7 @@ async def process_rag_search(
             )
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
-        if Config.RRF_FUSION_ENABLED and _both_pool:
+        if _both_pool:
             # 풀별로 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
             # RRF는 입력 리스트가 이미 정렬돼 있다고 가정하므로 풀별 사전 정렬이 필요하다.
             center_sorted = sorted(
