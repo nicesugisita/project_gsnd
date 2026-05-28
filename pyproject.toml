@@ -40,7 +40,7 @@ packages = ["src/app"]
 
 [tool.uv]
 # src/ 레이아웃: 패키지를 editable 모드로 설치하면 PYTHONPATH 없이 동작
-# uv sync 또는 uv pip install -e . 실행 후 uvicorn app.application:app 가능
+# uv sync 또는 uv pip install -e . 실행 후 uvicorn app.main:app 가능
 dev-dependencies = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
