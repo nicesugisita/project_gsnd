@@ -35,7 +35,6 @@ from .response_generator import generate_final_response_v2
 from app.chat.routing import (
     extract_triples,
 )
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 
 logger = logging.getLogger(__name__)
 
@@ -271,25 +270,8 @@ async def process_rag_search(
             log_prefix="[RAG/search_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if search_pool_tag == "our_region_tel":
-            logger.info(
-                "[RAG/search_v2] 단일 블록 OUR_REGION_TEL — 관련성 LLM 필터 생략 (%d건 유지)",
-                len(top_docs),
-            )
-            logger.info("[TIMING][search] Step6 관련성 필터: 생략 (0s)")
-        elif Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(
-                reformed_query,
-                top_docs,
-                sigun_filters=search_sigun_filters,
-                max_judgment_docs=-1,
-            )
-            logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t_ref)
-            logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
-        else:
-            # search: 필터 OFF 시 cap 없이 dedupe·정렬된 결과 전부 반환 (시설/연락처 조회 특성상 누락 방지)
-            logger.info("[RAG/search_v2] Step6 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — %d건 전체 반환", len(top_docs))
-        logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 끝]-----------")
+        # 관련성 필터 없음 — dedupe·정렬된 결과를 cap 없이 전부 반환 (시설/연락처 조회 누락 방지)
+        logger.info("[RAG/search_v2] Step6 — %d건 전체 반환 (관련성 필터 미적용)", len(top_docs))
 
         if excluded_chunk_ids or excluded_service_names:
             from .common import filter_excluded_docs

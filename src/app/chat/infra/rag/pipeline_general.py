@@ -46,7 +46,6 @@ from app.chat.routing import (
 )
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
@@ -419,11 +418,7 @@ async def process_rag_general(
         # ====================================================================
         # Step 6: OKMS GroupA → top N
         # ====================================================================
-        # 필터 ON: 15/8, 필터 OFF: 20/12 (필터 제거 보상)
-        if Config.RELEVANCE_FILTER_ENABLED:
-            _GEN_FINAL_TOP_N = 15 if more_detail else 8
-        else:
-            _GEN_FINAL_TOP_N = 20 if more_detail else 12
+        _GEN_FINAL_TOP_N = 20 if more_detail else 12
         _FALLBACK_THRESHOLD = 1
         okms_final = okms_group_a_top[:_GEN_FINAL_TOP_N]
         logger.info(f"[RAG/general_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(okms_group_a_top)}개)")
@@ -503,21 +498,9 @@ async def process_rag_general(
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(
-                reformed_query,
-                top_docs,
-                sigun_filters=gen_sigun_filters,
-                max_judgment_docs=20 if more_detail else None,
-            )
-            logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
-        else:
-            logger.info("[RAG/general_v2] Step7-C 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
-
         # ====================================================================
-        # Step 7-C-3: 관련성 필터 0건 → GroupA 하위 문서 재시도
-        # (상위 N건이 모두 무관 판정된 경우 top-N 이후 문서를 추가 시도)
+        # Step 7-C-3: 최종 0건 → GroupA 하위 문서 재시도
+        # (top-N 이 비면 top-N 이후 문서를 추가 시도)
         # ====================================================================
         if not top_docs:
             lower_docs = okms_group_a_top[_GEN_FINAL_TOP_N:]
@@ -532,13 +515,7 @@ async def process_rag_general(
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
                 )
-                if Config.RELEVANCE_FILTER_ENABLED:
-                    top_docs = await filter_irrelevant_docs(
-                        reformed_query, lower_docs, sigun_filters=gen_sigun_filters
-                    )
-                else:
-                    top_docs = lower_docs
-                    logger.info("[RAG/general_v2] Step7-C-3 관련성 필터 SKIP — lower_docs %d건 그대로", len(top_docs))
+                top_docs = lower_docs
                 logger.info(
                     "[TIMING][general] Step7-C-3 GroupA 하위 재시도: %.3fs", time.monotonic() - _t
                 )
@@ -597,17 +574,7 @@ async def process_rag_general(
                     apply_enabled=not _skip_policy_boost,
                 )
 
-                _t = time.monotonic()
-                if Config.RELEVANCE_FILTER_ENABLED:
-                    top_docs = await filter_irrelevant_docs(
-                        reformed_query, fb_pool, sigun_filters=gen_sigun_filters
-                    )
-                else:
-                    top_docs = fb_pool
-                    logger.info("[RAG/general_v2] Step7-C-4 재검색 관련성 필터 SKIP — fb_pool %d건 그대로", len(top_docs))
-                logger.info(
-                    "[TIMING][general] Step7-C-4 재검색 관련성 필터: %.3fs", time.monotonic() - _t
-                )
+                top_docs = fb_pool
                 logger.info(f"[RAG/general_v2] 재검색 결과: {len(top_docs)}건")
 
         # 최종 안전망

@@ -43,7 +43,6 @@ from .response_generator import generate_final_response_v2
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .policy_priority import resolve_policy_boost_keywords
 from .variable_count import extract_topic_terms, select_variable_count
@@ -361,9 +360,8 @@ async def process_rag_guide_recommend(
                 f"  CHUNK_ID={doc.get('CHUNK_ID', '')}"
             )
 
-        # Step D: OKMS 쿼터 → top N (필터 ON: 5, 필터 OFF: 8)
-        # RELEVANCE_FILTER_ENABLED=False 시 dedupe 만으로 노이즈 흡수 가능한지 측정용 보상값.
-        _GR_FINAL_TOP_N = 5 if Config.RELEVANCE_FILTER_ENABLED else 8
+        # Step D: OKMS 쿼터 → top N
+        _GR_FINAL_TOP_N = 8
         # B1: 쿼터(5)보다 큰 OKMS 후보 풀(최대 _GR_GA_TOP_N=10)을 필터에 태운다. cap 은 필터 뒤로.
         gr_top_docs = list(gr_group_a_top)
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 후보: {len(gr_top_docs)}개 (쿼터 {_GR_FINAL_TOP_N})")
@@ -445,19 +443,9 @@ async def process_rag_guide_recommend(
             _stage_rec_docs("rerank_before", _merged_candidates)
         except Exception:  # noqa: BLE001
             pass
-        if Config.RELEVANCE_FILTER_ENABLED:
-            # 확장 후보 풀(OKMS 15 + GOV 15)을 기본 10건 캡으로 잘라버리면 풀 확대 효과가 사라진다.
-            # 상위 20건까지 판단해 적합 생존분을 늘린다(D-1.7 백필 재료도 함께 확대).
-            _survivors = await filter_irrelevant_docs(
-                reformed_query, _merged_candidates, sigun_filters=gr_sigun_filters,
-                max_judgment_docs=20,
-            )
-            logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        else:
-            _survivors = _merged_candidates
-            logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(_merged_candidates))
+        _survivors = _merged_candidates
 
-        # 필터 생존분을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
+        # 후보 풀을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
         _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
         _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
         # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
@@ -753,26 +741,6 @@ async def process_rag_guide_recommend(
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 후 상위 {_GR_TARGET_TOTAL}건 캡: {len(gr_top_docs)}건")
             else:
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 종료: 최종 {len(gr_top_docs)}건")
-
-        # ====================================================================
-        # Step D-1.6: 재귀 보강 후 SLM 관련성 재필터
-        # 재귀(D-1.5) 내부에서는 속도를 위해 SLM 필터를 생략하므로, 응답 직전에 한 번 더 검증.
-        # 재귀로 신규 문서가 추가된 경우에만 실행.
-        # ====================================================================
-        if _recur_added and Config.RELEVANCE_FILTER_ENABLED:
-            _t = time.monotonic()
-            gr_top_docs = await filter_irrelevant_docs(
-                reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters
-            )
-            logger.info(
-                "[TIMING][guide_recommend] StepD-1.6 재귀 후 관련성 재필터 [8b/sllm]: %.3fs",
-                time.monotonic() - _t,
-            )
-            logger.info(
-                f"[RAG/guide_recommend_v2] 재귀 후 관련성 재필터 결과: {len(gr_top_docs)}개 문서"
-            )
-        elif _recur_added:
-            logger.info("[RAG/guide_recommend_v2] StepD-1.6 재귀 후 재필터 SKIP (RELEVANCE_FILTER_ENABLED=False)")
 
         # Step D-1.7: 가구상황·생애주기 적합 후처리
         # - 기본(일반가구 미명시) 질의: 저소득/다문화·탈북민 등 특정계층 '단독' 태그 제도 제외.

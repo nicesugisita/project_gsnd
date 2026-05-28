@@ -40,7 +40,6 @@ from app.chat.routing import (
 )
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .common import dedupe_cap_expanded_queries, apply_policy_priority_to_documents
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
@@ -342,12 +341,6 @@ async def process_rag_with_documents_v2(
             log_prefix="[RAG/comparison_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
-            logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/comparison_v2] 관련성 필터 후: {len(top_docs)}개")
-        else:
-            logger.info("[RAG/comparison_v2] Step7 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
 
         if excluded_chunk_ids or excluded_service_names:
             from .common import filter_excluded_docs
