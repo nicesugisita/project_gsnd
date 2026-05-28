@@ -118,7 +118,7 @@ async def process_rag_guide_recommend(
         # LLM 선별 모드: 룰베이스 개수 결정(reserve/재귀/가변개수)을 끄고 RRF 상위 N건을
         # 그대로 최종응답 LLM에 넘긴다(관련 문서 선별은 선별 프롬프트가 담당).
         # more_info 후속(excluded 존재)은 '더 보기' 의미라 이 모드에서 제외(기존 흐름 유지).
-        _llm_select = bool(Config.GUIDE_LLM_RELEVANCE_SELECT_ENABLED) and not _skip_policy_boost
+        _llm_select = not _skip_policy_boost
         policy_tags, _ = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
         # guide_recommend에서 low_income 태그는 query-time 부스트를 끄고,
         # elderly/implant 등은 기존 우선 정책을 유지한다.
@@ -518,10 +518,7 @@ async def process_rag_guide_recommend(
         # 재귀 보강(D-1.5)의 타임아웃 조기중단은 부하 따라 후보 풀을 흔드는 비결정성 원천이다.
         # 따라서 가변 개수 활성 + non-more_info 턴이면 보강을 건너뛰어 개수를 결정적으로 만든다.
         # (more_info 후속은 가변 컷에서 제외되므로 보강을 유지해 '더' 결과를 채운다.)
-        _variable_count_active = (
-            Config.GUIDE_VARIABLE_COUNT_ENABLED
-            and not (excluded_chunk_ids or excluded_service_names)
-        )
+        _variable_count_active = not (excluded_chunk_ids or excluded_service_names)
 
         # ====================================================================
         # Step D-1.4: Reserve pool 재활용 (재귀 전, 무료 보강)

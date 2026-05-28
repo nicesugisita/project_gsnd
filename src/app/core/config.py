@@ -124,7 +124,6 @@ class Settings(BaseSettings):
     # guide_recommend 가변 개수 정책: 고정 top-N(=항상 8~11 채움) 대신 주제어 존재 +
     # 점수 임계로 노출 개수를 가변화한다. 관련 풀이 작으면 적게, 크면 많이.
     # 결정적(LLM 없음)이라 회차 일관성 유지. 상세 설계는 plans/hazy-knitting-lark.md Part E.
-    GUIDE_VARIABLE_COUNT_ENABLED: bool = True
     GUIDE_KEEP_RATIO: float = 0.55   # 광역(주제어 없음) 질의 점수 비율 floor
     GUIDE_GAP_DROP: float = 0.6      # 직전 점수 대비 이 비율 미만이면 급락 절벽으로 보고 컷
     GUIDE_MIN_RESULTS: int = 3       # 노출 하한 (너무 적게 나오지 않도록)
@@ -133,7 +132,6 @@ class Settings(BaseSettings):
     # guide_recommend LLM 선별 모드: 룰베이스 개수 결정(가변개수/reserve/재귀)을 끄고
     # RRF 상위 N건을 그대로 최종응답 LLM에 넘겨, 관련 문서 선별을 LLM(선별 프롬프트)에 위임한다.
     # 생애주기/가구 하드필터(D-1.7)는 유지해 명백한 생애주기 누수만 결정적으로 차단한다.
-    GUIDE_LLM_RELEVANCE_SELECT_ENABLED: bool = True
     GUIDE_LLM_SELECT_MAX_DOCS: int = 11   # LLM에 넘길 RRF 상위 문서 수(안전 cap)
 
     # ── DeepServer ────────────────────────────────────────────────────────────
