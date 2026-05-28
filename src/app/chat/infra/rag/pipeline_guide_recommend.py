@@ -98,6 +98,8 @@ async def process_rag_guide_recommend(
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -151,31 +153,47 @@ async def process_rag_guide_recommend(
 
         birth_year = _extract_birth_year_from_message(message)
 
-        if birth_year:
-            lifecycle = _birth_year_to_lifecycle(birth_year)
-            logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
+        # 생애주기: rewrite 프롬프트(LLM 멀티태그)면 precomputed 사용 — 룰 기반 추출을 완전 대체.
+        # 빈 리스트면 'LLM이 태그 없음'(부모 나이로 추정 금지). precomputed 가 None(비-rewrite/구
+        # 프롬프트)일 때만 기존 룰 기반 단일 추출로 폴백한다.
+        if precomputed_lifecycle_tags is not None:
+            lifecycle_tags = list(precomputed_lifecycle_tags)
+            logger.debug(f"[RAG/guide_recommend_v2] LLM 생애주기 태그: {lifecycle_tags}")
         else:
-            # 생애주기: 현재 message 우선(새 생애주기면 즉시 교체) → 없으면 history 역순 스캔으로
-            # 직전 생애주기 유지(sticky). 폴백 없으면 시군 되묻기 턴(message="창원")에서 생애주기가
-            # 비어 lifecycle 필터가 꺼지고 인접 생애주기('고등학교 무상교육' 등)가 유입된다.
-            from app.chat.lifecycle import extract_lifecycle_from_history
-            lifecycle = (
-                _extract_lifecycle_from_message(message)
-                or extract_lifecycle_from_history(messages or [])
-                or _extract_lifecycle_from_message(reformed_query)
-            )
-            if lifecycle:
-                logger.debug(f"[RAG/guide_recommend_v2] 생애주기 추출(현재→history→reformed): '{lifecycle}'")
+            if birth_year:
+                _lc = _birth_year_to_lifecycle(birth_year)
+                logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{_lc}'")
             else:
-                logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
+                # sticky: 현재 message 우선 → history 역순 → reformed_query 보강.
+                from app.chat.lifecycle import extract_lifecycle_from_history
+                _lc = (
+                    _extract_lifecycle_from_message(message)
+                    or extract_lifecycle_from_history(messages or [])
+                    or _extract_lifecycle_from_message(reformed_query)
+                )
+                if _lc:
+                    logger.debug(f"[RAG/guide_recommend_v2] 생애주기 추출(현재→history→reformed): '{_lc}'")
+                else:
+                    logger.debug(f"[RAG/guide_recommend_v2] 생애주기 단서 없음 → 필터 미적용")
+            lifecycle_tags = [_lc] if _lc else []
 
-        # 멀티턴: 가구상황도 message+reformed_query 결합 텍스트에서 추출 (저소득/한부모 등 유실 방지).
-        # 기본값 '일반가구'라 단순 or 폴백이 안 되므로 두 텍스트를 합쳐 키워드를 스캔한다.
-        gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(f"{message} {reformed_query}")
-        if gr_hshd_sttn:
+        # 가구상황: rewrite 분류기(precomputed)면 LLM 멀티태그 사용 — 룰 추출 대체.
+        # 특정계층(저소득/장애인/한부모·조손/다문화·탈북민/다자녀/보훈)이 있으면 그 리스트로
+        # 소프트 부스트, 없으면 '일반가구'(특정계층 미해당). None(분류기 실패)이면 룰 폴백.
+        if precomputed_household_tags is not None:
+            _hh_specifics = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            gr_hshd_sttn = _hh_specifics if _hh_specifics else "일반가구"
+            gr_hshd_synonyms = []  # 캐노니컬 카테고리명이라 동의어 확장 불필요
             logger.debug(
-                f"[RAG/guide_recommend_v2] 가구상황 추출: '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
+                f"[RAG/guide_recommend_v2] LLM 가구상황 태그: {precomputed_household_tags} → filter={gr_hshd_sttn!r}"
             )
+        else:
+            # (구 프롬프트/분류기 실패 폴백) message+reformed_query 결합 텍스트에서 룰 추출.
+            gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(f"{message} {reformed_query}")
+            if gr_hshd_sttn:
+                logger.debug(
+                    f"[RAG/guide_recommend_v2] 가구상황 추출(룰): '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
+                )
 
         # 연도 필터: guide_recommend 는 항상 현재 연도 문서만 추천 (timeliness 보장).
         # 사용자가 과거/미래 연도를 명시해도 추천 결과는 현재 연도로 강제.
@@ -263,7 +281,7 @@ async def process_rag_guide_recommend(
                     vector, keywords, selected_collection,
                     year_filters=gr_year_filters or None,
                     sigun_filters=gr_sigun_filters,
-                    lifecycle_filter=lifecycle or None,
+                    lifecycle_filter=lifecycle_tags or None,
                     hshd_sttn_filter=gr_hshd_sttn or None,
                     hshd_sttn_synonyms=gr_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
@@ -281,7 +299,7 @@ async def process_rag_guide_recommend(
                 return query_gov_okms_documents(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
-                    lifecycle_filter=lifecycle or None,
+                    lifecycle_filter=lifecycle_tags or None,
                     sigun_filters=gr_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
                     excluded_business_keywords=llm_excluded_services,
@@ -334,7 +352,7 @@ async def process_rag_guide_recommend(
         # GOV_OKMS WHERE 의 LIFE_CYCLE 필터(op 34)가 일관적이지 않아 불일치 문서가 통과하는
         # 사례 확인됨 → 결정적 post-filter 로 보강. 사용자 lifecycle 없으면 필터 안 함.
         _gov_okms_pool = _deduplicate_documents(gov_okms_docs)
-        _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle)
+        _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle_tags)
         # B1: GOV 쿼터(3)보다 큰 후보 풀을 유지한다 — off-topic GOV 가 관련성 필터에 떨려도
         # 생존분에서 3건을 확보하기 위함. 쿼터 cap 은 필터 뒤로 미룬다.
         gov_okms_candidates = sorted(
@@ -599,7 +617,7 @@ async def process_rag_guide_recommend(
                     break
 
                 relax = _RELAX_PLAN[_iter - 1]
-                _lc = (lifecycle or None) if relax["lifecycle"] else None
+                _lc = (lifecycle_tags or None) if relax["lifecycle"] else None
                 _yr = (gr_year_filters or None) if relax["year"] else None
                 _boost_on = relax["boost"]
 
@@ -787,7 +805,7 @@ async def process_rag_guide_recommend(
         # 명시 가구상황 질의(gr_hshd_sttn != '일반가구')면 가구상황 제외는 건너뛰고 생애주기만 적용.
         _GR_GENERAL_MIN_KEEP = 5
         _gr_require_general = (gr_hshd_sttn == "일반가구")
-        if gr_top_docs and (_gr_require_general or lifecycle):
+        if gr_top_docs and (_gr_require_general or lifecycle_tags):
             # LLM 선별 모드: 'RRF 상위 N건만' 보장 — _survivors 로 풀을 다시 키우지 않고
             # 현재 gr_top_docs(=RRF 상위)만 생애주기/가구 하드필터에 태운다. target 도 cap 동일.
             if _llm_select:
@@ -804,11 +822,11 @@ async def process_rag_guide_recommend(
             _pp_require_general = _gr_require_general and not _llm_select
             gr_top_docs = prioritize_general_household(
                 _pool, target=_pp_target, min_keep=_GR_GENERAL_MIN_KEEP,
-                require_general=_pp_require_general, lifecycle=lifecycle or None,
+                require_general=_pp_require_general, lifecycle=lifecycle_tags or None,
             )
             logger.info(
                 f"[RAG/guide_recommend_v2] 적합 후처리: {_before} → {len(gr_top_docs)}건 "
-                f"(require_general={_gr_require_general}, lifecycle={lifecycle or None})"
+                f"(require_general={_gr_require_general}, lifecycle={lifecycle_tags or None})"
             )
 
         # Step D-1.75 (LLM 선별 모드 + 정책 태그 질의 전용): 주제어 결정적 관련성 게이트.
@@ -883,7 +901,7 @@ async def process_rag_guide_recommend(
             _final_user_msg, gr_top_docs, temperature, _gr_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
-            lifecycle=lifecycle,
+            lifecycle=", ".join(lifecycle_tags) if lifecycle_tags else "",
             messages=messages,
             policy_priority_tag=precomputed_policy_priority_tag,
             user_region=user_region,

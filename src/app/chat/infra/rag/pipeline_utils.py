@@ -52,7 +52,7 @@ def _filter_gov_okms_stopwords(query: str) -> str:
 
 def filter_gov_okms_docs_by_lifecycle(
     docs: List[Dict[str, Any]],
-    user_lifecycle: Optional[str],
+    user_lifecycle: Optional[List[str]],  # str 도 허용(단일 태그 호환)
 ) -> List[Dict[str, Any]]:
     """GOV_OKMS 결과를 LIFE_CYCLE 필드 기준으로 post-filter.
 
@@ -67,28 +67,33 @@ def filter_gov_okms_docs_by_lifecycle(
       문서 LIFE_CYCLE 멀티값(쉼표·세미콜론·슬래시 구분)에 포함되어야 유지.
     - 문서 LIFE_CYCLE 필드 자체가 빈값: 전체 대상 문서일 수 있어 **보수적으로 유지**.
     """
-    if not user_lifecycle:
+    # user_lifecycle: str 또는 List[str] (멀티태그). 빈값/[] 이면 필터 없이 원본 반환.
+    _in = [user_lifecycle] if isinstance(user_lifecycle, str) else list(user_lifecycle or [])
+    _in = [v for v in _in if v and str(v).strip()]
+    if not _in:
         return docs
     if not docs:
         return docs
 
-    # 매핑은 queryset_gov_okms 의 SSOT 사용 (lazy import 로 순환 회피)
-    try:
-        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
-        target = (_map_lifecycle_for_gov_okms(user_lifecycle) or "").strip()
-    except Exception:
-        target = str(user_lifecycle or "").strip()
-    if not target:
-        return docs
-
-    kept: List[Dict[str, Any]] = []
-    removed_samples: List[str] = []
     def _norm_lc(s: str) -> str:
         # 가운데점(·) 주변 공백 변형을 통일: "임신 · 출산" / "임신· 출산" → "임신·출산"
         # 일반 공백/탭/NBSP 모두 제거 후 가운데점 표준화.
         return s.replace(" ", "").replace(" ", "").replace("\t", "").strip()
 
-    target_norm = _norm_lc(target)
+    # 매핑은 queryset_gov_okms 의 SSOT + 유의어 양방향 확장(노인↔노년). lazy import 로 순환 회피.
+    try:
+        from app.mariner.queryset_gov_okms import _expand_lifecycle_for_gov_okms
+        _targets: List[str] = []
+        for v in _in:
+            _targets.extend(_expand_lifecycle_for_gov_okms(v))
+    except Exception:
+        _targets = list(_in)
+    targets_norm = {_norm_lc(t) for t in _targets if t and str(t).strip()}
+    if not targets_norm:
+        return docs
+
+    kept: List[Dict[str, Any]] = []
+    removed_samples: List[str] = []
     for doc in docs:
         raw_field = str(doc.get("LIFE_CYCLE", "") or "").strip()
         if not raw_field:
@@ -105,7 +110,7 @@ def filter_gov_okms_docs_by_lifecycle(
             tokens = [t.strip() for t in tokens[0].split() if t.strip()]
         # 가운데점 주변 공백 통일 후 비교
         normalized_tokens = [_norm_lc(t) for t in tokens]
-        if target_norm in normalized_tokens:
+        if any(t in targets_norm for t in normalized_tokens):
             kept.append(doc)
         else:
             if len(removed_samples) < 5:
@@ -119,8 +124,8 @@ def filter_gov_okms_docs_by_lifecycle(
 
     if len(kept) < len(docs):
         logger.info(
-            "[GOV_OKMS][LifecyclePostFilter] target=%s | 입력=%d → %d 유지 (제거 %d건, 샘플=%s)",
-            target,
+            "[GOV_OKMS][LifecyclePostFilter] targets=%s | 입력=%d → %d 유지 (제거 %d건, 샘플=%s)",
+            _in,
             len(docs),
             len(kept),
             len(docs) - len(kept),
@@ -212,7 +217,7 @@ def prioritize_general_household(
     min_keep: int,
     *,
     require_general: bool = True,
-    lifecycle: Optional[str] = None,
+    lifecycle: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
 ) -> List[Dict[str, Any]]:
     """가구상황·생애주기 적합 문서를 우선하고 부적합 문서를 제외하는 최종 후처리.
 
@@ -232,14 +237,19 @@ def prioritize_general_household(
         require_general: 일반가구 태그 요구 여부 (명시 가구상황 질의면 False).
         lifecycle: 요구 생애주기 ('' / None 이면 생애주기 미적용).
     """
-    # 파이프라인 생애주기 라벨("노인")과 문서 LIFE_CYCLE 표준값("노년")이 다르므로
-    # 비교 전에 문서 표준 토큰으로 매핑한다. 미매핑 시 노인 질의에서 모든 문서가
-    # 부적합 판정돼 min_keep 으로만 백필되는 버그가 발생한다.
+    # lifecycle 은 str 또는 List[str](멀티태그). 파이프라인 라벨("노인")과 문서 LIFE_CYCLE
+    # 표준값("노년")이 다르므로 유의어 양방향 확장 후 any-of 로 비교한다(미매핑 시 노인 질의에서
+    # 전 문서가 부적합 판정돼 min_keep 으로만 백필되는 버그 방지).
+    _lc_in = [lifecycle] if isinstance(lifecycle, str) else list(lifecycle or [])
+    _lc_in = [v for v in _lc_in if v and str(v).strip()]
     try:
-        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
-        _lc_target = (_map_lifecycle_for_gov_okms(lifecycle) or "").strip() if lifecycle else ""
+        from app.mariner.queryset_gov_okms import _expand_lifecycle_for_gov_okms
+        _lc_targets = set()
+        for v in _lc_in:
+            _lc_targets.update(_expand_lifecycle_for_gov_okms(v))
     except Exception:
-        _lc_target = str(lifecycle or "").strip()
+        _lc_targets = set(_lc_in)
+    _lc_targets = {t for t in _lc_targets if t and str(t).strip()}
 
     def _w(d: Dict[str, Any]) -> float:
         try:
@@ -250,8 +260,10 @@ def prioritize_general_household(
     def _fit(d: Dict[str, Any]) -> bool:
         if require_general and "일반가구" not in str(d.get("HOUSE_SITUATION", "") or ""):
             return False
-        if _lc_target and _lc_target not in str(d.get("LIFE_CYCLE", "") or ""):
-            return False
+        if _lc_targets:
+            field = str(d.get("LIFE_CYCLE", "") or "")
+            if not any(t in field for t in _lc_targets):
+                return False
         return True
 
     fit = sorted([d for d in pool if _fit(d)], key=_w, reverse=True)

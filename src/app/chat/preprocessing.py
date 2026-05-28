@@ -194,6 +194,134 @@ def _read_field(parsed: Dict[str, Any], *keys: str) -> Any:
     return None
 
 
+# 생애주기 태그 화이트리스트 — lifecycle.LIFECYCLE_LABELS(6종) + 임신·출산(검색 색인 7번째 라벨).
+_LIFECYCLE_TAG_WHITELIST = ("영유아", "아동", "청소년", "청년", "중장년", "노인", "임신·출산")
+
+
+def _normalize_lifecycle_tags(parsed: Dict[str, Any]) -> List[str]:
+    """통합 전처리 JSON의 lifecycle_tags 정규화.
+
+    7개 라벨 화이트리스트만 통과(중복·빈값 제거, 순서 보존). 유효값 없으면 [].
+    프롬프트가 미분류를 빈 배열로 주므로 별도 미분류 토큰은 무시한다.
+    """
+    raw = _read_field(parsed, "lifecycle_tags", "lifecycleTags")
+    out: List[str] = []
+    for t in _normalize_str_list(raw):
+        if t in _LIFECYCLE_TAG_WHITELIST:
+            out.append(t)
+        else:
+            logger.warning("[UnifiedPreprocess] 알 수 없는 lifecycle 태그=%r → 무시", t)
+    return out
+
+
+# 가구상황 태그 화이트리스트 — DB HOUSE_SITUATION 닫힌 집합. '일반가구'=특정계층 미해당.
+_HOUSEHOLD_TAG_WHITELIST = ("저소득", "장애인", "한부모·조손", "다문화·탈북민", "다자녀", "보훈", "일반가구")
+
+
+def _normalize_household_tags(parsed: Dict[str, Any]) -> List[str]:
+    """분류기 JSON의 household_tags 정규화. 6종 화이트리스트만 통과(중복·빈값 제거, 순서 보존).
+
+    특정계층(5종)이 하나라도 있으면 '일반가구'는 제거(특정계층 우선). 유효값 없으면 [].
+    """
+    raw = _read_field(parsed, "household_tags", "householdTags")
+    out: List[str] = []
+    for t in _normalize_str_list(raw):
+        if t in _HOUSEHOLD_TAG_WHITELIST and t not in out:
+            out.append(t)
+        elif t not in _HOUSEHOLD_TAG_WHITELIST:
+            logger.warning("[QueryTags] 알 수 없는 household 태그=%r → 무시", t)
+    _specifics = [t for t in out if t != "일반가구"]
+    return _specifics if _specifics else out
+
+
+# 정책 태그 우선순위(더 좁은 것 우선) — policy_priority._TAG_FALLBACK_PRIORITY 와 동일.
+_POLICY_TAG_PRIORITY = ("implant", "low_income", "elderly_benefits")
+
+
+def _normalize_policy_tags_to_single(parsed: Dict[str, Any]) -> Optional[str]:
+    """분류기 JSON의 policy_tags 배열 → 단일 정책 우선순위 태그(우선순위 순). 없으면 None."""
+    raw = _read_field(parsed, "policy_tags", "policyTags")
+    tags = [t for t in _normalize_str_list(raw) if t in POLICY_PRIORITY_TAGS]
+    if not tags:
+        return None
+    for p in _POLICY_TAG_PRIORITY:
+        if p in tags:
+            return p
+    return tags[0]
+
+
+def _resolve_policy_priority_tag(query: str, raw_tag: Optional[str]) -> Optional[str]:
+    """정책 태그 후처리: DB excludes 무력화 → 없으면 룰 기반 fallback.
+
+    LLM이 준 태그를 strip_tag_by_exclusions 로 검증하고(예: '치매' 포함 시 elderly 무력화),
+    그래도 None 이면 infer_policy_priority_tag_by_keywords 로 채워 anchor 검색을 안정 발동시킨다.
+    """
+    tag = raw_tag
+    try:
+        from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
+        before = tag
+        tag = strip_tag_by_exclusions(query, tag)
+        if before and tag is None:
+            logger.info("[QueryTags] policy_priority_tag 무력화: %s → None (DB excludes)", before)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[QueryTags] exclude check failed: %s", e)
+    if tag is None:
+        try:
+            from app.chat.infra.rag.policy_priority import infer_policy_priority_tag_by_keywords
+            inferred = infer_policy_priority_tag_by_keywords(query)
+            if inferred:
+                tag = inferred
+                logger.info("[QueryTags] policy_priority_tag 룰 fallback: None → %s", inferred)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[QueryTags] tag inference fallback failed: %s", e)
+    return tag
+
+
+async def classify_query_tags(
+    user_query: str,
+    messages: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[Optional[List[str]], Optional[str], Optional[List[str]]]:
+    """분리 분류기(생애주기 + 정책 우선순위 + 가구상황 3축). unified_preprocess와 병렬 호출.
+
+    Returns:
+        (lifecycle_tags, policy_priority_tag, household_tags)
+        - lifecycle_tags: 성공 시 정규화 리스트([] 포함), LLM/파싱 실패 시 None(→ 파이프라인 룰 폴백).
+        - policy_priority_tag: LLM 1차 → excludes 무력화 → 없으면 룰 fallback (단일값, 실패해도 룰로 충당).
+        - household_tags: 성공 시 정규화 리스트(특정계층 또는 ['일반가구']), 실패 시 None(→ 룰 폴백).
+    """
+    from app.shared.utils.prompt_loader import load_lifecycle_classification_prompt
+    template = load_lifecycle_classification_prompt()
+    parsed = None
+    used_32b = False
+    if template:
+        final_prompt = template.replace(
+            "{사용자 질문}", _build_multiturn_input(user_query, messages or [])
+        )
+        try:
+            parsed, _raw, used_32b = await call_classifier_with_fallback(
+                classifier_name="QueryTags",
+                message=final_prompt,
+                temperature=0,
+                response_format={"type": "json_object"},
+                extra_system_prompts=[],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[QueryTags] 분류 호출 실패: %s", e)
+            parsed = None
+    else:
+        logger.warning("[QueryTags] 프롬프트 로드 실패")
+
+    lifecycle_tags = _normalize_lifecycle_tags(parsed) if parsed is not None else None
+    household_tags = _normalize_household_tags(parsed) if parsed is not None else None
+    raw_policy = _normalize_policy_tags_to_single(parsed) if parsed is not None else None
+    policy_priority_tag = _resolve_policy_priority_tag(user_query, raw_policy)
+    logger.info(
+        "[QueryTags] lifecycle=%s | policy=%s | household=%s (used_32b=%s)",
+        lifecycle_tags, policy_priority_tag, household_tags, used_32b,
+    )
+    return lifecycle_tags, policy_priority_tag, household_tags
+
+
 async def unified_preprocess(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
@@ -314,7 +442,8 @@ async def unified_preprocess(
             keywords = []
 
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
-    policy_priority_tag = _normalize_policy_priority_tag(_raw_policy_priority_tag_from_parsed(parsed))
+    # 정책 우선순위 태그는 분리 분류기(classify_query_tags)가 산출 — 여기선 미사용(None).
+    policy_priority_tag = None
     detail_requested = _normalize_detail_requested(parsed)
 
     # [작업 6] 배제 의도 분석 — rewrite 모드 프롬프트에서만 채워짐. expand 모드 폴백 시 안전 default.
@@ -329,35 +458,6 @@ async def unified_preprocess(
     # ANCHOR_COMPARISON 외에는 anchor_entities 의미 없음 — 강제 비움.
     if exclusion_intent != "ANCHOR_COMPARISON":
         anchor_entities = []
-    # DB 변별 키워드로 사후 무력화 (예: "치매"가 포함되면 elderly_benefits를 None으로 강제)
-    try:
-        from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
-        before_tag = policy_priority_tag
-        policy_priority_tag = strip_tag_by_exclusions(query, policy_priority_tag)
-        if before_tag and policy_priority_tag is None:
-            logger.info(
-                "[UnifiedPreprocess] policy_priority_tag 무력화: %s → None (DB excludes)",
-                before_tag,
-            )
-    except Exception as e:
-        logger.warning("[UnifiedPreprocess] exclude check failed: %s", e)
-
-    # LLM이 None을 주거나 excludes로 무력화된 경우, 룰 기반 fallback으로 anchor 검색을
-    # 항상 발동시킨다. 같은 질문에 매 호출마다 다른 tag가 나와 검색 결과 셋이 흔들리는
-    # LLM 비결정성을 보정. 자세한 검증 데이터는 policy_priority_tag_fallback_handoff.md 참고.
-    if policy_priority_tag is None:
-        try:
-            from app.chat.infra.rag.policy_priority import infer_policy_priority_tag_by_keywords
-            inferred = infer_policy_priority_tag_by_keywords(query)
-            if inferred:
-                policy_priority_tag = inferred
-                logger.info(
-                    "[UnifiedPreprocess] policy_priority_tag 룰 fallback: None → %s",
-                    inferred,
-                )
-        except Exception as e:
-            logger.warning("[UnifiedPreprocess] tag inference fallback failed: %s", e)
-
     result = {
         "query":            query,
         "intent":           intent,

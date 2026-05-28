@@ -76,6 +76,8 @@ async def process_rag_with_documents_v2(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -87,7 +89,7 @@ async def process_rag_with_documents_v2(
 
     _ = precomputed_search_target
     _ = service_target  # comparison은 GSND 미사용 — 시그니처 호환 위해 받기만 함
-    precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
+    # 정책 우선순위 태그도 분류기에서 받아 comparison 의 OKMS/GOV 레그 부스트에 사용(3축 전부).
 
     try:
         t_total = time.monotonic()
@@ -161,15 +163,24 @@ async def process_rag_with_documents_v2(
             _comp_city_filters = [s for s in _comp_normalized if s.startswith("경상남도 ")]
             comp_sigun_filters = list(dict.fromkeys(_comp_city_filters)) if _comp_city_filters else []
         comp_birth_year = _extract_birth_year_from_message(message)
-        comp_lifecycle = (
-            _birth_year_to_lifecycle(comp_birth_year)
-            if comp_birth_year
-            else _extract_lifecycle_from_message(message)
-        )
-        comp_hshd_sttn, comp_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        # 생애주기/가구상황: 분류기(precomputed)면 LLM 멀티태그, None(분류기 실패)이면 룰 폴백.
+        if precomputed_lifecycle_tags is not None:
+            comp_lifecycle = list(precomputed_lifecycle_tags)
+        else:
+            comp_lifecycle = (
+                _birth_year_to_lifecycle(comp_birth_year)
+                if comp_birth_year
+                else _extract_lifecycle_from_message(message)
+            )
+        if precomputed_household_tags is not None:
+            _comp_hh = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            comp_hshd_sttn = _comp_hh if _comp_hh else "일반가구"
+            comp_hshd_synonyms = []
+        else:
+            comp_hshd_sttn, comp_hshd_synonyms = _extract_hshd_sttn_from_message(message)
         logger.debug(
             f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, "
-            f"lifecycle: '{comp_lifecycle}', hshd_sttn: '{comp_hshd_sttn}'"
+            f"lifecycle: {comp_lifecycle!r}, hshd_sttn: {comp_hshd_sttn!r}"
         )
 
         comp_year_filters = extract_year_filters(message)

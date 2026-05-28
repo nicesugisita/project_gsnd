@@ -4,12 +4,14 @@ routes.py(non-streaming)와 streaming.py(streaming) 양쪽에서 호출합니다
 각 함수는 순수하게 결과를 반환하며, 상태 메시지 전송은 호출자가 담당합니다.
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from app.chat.service import unified_preprocess
+from app.chat.preprocessing import classify_query_tags
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.chat.infra.llm.judgment import pre_check
 from app.chat.infra.llm.excluded_service import extract_excluded_services
@@ -51,6 +53,8 @@ class PreprocessResult:
     elapsed: float = 0.0
     search_target: Optional[str] = None
     policy_priority_tag: Optional[str] = None
+    lifecycle_tags: Optional[List[str]] = None
+    household_tags: Optional[List[str]] = None
     detail_requested: bool = False
     # 작업 6: 배제 의도 분석 (rewrite 모드 unified_preprocess에서만 의미 있게 채워짐)
     exclusion_intent: str = "NONE"
@@ -173,11 +177,23 @@ async def run_unified_preprocess(
     messages: Optional[list],
     use_rag: bool,
 ) -> PreprocessResult:
-    """[5단계] 통합 전처리: 의도 분류, 쿼리 개선, 확장, 키워드 추출."""
+    """[5단계] 통합 전처리: 의도 분류, 쿼리 개선, 확장, 키워드 추출.
+
+    생애주기·정책 우선순위 태그 분류는 별도 분류기(classify_query_tags)로 분리돼 있어
+    여기서 unified_preprocess와 asyncio.gather 로 병렬 호출한다. 분류기 lifecycle_tags가
+    None이면(LLM/파싱 실패) 파이프라인이 기존 룰 기반 생애주기로 폴백하고, policy는 분류기
+    내부에서 excludes 무력화 + 룰 fallback까지 마쳐 반환한다.
+    """
     _t = time.monotonic()
-    result = await unified_preprocess(user_message, messages, use_rag=use_rag)
+    result, (lifecycle_tags, policy_priority_tag, household_tags) = await asyncio.gather(
+        unified_preprocess(user_message, messages, use_rag=use_rag),
+        classify_query_tags(user_message, messages),
+    )
     elapsed = round(time.monotonic() - _t, 3)
-    logger.info("[TIMING] unified_preprocess: %.3fs", elapsed)
+    logger.info(
+        "[TIMING] unified_preprocess(+tags): %.3fs | lifecycle=%s | policy=%s | household=%s",
+        elapsed, lifecycle_tags, policy_priority_tag, household_tags,
+    )
     return PreprocessResult(
         query=result.get("query", user_message),
         intent=result.get("intent", "general"),
@@ -187,7 +203,9 @@ async def run_unified_preprocess(
         keywords=result.get("keywords") or [],
         elapsed=elapsed,
         search_target=result.get("search_target"),
-        policy_priority_tag=result.get("policy_priority_tag"),
+        policy_priority_tag=policy_priority_tag,
+        lifecycle_tags=lifecycle_tags,
+        household_tags=household_tags,
         detail_requested=bool(result.get("detail_requested", False)),
         exclusion_intent=result.get("exclusion_intent", "NONE"),
         vector_query=result.get("vector_query") or result.get("reformed_query") or user_message,

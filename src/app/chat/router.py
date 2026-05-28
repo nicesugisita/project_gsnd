@@ -527,6 +527,8 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             llm_recommended_followup=llm_recommended_followup,
             search_target=getattr(preprocess, "search_target", None),
             policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
+            lifecycle_tags=getattr(preprocess, "lifecycle_tags", None),
+            household_tags=getattr(preprocess, "household_tags", None),
             excluded_chunk_ids=more_excluded_chunk_ids,
             excluded_service_names=more_excluded_service_names,
             llm_excluded_services=llm_excluded_services,

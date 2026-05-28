@@ -11,9 +11,8 @@
 1. 질의정제 + 표준어변환    → query
 2. 의도분류                  → intent, intent_reason
 3. 검색용 쿼리 재작성        → reformed_query (Query Rewriting)
-4. 정책 우선순위 태그 판정   → policy_priority_tag
-5. 답변 상세도 판정          → detail_requested
-6. 배제 의도 분석            → exclusion_intent, vector_query, must_not_keywords, anchor_entities
+4. 답변 상세도 판정          → detail_requested
+5. 배제 의도 분석            → exclusion_intent, vector_query, must_not_keywords, anchor_entities
 --------------------------------------
 
 ⚠️ 절대 규칙
@@ -356,46 +355,7 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
   → 좋은 reformed: "복지 추천" 또는 직전 대화의 대상·지역을 흡수
 
 ==================================================
-[4. 정책 우선순위 태그 판정]
-
-### 목적
-검색 전 정책 우선순위 보강이 필요한 질문군만 명시적으로 태그합니다.
-
-### 출력 필드
-- policy_priority_tag: `"implant"`, `"low_income"`, `"elderly_benefits"`, 또는 `null`
-
-### 판정 규칙
-- `implant`: 질문의 핵심이 임플란트 지원/보철 관련 지원일 때만 사용합니다.
-- `low_income`: 질문의 핵심이 저소득, 생계급여, 의료급여, 기초생활보장 계열일 때만 사용합니다.
-- `elderly_benefits`: 질문의 핵심이 노인 대상의 일반 복지 혜택 탐색일 때만 사용합니다.
-- `null`: 위 세 질문군이 아니거나, 노인 질문이더라도 특정 질환·신체 부위·치료·기능 문제 등 더 구체적인 주제가 핵심이면 반드시 `null`입니다.
-
-### 판정 우선순위(반드시 준수)
-1. 질문이 "포괄적 추천/탐색"인지 먼저 판단합니다.
-2. 포괄적 추천/탐색이면 정책군 태그를 부여합니다.
-3. 질문이 특정 질환/부위/치료 같은 세부 주제로 좁혀지면 정책군 태그를 부여하지 않고 `null`을 반환합니다.
-
-### 매우 중요
-- 단어가 포함됐다는 이유만으로 태그를 주지 마십시오.
-- 질문의 핵심 검색축이 그 정책군일 때만 태그를 줍니다.
-- 아래 예시는 그대로 따르십시오.
-- 예: `창원시 노인 복지 추천해줘` → `elderly_benefits`
-- 예: `창원시 노인 관절에 대한 복지 있어?` → `null`
-- 예: `창원 노인 복지 서비스 추천해줘` → `elderly_benefits`
-- 예: `창원 노인 복지 관절 관련 복지 추천해줘` → `null`
-- 예: `저소득 한부모 의료급여 지원이 뭐가 있어?` → `low_income`
-- 예: `임플란트 지원 대상 알려줘` → `implant`
-- 예: `장애인 의료비 지원 알려줘` → `null` (장애 카테고리, low_income 아님)
-- 예: `장애인 보조기기 지원` → `null`
-- 예: `창원 장애인 복지 추천해줘` → `null` (장애 카테고리, elderly_benefits/low_income 모두 아님)
-- 예: `장애아동수당` → `null`
-
-### 안전망 (참고)
-- 질문에 특정 질환·신체 부위·기능 문제가 핵심으로 포함되면 시스템이 사후에 태그를 무력화합니다.
-- 따라서 모델은 위 룰에 따라 자연스럽게 분류하되, 애매하면 `null`로 보수적으로 판정해도 됩니다.
-
-==================================================
-[5. 답변 상세도 판정]
+[4. 답변 상세도 판정]
 
 ### 목적
 사용자가 한두 문장의 간단한 안내(형식 A)를 원하는지,
@@ -433,7 +393,7 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
 - "더 자세하게 알려달라카이" (사투리) → true
 
 ==================================================
-[6. 배제 의도 분석]
+[5. 배제 의도 분석]
 
 ### 목적
 "X 외/말고/빼고/대신 Y" 같은 배제 표현을 감지하여
@@ -505,7 +465,6 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
   "reformed_query": "self-contained 단일 검색 쿼리",
   "expanded_queries": ["self-contained 단일 검색 쿼리"],
   "search_target": null,
-  "policy_priority_tag": null,
   "detail_requested": false,
   "exclusion_intent": "NONE",
   "vector_query": "self-contained 단일 검색 쿼리",
@@ -516,7 +475,6 @@ query 와 [이전 대화] 를 결합해 **독립적으로 검색 가능한 단�
 ※ 출력은 반드시 위 JSON 한 개만. JSON 외 설명·해설·마크다운 코드블록 절대 금지.
 ※ intent가 "search"이면 search_target은 "admin_local_office" | "welfare_facility" | "ambiguous" 중 하나(필수).
 ※ intent가 search가 아니면 search_target은 반드시 null.
-※ policy_priority_tag은 항상 포함하고, 값은 "implant" | "low_income" | "elderly_benefits" | null 중 하나.
 ※ detail_requested는 항상 포함하고, 값은 true | false 중 하나.
 ※ reformed_query는 단일 문자열. expanded_queries는 항상 [reformed_query] 와 동일한 단일 원소 리스트로 반환합니다 (호환성 유지). 여러 쿼리를 생성하거나 5개를 만들지 마십시오.
 ※ exclusion_intent는 항상 포함. NONE이면 vector_query=reformed_query, must_not_keywords=[], anchor_entities=[].

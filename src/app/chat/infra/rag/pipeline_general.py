@@ -80,6 +80,8 @@ async def process_rag_general(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
     more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
@@ -157,23 +159,29 @@ async def process_rag_general(
             _gen_city_filters = [s for s in _gen_normalized if s.startswith("경상남도 ")]
             gen_sigun_filters = list(dict.fromkeys(_gen_city_filters)) if _gen_city_filters else []
         gen_birth_year = _extract_birth_year_from_message(message)
-        gen_lifecycle = (
-            _birth_year_to_lifecycle(gen_birth_year)
-            if gen_birth_year
-            else _extract_lifecycle_from_message(message)
-        )
-        # 현재 메시지에서 생애주기 미감지 시 대화 히스토리에서 추출
-        if not gen_lifecycle and messages:
-            from app.chat.lifecycle import extract_lifecycle_from_history
-            gen_lifecycle = extract_lifecycle_from_history(messages)
-            if gen_lifecycle:
-                logger.debug(f"[RAG/general_v2] 히스토리에서 생애주기 추출: '{gen_lifecycle}'")
-        # HSHD_STTN_NM(가구상황) 추출 — (정규화값, 동의어 토큰 리스트)
-        gen_hshd_sttn, gen_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        # 생애주기: 분류기(precomputed)면 LLM 멀티태그, None(분류기 실패)이면 룰 폴백.
+        if precomputed_lifecycle_tags is not None:
+            gen_lifecycle = list(precomputed_lifecycle_tags)
+        else:
+            gen_lifecycle = (
+                _birth_year_to_lifecycle(gen_birth_year)
+                if gen_birth_year
+                else _extract_lifecycle_from_message(message)
+            )
+            if not gen_lifecycle and messages:
+                from app.chat.lifecycle import extract_lifecycle_from_history
+                gen_lifecycle = extract_lifecycle_from_history(messages)
+        # 가구상황: 분류기면 LLM 멀티태그(특정계층 list 또는 '일반가구'), None이면 룰 폴백.
+        # OKMS/GOV 레그에만 적용 — GSND 는 HOUSE_SITUATION 컬럼이 없음.
+        if precomputed_household_tags is not None:
+            _gen_hh = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            gen_hshd_sttn = _gen_hh if _gen_hh else "일반가구"
+            gen_hshd_synonyms = []
+        else:
+            gen_hshd_sttn, gen_hshd_synonyms = _extract_hshd_sttn_from_message(message)
         logger.debug(
             f"[RAG/general_v2] OKMS 필터 - sigun: {gen_sigun_filters}, "
-            f"lifecycle: '{gen_lifecycle}', hshd_sttn: '{gen_hshd_sttn}' "
-            f"(synonyms={gen_hshd_synonyms})"
+            f"lifecycle: {gen_lifecycle!r}, hshd_sttn: {gen_hshd_sttn!r} (synonyms={gen_hshd_synonyms})"
         )
 
         # OKMS 연도 필터 추출
@@ -658,7 +666,7 @@ async def process_rag_general(
             _final_user_msg, top_docs, temperature, _gen_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
-            lifecycle=gen_lifecycle,
+            lifecycle=", ".join(gen_lifecycle) if isinstance(gen_lifecycle, list) else (gen_lifecycle or ""),
             messages=messages,
             policy_priority_tag=precomputed_policy_priority_tag,
             user_region=user_region,

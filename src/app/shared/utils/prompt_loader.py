@@ -255,6 +255,11 @@ def load_unified_preprocessing_prompt() -> str:
     return _load_prompt_file('unified_preprocessing_prompt.txt')
 
 
+def load_lifecycle_classification_prompt() -> str:
+    """Load 생애주기 태그 분류 prompt — unified_preprocess와 분리된 단일-task 분류기."""
+    return _load_prompt_file('lifecycle_classification_prompt.txt')
+
+
 def load_next_intent_prompt() -> str:
     """Load next-turn intent classification prompt from file."""
     return _load_prompt_file('next_intent_prompt.txt')
