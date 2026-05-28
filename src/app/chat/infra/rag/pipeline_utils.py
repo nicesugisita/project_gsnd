@@ -10,7 +10,6 @@ from app.core.constants import ROLE_USER
 from app.core.config import Config
 from app.chat.infra.rag.policy_priority import (
     augment_okms_dual_query,
-    policy_extra_okms_searches,
     policy_supplement_welfare_queries,
     resolve_policy_boost_keywords,
 )
@@ -306,11 +305,6 @@ async def collect_okms_groupa_and_gov_docs(
     """OKMS GroupA + GOV_OKMS 병렬 수집 공통 실행기."""
     loop = asyncio.get_event_loop()
 
-    policy_extra_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)
-        if policy_search_boost_enabled
-        else []
-    )
     # OKMS Group A 듀얼 쿼리 쌍 (vector, keyword) — 정책 부스트 포함.
     # GOV_OKMS 도 동일 쿼리를 쓰도록 여기서 한 번 만들어 공유한다.
     ga_query_pairs = [
@@ -324,10 +318,6 @@ async def collect_okms_groupa_and_gov_docs(
     ga_pair_futures = [
         loop.run_in_executor(None, run_group_a, v, k) for v, k in ga_query_pairs
     ]
-    ga_policy_extra_futures = [
-        loop.run_in_executor(None, run_group_a, v, k)
-        for v, k in policy_extra_pairs
-    ]
 
     # GOV_OKMS: OKMS 와 동일한 검색쿼리(vector/keyword 레그 + 정책 부스트)로 검색한다.
     # (과거엔 명사 핵심어만·stopword 제거·anchor 제외했으나, OKMS 검색식과 동일화 요청으로 폐기.
@@ -335,7 +325,7 @@ async def collect_okms_groupa_and_gov_docs(
     #  트레이드오프: 전국 DB 라 anchor("기초연금"→「연금」)·일반어가 광역 매칭될 수 있음.)
     _gov_seen: set = set()
     gov_strings: List[str] = []
-    for vec, kw in [*ga_query_pairs, *policy_extra_pairs]:
+    for vec, kw in ga_query_pairs:
         for s in (vec, kw):
             s = (s or "").strip()
             if s and s not in _gov_seen:
@@ -349,14 +339,11 @@ async def collect_okms_groupa_and_gov_docs(
         await status_callback("문서를 검색하고 있습니다")
     all_results = await asyncio.gather(
         *ga_pair_futures,
-        *ga_policy_extra_futures,
         *gov_okms_futures,
     )
     n_core_ga = len(ga_pair_futures)
-    n_policy_x = len(ga_policy_extra_futures)
     ga_pair_results = all_results[:n_core_ga]
-    ga_policy_extra_results = all_results[n_core_ga : n_core_ga + n_policy_x]
-    gov_okms_results = all_results[n_core_ga + n_policy_x :]
+    gov_okms_results = all_results[n_core_ga:]
 
     ga_vector_results = [pair[1] for pair in ga_pair_results]
     ga_keyword_results = [pair[0] for pair in ga_pair_results]
@@ -379,14 +366,6 @@ async def collect_okms_groupa_and_gov_docs(
             logger.info("[%s] [GroupA] 트리플쿼리 #%d: %d개 문서", log_prefix, i, min(len(docs), per_query_limit))
         elif log_skip_empty_triple:
             logger.info("[%s] [GroupA] 트리플쿼리 #%d: 0개 문서", log_prefix, i)
-
-    for pair in ga_policy_extra_results:
-        if pair[1]:
-            okms_group_a_docs.extend(pair[1][:per_query_limit])
-        if pair[0]:
-            okms_group_a_docs.extend(pair[0][:per_query_limit])
-    if policy_extra_pairs:
-        logger.debug("[%s] 정책 검색 보강: GroupA 추가 %d쌍", log_prefix, len(policy_extra_pairs))
 
     gov_okms_docs: List[Dict[str, Any]] = []
     for i, docs in enumerate(gov_okms_results, 1):
@@ -426,29 +405,14 @@ async def collect_okms_groupa_fallback_docs(
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    fb_policy_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
-        if policy_search_boost_enabled
-        else []
-    )
-    ga_fb_extra_futures = [
-        loop.run_in_executor(None, run_group_a_fallback, v, k)
-        for v, k in fb_policy_pairs
-    ]
-    fb_results_all = await asyncio.gather(*ga_fb_futures, *ga_fb_extra_futures)
-    ga_fb_results = fb_results_all[: len(ga_fb_futures)]
-    ga_fb_extra_results = fb_results_all[len(ga_fb_futures) :]
+    fb_results_all = await asyncio.gather(*ga_fb_futures)
+    ga_fb_results = list(fb_results_all)
 
     fb_docs: List[Dict[str, Any]] = []
     for i, pair in enumerate(ga_fb_results, 1):
         if pair[1]:
             fb_docs.extend(pair[1][:per_query_limit])
         if tri_built[i - 1] and pair[0]:
-            fb_docs.extend(pair[0][:per_query_limit])
-    for pair in ga_fb_extra_results:
-        if pair[1]:
-            fb_docs.extend(pair[1][:per_query_limit])
-        if pair[0]:
             fb_docs.extend(pair[0][:per_query_limit])
     return fb_docs
 
@@ -477,13 +441,6 @@ async def collect_okms_groupa_and_gov_fallback_docs(
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    policy_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
-        if policy_search_boost_enabled
-        else []
-    )
-    fb_pairs.extend(policy_pairs)
-
     fb_pair_futures = [
         loop.run_in_executor(None, run_group_a, vec, kw)
         for vec, kw in fb_pairs

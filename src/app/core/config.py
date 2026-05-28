@@ -180,11 +180,6 @@ class Settings(BaseSettings):
     # 트레이스 출력 디렉토리. 없으면 자동 생성. JSONL: response_trace.jsonl, xlsx: response_trace.xlsx
     RESPONSE_TRACE_DIR: str = "log/response_trace"
 
-    # 정책 anchor 추가검색 토글. True 면 policy_priority_tag 별로 anchor 전용 OKMS/GOV
-    # 추가 검색쌍(keyword+vector)을 더 던져 해당 제도 문서를 풀에 확실히 넣는다.
-    # False 면 메인 듀얼(키워드1+벡터1)만 사용 — 검색 횟수↓. (메인 쿼리의 anchor 부스트는 유지)
-    POLICY_EXTRA_SEARCH_ENABLED: bool = False
-
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""
     MARINER_PORT: int = 5555
