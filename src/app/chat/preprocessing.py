@@ -384,7 +384,8 @@ async def unified_preprocess(
         logger.error("[UnifiedPreprocess] LLM 호출 실패: %s", e, exc_info=True)
         return _make_fallback(user_query)
 
-    query = parsed.get("query") or user_query
+    # 통합전처리 프롬프트에서 질의정제+표준어변환(작업1) 제거 — query 는 원문 user_query 그대로.
+    query = user_query
     reformed = parsed.get("reformed_query") or query
 
     intent = parsed.get("intent", "general")
