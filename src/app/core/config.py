@@ -153,13 +153,6 @@ class Settings(BaseSettings):
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
 
-    # Query Rewriting 모드 토글.
-    # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
-    # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
-    # rewrite 모드는 대화 맥락 흡수·모호함 해소·키워드 강화로 정밀도 ↑, Mariner 호출 수 ↓.
-    # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
-    QUERY_REWRITING_ENABLED: bool = True
-
     # 응답 트레이스 토글 — 매 응답 생성마다 (사용자 질문 / 참조문서 / 최종 프롬프트 / 응답 본문)
     # 을 JSONL + xlsx 두 파일에 기록한다. 디버그·QA 목적. 운영에선 비활성 권장.
     RESPONSE_TRACE_ENABLED: bool = False

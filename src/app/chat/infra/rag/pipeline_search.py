@@ -33,7 +33,6 @@ from .pipeline_utils import (
 )
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
-    expand_query,
     extract_triples,
 )
 from app.shared.utils.relevance_filter import filter_irrelevant_docs
@@ -120,14 +119,7 @@ async def process_rag_search(
                     len(expanded_queries),
                 )
             else:
-                if status_callback:
-                    await status_callback("최적의 답변방식을 찾고 있습니다")
-                _t = time.monotonic()
-                expanded_queries = await expand_query(reformed_query)
-                logger.info("[TIMING][search] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
-                if not expanded_queries:
-                    logger.warning("[RAG/search_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                    expanded_queries = [reformed_query]
+                expanded_queries = [reformed_query]
             if not expanded_queries:
                 expanded_queries = [reformed_query]
             logger.info(f"[RAG/search_v2] 확장 완료: {len(expanded_queries)}개 쿼리")

@@ -40,7 +40,6 @@ from app.chat.infra.rag import (
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
-from app.chat.routing import expand_query
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
@@ -219,14 +218,7 @@ async def process_rag_guide_recommend(
                 len(gr_expanded),
             )
         else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            gr_expanded = await expand_query(gr_expand_base)
-            logger.info("[TIMING][guide_recommend] StepA-1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not gr_expanded:
-                logger.warning("[RAG/guide_recommend_v2] 쿼리 확장 실패 - 기준 질의 사용")
-                gr_expanded = [gr_expand_base]
+            gr_expanded = [gr_expand_base]
         if not gr_expanded:
             gr_expanded = [gr_expand_base]
         logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")

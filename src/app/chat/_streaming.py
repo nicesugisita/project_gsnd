@@ -28,7 +28,6 @@ from ._pipeline_steps import (
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
-    run_extract_excluded_services,
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
@@ -578,18 +577,11 @@ async def _streaming_chat_flow(
                 logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (stream)")
             else:
                 yield build_status_message("질문을 재구성하고 있습니다")
-                # rewrite 모드: unified가 must_not_keywords를 함께 산출 → extract 호출 생략 (32B 1회 절약).
-                # expand 모드: 기존대로 extract LLM을 병렬 호출.
-                if Config.QUERY_REWRITING_ENABLED:
-                    pp = await run_unified_preprocess(
-                        user_message, chat_request.messages, use_rag
-                    )
-                    llm_excluded_services = list(pp.must_not_keywords or [])
-                else:
-                    pp, llm_excluded_services = await asyncio.gather(
-                        run_unified_preprocess(user_message, chat_request.messages, use_rag),
-                        run_extract_excluded_services(user_message, chat_request.messages, use_rag),
-                    )
+                # unified가 must_not_keywords를 함께 산출 → extract 호출 생략 (32B 1회 절약).
+                pp = await run_unified_preprocess(
+                    user_message, chat_request.messages, use_rag
+                )
+                llm_excluded_services = list(pp.must_not_keywords or [])
             _timings["t_unified_preprocess"] = pp.elapsed
             user_message = pp.query
             await _update_user_message(chat_request.messages, user_message)
