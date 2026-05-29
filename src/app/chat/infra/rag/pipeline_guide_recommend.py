@@ -787,7 +787,8 @@ async def process_rag_guide_recommend(
         # 키워드(+동의어)로 주제 무관 문서를 LLM 전에 컷한다. 태그 없는 대상/영역 질의(대학생·노인 등)는
         # 게이트를 걸지 않고 완화 선별 프롬프트(recall)에 맡긴다(과잉컷 방지). 환각도 원천 차단.
         # 전멸 방지: 매칭 0건이면 미적용(전량 유지).
-        if _apply_post_rerank_filter and _llm_select and precomputed_policy_priority_tag and gr_top_docs:
+        # 전용 플래그 GUIDE_TOPIC_GATE_ENABLED(기본 False)로 독립 제어 — 기본은 비활성.
+        if Config.GUIDE_TOPIC_GATE_ENABLED and _llm_select and precomputed_policy_priority_tag and gr_top_docs:
             from .variable_count import extract_topic_terms as _extract_topic_terms, topical_hit
             _gate_tags, _gate_boost_kw = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
             # 태그 키워드 동의어 갭 보강(예: implant 키워드에 틀니·의치보철 누락).

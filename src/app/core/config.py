@@ -124,11 +124,15 @@ class Settings(BaseSettings):
     # RRF 상위 N건을 그대로 최종응답 LLM에 넘겨, 관련 문서 선별을 LLM(선별 프롬프트)에 위임한다.
     GUIDE_LLM_SELECT_MAX_DOCS: int = 11   # LLM에 넘길 RRF 상위 문서 수(안전 cap)
 
-    # 리랭킹 후처리 필터(룰베이스): D-1.7 생애주기/가구 태그 하드가드 + D-1.75 주제어 게이트.
-    # False(기본)면 LLM 선별 경로에서 이 후처리를 전부 끄고 RRF 상위 N건을 그대로 LLM 선별에
-    # 위임한다(태그/주제어 불일치만으로 명백 관련 문서가 LLM 전에 탈락하는 recall 누수 제거).
-    # more_info 등 비-LLM선별(레거시) 경로는 영향 없음. True 면 기존 후처리 동작 복원.
+    # 리랭킹 후처리 — 태그 기반 하드가드(D-1.7 생애주기/가구). False(기본)면 LLM 선별 경로에서
+    # 이 태그 후처리를 끄고 RRF 상위 N건을 그대로 LLM 선별에 위임한다(태그 불일치만으로 명백
+    # 관련 문서가 LLM 전에 탈락하는 recall 누수 제거). more_info 등 비-LLM선별 경로는 영향 없음.
     GUIDE_POST_RERANK_FILTER_ENABLED: bool = False
+
+    # 리랭킹 후처리 — 주제어(topic-term) 게이트(D-1.75). 정책태그 좁은 제도 질의에 큐레이션
+    # 키워드+동의어로 주제 무관 문서를 LLM 전에 컷한다. False(기본)면 비활성 — recall 우선,
+    # 선별은 LLM 선별 프롬프트에 위임. True 면 좁은 정책질의 환각/off-topic 차단용으로 복원.
+    GUIDE_TOPIC_GATE_ENABLED: bool = False
 
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
