@@ -52,6 +52,8 @@ from .pipeline_utils import (
     collect_okms_groupa_and_gov_fallback_docs,
     filter_gov_okms_docs_by_lifecycle,
     prioritize_general_household,
+    query_mentions_disability,
+    exclude_disability_only_docs,
 )
 logger = logging.getLogger(__name__)
 
@@ -830,6 +832,20 @@ async def process_rag_guide_recommend(
                 "[RAG/guide_recommend_v2] 가변 개수: %d → %d건 (topic_terms=%s)",
                 _vc_before, len(gr_top_docs), _topic_terms,
             )
+
+        # Step D-1.9: 장애 미언급 질의에 장애인 전용 제도 하드 제외.
+        # 관련성 필터·일반가구 하드필터가 LLM 선별 경로에서 꺼져 있어, '거동 불편/무릎' 같은
+        # 표현이 끌어온 장애인 전용 제도(활동보조·보조기기·장애인연금 등)가 그대로 노출되던 누수 차단.
+        # 장애 단서는 사용자 발화(현재+히스토리)로만 판정 — 기계 생성 reformed_query/오태깅 가구분류에
+        # 의존하지 않는다('거동 불편'을 장애인으로 오인하던 게 원인이므로).
+        if gr_top_docs:
+            _user_disability_text = " ".join(
+                m.get("content", "") for m in (messages or []) if m.get("role") == "user"
+            ) + " " + (message or "")
+            if not query_mentions_disability(_user_disability_text):
+                gr_top_docs = exclude_disability_only_docs(
+                    gr_top_docs, log_prefix="[RAG/guide_recommend_v2]"
+                )
 
         # Step D-2: 웨이트 상위 30% → 최신순 / 나머지 → 웨이트 내림차순
         gr_top_docs = sort_weight_top30_then_year(gr_top_docs)
