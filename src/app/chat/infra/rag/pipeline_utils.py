@@ -283,6 +283,81 @@ def prioritize_general_household(
     return result
 
 
+# 명시적 '장애' 질의 단서. '거동 불편/무릎' 같은 일반 이동·건강 표현은 제외한다
+# — 그 오인이 비장애 노인 질의에 장애인 전용 제도를 끌어오던 핵심 원인이었다.
+_DISABILITY_QUERY_MARKERS: tuple[str, ...] = (
+    "장애",       # 장애인/발달장애/지체장애/시각장애/장애등급 등 '장애' 복합어 전부 포함
+    "장애우",
+    "뇌병변",     # '장애' 미포함이지만 장애 유형
+    "자폐",
+)
+
+# 사업명에 '장애인'이 있어도 아래 대상층 표현이 함께 있으면 장애인 전용으로 보지 않는다
+# (예: '독거노인·장애인 응급안전안심서비스'는 노인 대상이기도 함).
+_GENERAL_POP_NAME_MARKERS: tuple[str, ...] = (
+    "노인", "어르신", "아동", "청소년", "청년", "임산", "산모",
+    "다문화", "다자녀", "한부모", "누구나", "주민", "가족",
+)
+
+
+def query_mentions_disability(text: str) -> bool:
+    """질의 텍스트에 명시적 '장애' 단서가 있는지 판정.
+
+    '거동 불편/무릎' 등 일반 이동·건강 표현은 장애 단서로 보지 않는다(비장애 노인
+    질의에 장애인 전용 제도가 유입되던 오인의 핵심 원인).
+    """
+    t = text or ""
+    return any(m in t for m in _DISABILITY_QUERY_MARKERS)
+
+
+def exclude_disability_only_docs(
+    docs: List[Dict[str, Any]],
+    *,
+    log_prefix: str = "[RAG]",
+) -> List[Dict[str, Any]]:
+    """장애인 전용 제도를 결과에서 하드 제외 (질의에 장애 단서가 없을 때만 호출).
+
+    판정(보수적 — 노인·일반 대상 제도를 잘못 떨구지 않도록):
+    - HOUSE_SITUATION 에 '장애인' 포함 + '일반가구' 미포함 → 장애인 전용 → 제외.
+    - HOUSE_SITUATION 에 다른 값(일반가구/저소득 등)만 있으면 → 유지.
+    - HOUSE_SITUATION 이 비어 있고 사업명에 '장애인'이 있으며 다른 대상층 표현
+      (노인/아동 등)이 없으면 → 전용으로 간주해 제외(가구상황 미색인 문서 보강).
+    """
+    def _is_disability_only(d: Dict[str, Any]) -> bool:
+        hs = str(d.get("HOUSE_SITUATION", "") or "")
+        if "장애인" in hs:
+            return "일반가구" not in hs
+        if hs.strip():
+            return False  # 다른 특정계층/일반 — 장애 전용 아님
+        # HOUSE_SITUATION 미색인 → 사업명 보강(보수적)
+        name = (
+            str(d.get("NAME", "") or "").strip()
+            or str(d.get("SERVICE_NAME", "") or "").strip()
+            or str(d.get("BUSINESS_NAME", "") or "").strip()
+        )
+        if "장애인" not in name:
+            return False
+        return not any(m in name for m in _GENERAL_POP_NAME_MARKERS)
+
+    kept: List[Dict[str, Any]] = []
+    removed: List[str] = []
+    for d in docs:
+        if _is_disability_only(d):
+            if len(removed) < 8:
+                removed.append(
+                    str(d.get("NAME", "") or d.get("SERVICE_NAME", "") or d.get("CHUNK_ID", "") or "?")
+                )
+        else:
+            kept.append(d)
+
+    if removed:
+        logger.info(
+            "%s 장애인 전용 제외: %d → %d건 (제거 %d, 샘플=%s)",
+            log_prefix, len(docs), len(kept), len(docs) - len(kept), removed,
+        )
+    return kept
+
+
 def _okms_dual_query_for_search(
     vector_q: str,
     keyword_q: str,
