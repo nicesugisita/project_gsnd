@@ -104,6 +104,34 @@ def test_pgh_min_keep_backfill():
     assert len(res) == 2
 
 
+def test_pgh_backfill_to_target_demotes_not_drops():
+    # 완화 모드(LLM 선별): 태그 불일치 부적합도 drop 하지 않고 적합 뒤로 밀어 target 까지 유지.
+    # 노인 질의 → 적합 {1,2}, 부적합 {3}. target=3 이면 셋 다 유지(3 은 맨 뒤).
+    res = prioritize_general_household(
+        _pool(), target=3, min_keep=1, require_general=False,
+        lifecycle=["노인"], backfill_to_target=True,
+    )
+    ids = [d["CHUNK_ID"] for d in res]
+    assert ids == ["1", "2", "3"]   # 적합 우선(WEIGHT 순) + 부적합 demote
+
+
+def test_pgh_backfill_to_target_keeps_fit_priority_within_cap():
+    # target 이 풀보다 작으면 적합이 cap 을 우선 차지하고 부적합은 잘린다(적합 우선 보존).
+    res = prioritize_general_household(
+        _pool(), target=2, min_keep=1, require_general=False,
+        lifecycle=["노인"], backfill_to_target=True,
+    )
+    ids = {d["CHUNK_ID"] for d in res}
+    assert ids == {"1", "2"}        # 적합 2건이 cap 채움, 부적합 3 은 자연 탈락
+
+
+def test_pgh_default_still_hard_drops():
+    # 기본 모드(backfill_to_target=False)는 기존대로 부적합 하드드롭 유지.
+    res = prioritize_general_household(_pool(), target=8, min_keep=1, require_general=False, lifecycle=["노인"])
+    ids = {d["CHUNK_ID"] for d in res}
+    assert "3" not in ids
+
+
 # --- _normalize_household_tags (가구상황 7종 화이트리스트) ---
 
 def test_household_whitelist_and_dedup():

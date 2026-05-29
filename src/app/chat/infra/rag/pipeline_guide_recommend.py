@@ -750,7 +750,12 @@ async def process_rag_guide_recommend(
         # 명시 가구상황 질의(gr_hshd_sttn != '일반가구')면 가구상황 제외는 건너뛰고 생애주기만 적용.
         _GR_GENERAL_MIN_KEEP = 5
         _gr_require_general = (gr_hshd_sttn == "일반가구")
-        if gr_top_docs and (_gr_require_general or lifecycle_tags):
+        # 리랭킹 후처리(D-1.7/D-1.75) 적용 여부:
+        # - 기본(플래그 OFF) + LLM 선별 경로 → 후처리 제거(RRF 상위 N건을 그대로 LLM 선별에 위임).
+        # - more_info 등 비-LLM선별(레거시) 경로 → 기존 후처리 유지.
+        # - 플래그 ON → 모든 경로에서 기존 후처리 복원.
+        _apply_post_rerank_filter = Config.GUIDE_POST_RERANK_FILTER_ENABLED or not _llm_select
+        if _apply_post_rerank_filter and gr_top_docs and (_gr_require_general or lifecycle_tags):
             # LLM 선별 모드: 'RRF 상위 N건만' 보장 — _survivors 로 풀을 다시 키우지 않고
             # 현재 gr_top_docs(=RRF 상위)만 생애주기/가구 하드필터에 태운다. target 도 cap 동일.
             if _llm_select:
@@ -768,6 +773,9 @@ async def process_rag_guide_recommend(
             gr_top_docs = prioritize_general_household(
                 _pool, target=_pp_target, min_keep=_GR_GENERAL_MIN_KEEP,
                 require_general=_pp_require_general, lifecycle=lifecycle_tags or None,
+                # LLM 선별 모드: 생애주기 태그 불일치만으로 명백 관련 문서를 LLM 전에
+                # 하드드롭하지 않도록 demote-not-drop(적합 우선 + target 까지 백필).
+                backfill_to_target=_llm_select,
             )
             logger.info(
                 f"[RAG/guide_recommend_v2] 적합 후처리: {_before} → {len(gr_top_docs)}건 "
@@ -779,7 +787,7 @@ async def process_rag_guide_recommend(
         # 키워드(+동의어)로 주제 무관 문서를 LLM 전에 컷한다. 태그 없는 대상/영역 질의(대학생·노인 등)는
         # 게이트를 걸지 않고 완화 선별 프롬프트(recall)에 맡긴다(과잉컷 방지). 환각도 원천 차단.
         # 전멸 방지: 매칭 0건이면 미적용(전량 유지).
-        if _llm_select and precomputed_policy_priority_tag and gr_top_docs:
+        if _apply_post_rerank_filter and _llm_select and precomputed_policy_priority_tag and gr_top_docs:
             from .variable_count import extract_topic_terms as _extract_topic_terms, topical_hit
             _gate_tags, _gate_boost_kw = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
             # 태그 키워드 동의어 갭 보강(예: implant 키워드에 틀니·의치보철 누락).

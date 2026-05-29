@@ -217,6 +217,7 @@ def prioritize_general_household(
     *,
     require_general: bool = True,
     lifecycle: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
+    backfill_to_target: bool = False,
 ) -> List[Dict[str, Any]]:
     """가구상황·생애주기 적합 문서를 우선하고 부적합 문서를 제외하는 최종 후처리.
 
@@ -235,6 +236,11 @@ def prioritize_general_household(
         min_keep: 최소 보장 건수 — 적합 문서가 이보다 적으면 부적합분에서 백필.
         require_general: 일반가구 태그 요구 여부 (명시 가구상황 질의면 False).
         lifecycle: 요구 생애주기 ('' / None 이면 생애주기 미적용).
+        backfill_to_target: True 면 부적합 문서를 '제외'하지 않고 적합 문서 뒤로 밀어
+            target 까지 백필(demote-not-drop). 적합 우선순위(precision)는 유지하되
+            태그 불일치만으로 명백 관련 문서가 하드드롭되는 recall 손실을 막는다.
+            (LLM 선별 모드: 어차피 RRF 상위 N건을 LLM 에 넘겨 선별하므로 컷이 아니라
+             재정렬만 의도 — 골든이 태그 불일치로 LLM 전에 사라지는 누수 차단.)
     """
     # lifecycle 은 str 또는 List[str](멀티태그). 파이프라인 라벨("노인")과 문서 LIFE_CYCLE
     # 표준값("노년")이 다르므로 유의어 양방향 확장 후 any-of 로 비교한다(미매핑 시 노인 질의에서
@@ -269,8 +275,11 @@ def prioritize_general_household(
     unfit = sorted([d for d in pool if not _fit(d)], key=_w, reverse=True)
 
     result = fit[:target]
-    if len(result) < min_keep:
-        result += unfit[: max(0, min_keep - len(result))]
+    # 완화 모드: 부적합을 제외하지 않고 적합 뒤로 밀어 target 까지 백필(demote-not-drop).
+    # 기존 모드: 적합이 min_keep 미달일 때만 부적합으로 백필(하드드롭 유지).
+    backfill_floor = target if backfill_to_target else min_keep
+    if len(result) < backfill_floor:
+        result += unfit[: max(0, backfill_floor - len(result))]
     return result
 
 
