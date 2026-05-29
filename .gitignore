@@ -99,3 +99,14 @@ _test_response.json
 _test_response_v4.json
 _test_response_v5.json
 
+# ─── Local QA analysis scripts & results (one-off, 로컬 전용) ──
+tests/qual_*.py
+tests/build_*.py
+tests/postfilter_loss.py
+tests/answer_quality_probe.py
+tests/llm_eval_results/
+
+# ─── Local planning / scratch docs ────────────────────────────
+SEARCH_RECALL_PLAN.md
+snug-leaping-dolphin.md
+
