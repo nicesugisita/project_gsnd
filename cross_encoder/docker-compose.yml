@@ -1,0 +1,29 @@
+services:
+  cross-encoder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cross-encoder-reranker
+    restart: always
+    mem_limit: 8g
+    ports:
+      - "7200:7200"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - /data/cross-encoder/cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7200/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3

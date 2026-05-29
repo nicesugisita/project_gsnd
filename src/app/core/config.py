@@ -134,6 +134,15 @@ class Settings(BaseSettings):
     # 선별은 LLM 선별 프롬프트에 위임. True 면 좁은 정책질의 환각/off-topic 차단용으로 복원.
     GUIDE_TOPIC_GATE_ENABLED: bool = False
 
+    # ── Cross-Encoder 리랭커 ──────────────────────────────────────────────────
+    # 검색 결과 리랭킹을 RRF(rank 융합) 대신 cross-encoder(query·본문 관련성 점수)로 수행.
+    # False(기본)면 기존 RRF 경로 유지. True 면 후보를 합쳐 cross_encoder 서비스(/rerank)로
+    # 점수 정렬. 서비스 다운/타임아웃 시 WEIGHT 정렬로 graceful degrade.
+    CROSS_ENCODER_ENABLED: bool = False
+    CROSS_ENCODER_URL: str = "http://localhost:7200"
+    CROSS_ENCODER_TIMEOUT: float = 10.0
+    CROSS_ENCODER_MAX_DOC_CHARS: int = 1024   # 본문 truncation (모델 입력 길이 제한)
+
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
     DEEPSERVER_TIMEOUT: float = 30.0

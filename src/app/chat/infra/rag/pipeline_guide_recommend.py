@@ -44,6 +44,7 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
+from app.chat.infra.rag.cross_encoder_client import rerank_by_cross_encoder
 from .policy_priority import resolve_policy_boost_keywords
 from .variable_count import extract_topic_terms, select_variable_count
 from .pipeline_utils import (
@@ -450,12 +451,16 @@ async def process_rag_guide_recommend(
         # 후보 풀을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
         _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
         _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
-        # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
-        # 쿼터(OKMS 5 + GOV 3) 미보장 — 융합 순위 상위 건 선택, 나머지는 reserve.
-        # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
-        _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-        _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-        _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
+        # 쿼터(OKMS 5 + GOV 3) 미보장 — 리랭킹 순위 상위 건 선택, 나머지는 reserve.
+        if Config.CROSS_ENCODER_ENABLED:
+            # 생존 후보를 합쳐 cross-encoder 관련성 점수로 단일 정렬(풀 구분 불필요).
+            _fused = await rerank_by_cross_encoder(reformed_query, _deduplicate_documents(_survivors))
+        else:
+            # 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+            # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
+            _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
         # LLM 선별 모드: RRF 상위 GUIDE_LLM_SELECT_MAX_DOCS 건을 그대로 LLM에 전달.
         _cap = Config.GUIDE_LLM_SELECT_MAX_DOCS if _llm_select else (_GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N)
         gr_top_docs = _fused[:_cap]

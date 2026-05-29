@@ -22,6 +22,7 @@ from app.chat.infra.rag import (
     _build_search_queries,
 )
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
+from app.chat.infra.rag.cross_encoder_client import rerank_by_cross_encoder
 from .common import (
     dedupe_cap_expanded_queries,
     apply_policy_priority_to_documents,
@@ -228,23 +229,32 @@ async def process_rag_search(
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
         if _both_pool:
-            # 풀별로 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
-            # RRF는 입력 리스트가 이미 정렬돼 있다고 가정하므로 풀별 사전 정렬이 필요하다.
-            center_sorted = sorted(
-                _deduplicate_documents(center_docs),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            tel_sorted = sorted(
-                _deduplicate_documents(tel_docs),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            top_docs = rerank_by_rrf(center_sorted, tel_sorted)
-            logger.info(
-                "[RAG/search_v2] 최종 선택(RRF 융합): %d개 (center=%d, tel=%d)",
-                len(top_docs), len(center_sorted), len(tel_sorted),
-            )
+            if Config.CROSS_ENCODER_ENABLED:
+                # 두 풀을 합쳐 dedup 후 cross-encoder 관련성 점수로 정렬(풀 구분·WEIGHT 스케일 불필요).
+                merged = _deduplicate_documents(center_docs + tel_docs)
+                top_docs = await rerank_by_cross_encoder(reformed_query, merged)
+                logger.info(
+                    "[RAG/search_v2] 최종 선택(cross-encoder): %d개 (center=%d, tel=%d)",
+                    len(top_docs), len(center_docs), len(tel_docs),
+                )
+            else:
+                # 풀별로 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+                # RRF는 입력 리스트가 이미 정렬돼 있다고 가정하므로 풀별 사전 정렬이 필요하다.
+                center_sorted = sorted(
+                    _deduplicate_documents(center_docs),
+                    key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                    reverse=True,
+                )
+                tel_sorted = sorted(
+                    _deduplicate_documents(tel_docs),
+                    key=lambda x: float(x.get("WEIGHT", 0) or 0),
+                    reverse=True,
+                )
+                top_docs = rerank_by_rrf(center_sorted, tel_sorted)
+                logger.info(
+                    "[RAG/search_v2] 최종 선택(RRF 융합): %d개 (center=%d, tel=%d)",
+                    len(top_docs), len(center_sorted), len(tel_sorted),
+                )
         else:
             top_docs = sorted(
                 _deduplicate_documents(all_docs),
