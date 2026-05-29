@@ -55,7 +55,6 @@ from ._pipeline_steps import (
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
-    run_extract_excluded_services,
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
@@ -476,18 +475,11 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (non-stream)")
         else:
             # 짧은 후속·되묻기 재구성 직후에도 항상 전체 메시지를 넘김 → 스레드 길이(로그인/비로그인)와 무관하게 동일 형식 입력
-            # rewrite 모드: unified_preprocess가 must_not_keywords/exclusion_intent를 함께 산출 → 별도 extract 호출 생략 (32B 1회 절약).
-            # expand 모드: unified는 배제 분석을 안 하므로 기존대로 extract LLM과 병렬 호출.
-            if Config.QUERY_REWRITING_ENABLED:
-                preprocess = await run_unified_preprocess(
-                    user_message, chat_request.messages, use_rag
-                )
-                llm_excluded_services = list(preprocess.must_not_keywords or [])
-            else:
-                preprocess, llm_excluded_services = await asyncio.gather(
-                    run_unified_preprocess(user_message, chat_request.messages, use_rag),
-                    run_extract_excluded_services(user_message, chat_request.messages, use_rag),
-                )
+            # unified_preprocess가 must_not_keywords/exclusion_intent를 함께 산출 → 별도 extract 호출 생략 (32B 1회 절약).
+            preprocess = await run_unified_preprocess(
+                user_message, chat_request.messages, use_rag
+            )
+            llm_excluded_services = list(preprocess.must_not_keywords or [])
 
         # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
         # (MORE_DETAIL은 기존 축 유지)
@@ -527,6 +519,8 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
             llm_recommended_followup=llm_recommended_followup,
             search_target=getattr(preprocess, "search_target", None),
             policy_priority_tag=getattr(preprocess, "policy_priority_tag", None),
+            lifecycle_tags=getattr(preprocess, "lifecycle_tags", None),
+            household_tags=getattr(preprocess, "household_tags", None),
             excluded_chunk_ids=more_excluded_chunk_ids,
             excluded_service_names=more_excluded_service_names,
             llm_excluded_services=llm_excluded_services,

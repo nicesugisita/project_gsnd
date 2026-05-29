@@ -49,6 +49,28 @@ def _map_lifecycle_for_gov_okms(lifecycle: Optional[str]) -> Optional[str]:
     return _LIFECYCLE_MAP.get(lifecycle, lifecycle)
 
 
+# 노인↔노년 처럼 컬렉션 표기가 다른 라벨의 역방향 매핑.
+_LIFECYCLE_REVERSE_MAP: Dict[str, str] = {v: k for k, v in _LIFECYCLE_MAP.items()}
+
+
+def _expand_lifecycle_for_gov_okms(lifecycle: Optional[str]) -> List[str]:
+    """파이프라인 라벨 → GOV_OKMS 매칭 후보(유의어 양방향 확장).
+
+    예: '노인' → ['노인','노년'], '노년' → ['노년','노인'], '아동' → ['아동'].
+    표기가 어느 쪽으로 색인됐든 검색·후처리에서 함께 매칭되도록 두 표기를 모두 반환한다.
+    """
+    if not lifecycle:
+        return []
+    s = str(lifecycle).strip()
+    if not s:
+        return []
+    out = [s]
+    for cand in (_LIFECYCLE_MAP.get(s), _LIFECYCLE_REVERSE_MAP.get(s)):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
 def _build_gov_okms_document_name(doc: Dict[str, Any]) -> str:
     """GOV_OKMS 문서의 UI 표시용 이름 (SERVICE_NAME 우선, 없으면 RESPONSIBLE_MINISTRY)"""
     name = str(doc.get("SERVICE_NAME", "") or "").strip()
@@ -60,7 +82,7 @@ def _build_gov_okms_document_name(doc: Dict[str, Any]) -> str:
 def query_gov_okms_documents(
     search_string: str,
     collection: str = None,
-    lifecycle_filter: Optional[str] = None,
+    lifecycle_filter: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
     sigun_filters: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
     excluded_business_keywords: Optional[List[str]] = None,
@@ -91,9 +113,16 @@ def query_gov_okms_documents(
     if collection is None:
         collection = Config.RAG_GOV_OKMS_COLLECTION
 
-    mapped_lifecycle = _map_lifecycle_for_gov_okms(lifecycle_filter)
-    if mapped_lifecycle != lifecycle_filter:
-        logger.debug(f"[GOV_OKMS] lifecycle 매핑: '{lifecycle_filter}' → '{mapped_lifecycle}'")
+    # lifecycle_filter 는 str 또는 List[str]. 각 태그를 GOV_OKMS LIFE_CYCLE 매칭 후보로
+    # 유의어 양방향 확장(노인↔노년). HASANY 가 어느 표기든 매칭하도록 둘 다 포함.
+    _lc_in = [lifecycle_filter] if isinstance(lifecycle_filter, str) else list(lifecycle_filter or [])
+    mapped_lifecycle: List[str] = []
+    for v in _lc_in:
+        if v and str(v).strip():
+            mapped_lifecycle.extend(_expand_lifecycle_for_gov_okms(v))
+    mapped_lifecycle = [m for m in dict.fromkeys(mapped_lifecycle) if m]
+    if mapped_lifecycle:
+        logger.debug(f"[GOV_OKMS] lifecycle 매핑: {lifecycle_filter} → {mapped_lifecycle}")
 
     # queryset_okms.py와 동일 패턴: "경상남도" 제외한 실제 시군 목록
     sigun_scriptlet_values = [
@@ -169,7 +198,7 @@ def query_gov_okms_documents(
             jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_KO",   2,  ks, 0.3),            #   텍스트 키워드
             jpkg_query.WhereSet(OP_OR),                             #   OR
-            jpkg_query.WhereSet("SERVICE_NAME_MI", 2,  ks, 0.3),                 #   서비스명 벡터
+            jpkg_query.WhereSet("SERVICE_NAME_MI", 96, ks, 0.3),                 #   서비스명 벡터
             jpkg_query.WhereSet(OP_OR),                             #   OR
             jpkg_query.WhereSet("TEXT_CHUNK_MI",   96, ks, 0.3),            #   텍스트 벡터
         ]
@@ -201,19 +230,24 @@ def query_gov_okms_documents(
 
         where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))          # )
 
+        # LIFE_CYCLE 소프트 부스트(멀티태그 OR). 하드 OP_AND → OP_WEIGHTAND (배제 없이 순위만).
         if mapped_lifecycle:
+            _lc_joined = " ".join(mapped_lifecycle)
             where_set_array += [
-                jpkg_query.WhereSet(OP_AND),
-                jpkg_query.WhereSet("LIFE_CYCLE", 34, mapped_lifecycle, 0),
+                jpkg_query.WhereSet(OP_WEIGHTAND),
+                jpkg_query.WhereSet("LIFE_CYCLE", 34, _lc_joined, MARINER_WEIGHT_MED),
             ]
 
         # HOUSE_SITUATION(가구상황) 소프트 부스트 — 하드필터(OP_AND must-match)가 아니라
         # OP_WEIGHTAND 로 좌측 결과를 보존하고 일반가구 등 매칭 문서에만 가중치를 준다.
         # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
-        if hshd_sttn_filter:
+        # hshd_sttn_filter 는 str 또는 List[str](멀티 가구상황). 공백 join → HASANY OR 매칭.
+        _hh_vals = [hshd_sttn_filter] if isinstance(hshd_sttn_filter, str) else list(hshd_sttn_filter or [])
+        _hh_vals = [str(v).strip() for v in _hh_vals if v and str(v).strip()]
+        if _hh_vals:
             where_set_array += [
                 jpkg_query.WhereSet(OP_WEIGHTAND),
-                jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
+                jpkg_query.WhereSet("HOUSE_SITUATION", 34, " ".join(dict.fromkeys(_hh_vals)), MARINER_WEIGHT_MED),
             ]
 
         # CHUNK_ID(SERVICE_ID) 제외 필터 (예제 패턴: NOT + EXACT 반복)

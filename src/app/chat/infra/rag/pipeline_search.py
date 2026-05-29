@@ -33,10 +33,8 @@ from .pipeline_utils import (
 )
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
-    expand_query,
     extract_triples,
 )
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +83,8 @@ async def process_rag_search(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -118,14 +118,7 @@ async def process_rag_search(
                     len(expanded_queries),
                 )
             else:
-                if status_callback:
-                    await status_callback("최적의 답변방식을 찾고 있습니다")
-                _t = time.monotonic()
-                expanded_queries = await expand_query(reformed_query)
-                logger.info("[TIMING][search] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
-                if not expanded_queries:
-                    logger.warning("[RAG/search_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                    expanded_queries = [reformed_query]
+                expanded_queries = [reformed_query]
             if not expanded_queries:
                 expanded_queries = [reformed_query]
             logger.info(f"[RAG/search_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
@@ -234,7 +227,7 @@ async def process_rag_search(
             )
 
         logger.debug("-----------[RAG/search_v2 Step5 top_docs 확정 시작]-----------")
-        if Config.RRF_FUSION_ENABLED and _both_pool:
+        if _both_pool:
             # 풀별로 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
             # RRF는 입력 리스트가 이미 정렬돼 있다고 가정하므로 풀별 사전 정렬이 필요하다.
             center_sorted = sorted(
@@ -277,25 +270,8 @@ async def process_rag_search(
             log_prefix="[RAG/search_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if search_pool_tag == "our_region_tel":
-            logger.info(
-                "[RAG/search_v2] 단일 블록 OUR_REGION_TEL — 관련성 LLM 필터 생략 (%d건 유지)",
-                len(top_docs),
-            )
-            logger.info("[TIMING][search] Step6 관련성 필터: 생략 (0s)")
-        elif Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(
-                reformed_query,
-                top_docs,
-                sigun_filters=search_sigun_filters,
-                max_judgment_docs=-1,
-            )
-            logger.info("[TIMING][search] Step6 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t_ref)
-            logger.info(f"[RAG/search_v2] 관련성 필터 후: {len(top_docs)}개 문서")
-        else:
-            # search: 필터 OFF 시 cap 없이 dedupe·정렬된 결과 전부 반환 (시설/연락처 조회 특성상 누락 방지)
-            logger.info("[RAG/search_v2] Step6 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — %d건 전체 반환", len(top_docs))
-        logger.debug("-----------[RAG/search_v2 Step6 관련성 필터 끝]-----------")
+        # 관련성 필터 없음 — dedupe·정렬된 결과를 cap 없이 전부 반환 (시설/연락처 조회 누락 방지)
+        logger.info("[RAG/search_v2] Step6 — %d건 전체 반환 (관련성 필터 미적용)", len(top_docs))
 
         if excluded_chunk_ids or excluded_service_names:
             from .common import filter_excluded_docs

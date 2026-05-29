@@ -180,7 +180,7 @@ def _query_dual_documents(
     conv_id: Optional[str] = None,
     year_filters: Optional[List[str]] = None,
     sigun_filters: Optional[List[str]] = None,
-    lifecycle_filter: Optional[str] = None,
+    lifecycle_filter: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,
@@ -394,11 +394,16 @@ def _query_dual_documents(
                         where_set_array.append(jpkg_query.WhereSet("SIGUN", OP_INT_SUMMATION, sv, 0))
                     where_set_array.append(jpkg_query.WhereSet(OP_BRACE_CLOSE))  # )
 
-            # LIFE_CYCLE 스크립틀릿 필터
-            if lifecycle_filter:
+            # LIFE_CYCLE 소프트 부스트 (멀티태그 OR): lifecycle_filter 는 str 또는 List[str].
+            # op=34(HASANY)가 공백 join 토큰 중 하나라도 매칭 → 태그 OR. 하드 OP_AND 가 아니라
+            # OP_WEIGHTAND 로 후보를 배제하지 않고 순위만 올린다(생애주기 미일치 문서도 생존).
+            _lc_vals = [lifecycle_filter] if isinstance(lifecycle_filter, str) else list(lifecycle_filter or [])
+            _lc_vals = [str(v).strip() for v in _lc_vals if v and str(v).strip()]
+            if _lc_vals:
+                _lc_joined = " ".join(dict.fromkeys(_lc_vals))
                 where_set_array += [
-                    jpkg_query.WhereSet(OP_AND),
-                    jpkg_query.WhereSet("LIFE_CYCLE", 34, lifecycle_filter, 0),
+                    jpkg_query.WhereSet(OP_WEIGHTAND),
+                    jpkg_query.WhereSet("LIFE_CYCLE", 34, _lc_joined, MARINER_WEIGHT_MED),
                 ]
 
             # HOUSE_SITUATION(가구상황) 소프트 부스트
@@ -406,10 +411,13 @@ def _query_dual_documents(
             # (OP_HASANY|QUASI_SYNONYM)로 토큰 포함 매칭하되, OP_AND must-match 가 아니라
             # OP_WEIGHTAND 로 좌측 결과를 보존하고 매칭 문서에만 가중치를 준다.
             # (기본값 "일반가구"가 적용돼도 저소득 등 특정계층 제도를 배제하지 않고 순위만 낮춘다)
-            if hshd_sttn_filter:
+            # hshd_sttn_filter 는 str 또는 List[str](멀티 가구상황). 공백 join → HASANY OR 매칭.
+            _hh_vals = [hshd_sttn_filter] if isinstance(hshd_sttn_filter, str) else list(hshd_sttn_filter or [])
+            _hh_vals = [str(v).strip() for v in _hh_vals if v and str(v).strip()]
+            if _hh_vals:
                 where_set_array += [
                     jpkg_query.WhereSet(OP_WEIGHTAND),
-                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, hshd_sttn_filter, MARINER_WEIGHT_MED),
+                    jpkg_query.WhereSet("HOUSE_SITUATION", 34, " ".join(dict.fromkeys(_hh_vals)), MARINER_WEIGHT_MED),
                 ]
 
             # CHUNK_ID 제외 필터 (예제 패턴: NOT + EXACT 반복)
@@ -596,7 +604,7 @@ def query_group_a_documents(
     conv_id: Optional[str] = None,
     year_filters: Optional[List[str]] = None,
     sigun_filters: Optional[List[str]] = None,
-    lifecycle_filter: Optional[str] = None,
+    lifecycle_filter: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
     hshd_sttn_filter: Optional[str] = None,
     hshd_sttn_synonyms: Optional[List[str]] = None,
     excluded_chunk_ids: Optional[List[str]] = None,

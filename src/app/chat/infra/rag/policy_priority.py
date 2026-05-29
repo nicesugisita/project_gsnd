@@ -607,7 +607,7 @@ def augment_okms_dual_query(
 
     트리플이 비어 있던 행을 건드리며 keyword 레그만 채우면, 수집 루프의 tri_built
     인덱스와 맞지 않아 키워드 결과가 버려질 수 있으므로, keyword 보강은 기존
-    트리플 문자열이 있을 때만 한다. 빈 트리플 레그 보강은 `policy_extra_okms_searches`.
+    트리플 문자열이 있을 때만 한다.
     """
     tags, kws = resolve_policy_boost_keywords(policy_priority_tag)
     vec = (vector_q or "").strip()
@@ -642,52 +642,6 @@ def augment_okms_dual_query(
             kw = f"{kw} {' '.join(extra)}".strip()
 
     return vec, kw
-
-
-def policy_extra_okms_searches(policy_priority_tag: Any, reformed_query: str) -> List[Tuple[str, str]]:
-    """정책 태그별 OKMS Group A 추가 검색 (vector, keyword) 쌍 — 빈 트리플·약한 검색 보강.
-
-    vector 컴포넌트는 임베딩 부스트를 위해 anchor를 N회 반복 삽입한다.
-    keyword 컴포넌트는 OP_HASANY 토큰 매칭이라 anchor 1회만 유지한다.
-
-    Config.POLICY_EXTRA_SEARCH_ENABLED=False 면 추가검색을 완전히 비활성화한다
-    (메인 듀얼의 anchor 부스트는 augment_okms_dual_query 에서 별도로 유지됨).
-    """
-    if not getattr(Config, "POLICY_EXTRA_SEARCH_ENABLED", True):
-        return []
-    tags, _ = resolve_policy_boost_keywords(policy_priority_tag)
-    rq = (reformed_query or "").strip()
-    tag_keywords = _get_tag_keywords_map()
-    if not tags or not rq:
-        return []
-
-    if "elderly_benefits" in tags:
-        # 추가 검색 쌍을 1개로 제한 (implant/low_income과 일관성 유지, 풀 오염 방지)
-        elderly_kws = tag_keywords.get("elderly_benefits", ())
-        anchors = _pick_distinct_keywords(elderly_kws, n=1)
-        if not anchors:
-            return []
-        anchor = anchors[0]
-        boosted = _repeat_for_vector_boost(anchor)
-        return [(f"{rq} {boosted} 안내".strip(), anchor)]
-
-    if "implant" in tags:
-        implant_kws = _pick_distinct_keywords(tag_keywords.get("implant", ()), n=1)
-        if not implant_kws:
-            return []
-        implant_kw = implant_kws[0]
-        boosted = _repeat_for_vector_boost(implant_kw)
-        return [(f"{rq} {boosted} 지원", implant_kw)]
-
-    if "low_income" in tags:
-        low_income_kws = _pick_distinct_keywords(tag_keywords.get("low_income", ()), n=2)
-        if not low_income_kws:
-            return []
-        boosted = " ".join(_repeat_for_vector_boost(k) for k in low_income_kws)
-        joined = " ".join(low_income_kws)
-        return [(f"{rq} {boosted}".strip(), joined)]
-
-    return []
 
 
 def policy_supplement_welfare_queries(policy_priority_tag: Any) -> List[str]:

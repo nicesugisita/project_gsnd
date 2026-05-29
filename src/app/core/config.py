@@ -112,23 +112,27 @@ class Settings(BaseSettings):
     TEXT_CLEANING_ENABLED: bool = True
     KOREAN_STANDARDIZATION_ENABLED: bool = True
 
-    # SLM 기반 문서 관련성 필터(filter_irrelevant_docs) 사용 여부.
-    # False 시 필터를 스킵하고 각 파이프라인의 FINAL_TOP_N 을 상향(+50%대)하여
-    # 후처리 dedupe 만으로 노이즈 문서를 흡수할 수 있는지 측정한다.
-    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후
-    # referenced_documents / 최종 응답을 비교 (RELEVANCE_FILTER_ENABLED=true/false).
-    # [2026-05-26] 답변 일관성 우선 — SLM(8B) 관련성 판정이 회차마다 뒤집혀 문서 셋·개수가
-    # 흔들리는 비결정성의 주원인이라 기본 비활성화. (filter-off 시 guide FINAL_TOP_N 5→8 상향)
-    RELEVANCE_FILTER_ENABLED: bool = False
-
     # guide_recommend 가변 개수 정책: 고정 top-N(=항상 8~11 채움) 대신 주제어 존재 +
     # 점수 임계로 노출 개수를 가변화한다. 관련 풀이 작으면 적게, 크면 많이.
     # 결정적(LLM 없음)이라 회차 일관성 유지. 상세 설계는 plans/hazy-knitting-lark.md Part E.
-    GUIDE_VARIABLE_COUNT_ENABLED: bool = True
     GUIDE_KEEP_RATIO: float = 0.55   # 광역(주제어 없음) 질의 점수 비율 floor
     GUIDE_GAP_DROP: float = 0.6      # 직전 점수 대비 이 비율 미만이면 급락 절벽으로 보고 컷
     GUIDE_MIN_RESULTS: int = 3       # 노출 하한 (너무 적게 나오지 않도록)
     GUIDE_MAX_RESULTS: int = 11      # 노출 상한
+
+    # guide_recommend LLM 선별 모드: 룰베이스 개수 결정(가변개수/reserve/재귀)을 끄고
+    # RRF 상위 N건을 그대로 최종응답 LLM에 넘겨, 관련 문서 선별을 LLM(선별 프롬프트)에 위임한다.
+    GUIDE_LLM_SELECT_MAX_DOCS: int = 11   # LLM에 넘길 RRF 상위 문서 수(안전 cap)
+
+    # 리랭킹 후처리 — 태그 기반 하드가드(D-1.7 생애주기/가구). False(기본)면 LLM 선별 경로에서
+    # 이 태그 후처리를 끄고 RRF 상위 N건을 그대로 LLM 선별에 위임한다(태그 불일치만으로 명백
+    # 관련 문서가 LLM 전에 탈락하는 recall 누수 제거). more_info 등 비-LLM선별 경로는 영향 없음.
+    GUIDE_POST_RERANK_FILTER_ENABLED: bool = False
+
+    # 리랭킹 후처리 — 주제어(topic-term) 게이트(D-1.75). 정책태그 좁은 제도 질의에 큐레이션
+    # 키워드+동의어로 주제 무관 문서를 LLM 전에 컷한다. False(기본)면 비활성 — recall 우선,
+    # 선별은 LLM 선별 프롬프트에 위임. True 면 좁은 정책질의 환각/off-topic 차단용으로 복원.
+    GUIDE_TOPIC_GATE_ENABLED: bool = False
 
     # ── DeepServer ────────────────────────────────────────────────────────────
     DEEP_SERVER_URL: str = ""
@@ -149,40 +153,11 @@ class Settings(BaseSettings):
     RAG_WELFARE_CENTER_COLLECTION: str = ""
     RAG_WELFARE_TEL_COLLECTION: str = ""
 
-    # search 양쪽 풀(center/tel) 병합 시 RRF(rank fusion) 사용 여부.
-    # False(기본): 두 풀을 합쳐 WEIGHT 절대점수로 정렬.
-    # True       : 풀별로 정렬 후 rank 기반 RRF 융합 — 출처 간 WEIGHT 스케일 편향 제거.
-    # A/B 측정 절차: .env 에서 토글만 바꿔 동일 질의 세트를 두 번 실행 후 top_docs/응답 비교.
-    RRF_FUSION_ENABLED: bool = False
-
-    # guide_recommend OKMS/GOV 풀 병합 시 RRF(rank fusion) 사용 여부 (독립 토글).
-    # False(기본): OKMS 쿼터 5 + GOV 쿼터 3 을 각각 WEIGHT 정렬·cap 후 concat (혼합 보장).
-    # True       : 두 풀을 풀별 정렬 후 rank 기반 RRF 융합 → 쿼터 미보장, 융합 순위 상위 8건 선택.
-    # search/general 의 RRF_FUSION_ENABLED 와 독립 — guide_recommend 만 단독 A/B·롤백 가능.
-    RRF_FUSION_GUIDE_ENABLED: bool = False
-
-    # Query Rewriting 모드 토글.
-    # False(기본): unified_preprocessing_prompt.txt 사용 — Task 4 의미 보존형 expansion 5개 생성.
-    # True       : unified_preprocessing_prompt_rewrite.txt 사용 — 단일 self-contained 쿼리 1개로 검색.
-    # rewrite 모드는 대화 맥락 흡수·모호함 해소·키워드 강화로 정밀도 ↑, Mariner 호출 수 ↓.
-    # 운영에서 .env 토글로 A/B 비교 후 default 전환 검토.
-    QUERY_REWRITING_ENABLED: bool = True
-
-    # 분류기 단축 프롬프트 우선 로드 토글. True 면 prompts/short/<filename> 가 존재할 때
-    # 그것을 우선 사용한다. unified_preprocessing/pre_check/next_intent 등 분류기 프롬프트의
-    # 압축본(원본 대비 60~83% 단축)을 운영에 적용할 때 켠다. 기본 False 로 회귀 위험 차단.
-    USE_SHORT_PROMPTS: bool = False
-
     # 응답 트레이스 토글 — 매 응답 생성마다 (사용자 질문 / 참조문서 / 최종 프롬프트 / 응답 본문)
     # 을 JSONL + xlsx 두 파일에 기록한다. 디버그·QA 목적. 운영에선 비활성 권장.
     RESPONSE_TRACE_ENABLED: bool = False
     # 트레이스 출력 디렉토리. 없으면 자동 생성. JSONL: response_trace.jsonl, xlsx: response_trace.xlsx
     RESPONSE_TRACE_DIR: str = "log/response_trace"
-
-    # 정책 anchor 추가검색 토글. True 면 policy_priority_tag 별로 anchor 전용 OKMS/GOV
-    # 추가 검색쌍(keyword+vector)을 더 던져 해당 제도 문서를 풀에 확실히 넣는다.
-    # False 면 메인 듀얼(키워드1+벡터1)만 사용 — 검색 횟수↓. (메인 쿼리의 anchor 부스트는 유지)
-    POLICY_EXTRA_SEARCH_ENABLED: bool = False
 
     # ── Mariner 연결 ──────────────────────────────────────────────────────────
     MARINER_IP: str = ""

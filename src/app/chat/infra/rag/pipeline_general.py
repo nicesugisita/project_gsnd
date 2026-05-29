@@ -42,12 +42,10 @@ from app.chat.infra.rag import (
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
-    expand_query,
     extract_triples,
 )
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
     collect_okms_groupa_fallback_docs,
@@ -80,6 +78,8 @@ async def process_rag_general(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
     more_detail: bool = False,
 ) -> tuple[Any, List[Dict[str, str]]]:
@@ -107,14 +107,7 @@ async def process_rag_general(
                 len(expanded_queries),
             )
         else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            expanded_queries = await expand_query(reformed_query)
-            logger.info("[TIMING][general] Step2 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not expanded_queries:
-                logger.warning("[RAG/general_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                expanded_queries = [reformed_query]
+            expanded_queries = [reformed_query]
         if not expanded_queries:
             expanded_queries = [reformed_query]
         logger.info(f"[RAG/general_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
@@ -157,23 +150,29 @@ async def process_rag_general(
             _gen_city_filters = [s for s in _gen_normalized if s.startswith("경상남도 ")]
             gen_sigun_filters = list(dict.fromkeys(_gen_city_filters)) if _gen_city_filters else []
         gen_birth_year = _extract_birth_year_from_message(message)
-        gen_lifecycle = (
-            _birth_year_to_lifecycle(gen_birth_year)
-            if gen_birth_year
-            else _extract_lifecycle_from_message(message)
-        )
-        # 현재 메시지에서 생애주기 미감지 시 대화 히스토리에서 추출
-        if not gen_lifecycle and messages:
-            from app.chat.lifecycle import extract_lifecycle_from_history
-            gen_lifecycle = extract_lifecycle_from_history(messages)
-            if gen_lifecycle:
-                logger.debug(f"[RAG/general_v2] 히스토리에서 생애주기 추출: '{gen_lifecycle}'")
-        # HSHD_STTN_NM(가구상황) 추출 — (정규화값, 동의어 토큰 리스트)
-        gen_hshd_sttn, gen_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        # 생애주기: 분류기(precomputed)면 LLM 멀티태그, None(분류기 실패)이면 룰 폴백.
+        if precomputed_lifecycle_tags is not None:
+            gen_lifecycle = list(precomputed_lifecycle_tags)
+        else:
+            gen_lifecycle = (
+                _birth_year_to_lifecycle(gen_birth_year)
+                if gen_birth_year
+                else _extract_lifecycle_from_message(message)
+            )
+            if not gen_lifecycle and messages:
+                from app.chat.lifecycle import extract_lifecycle_from_history
+                gen_lifecycle = extract_lifecycle_from_history(messages)
+        # 가구상황: 분류기면 LLM 멀티태그(특정계층 list 또는 '일반가구'), None이면 룰 폴백.
+        # OKMS/GOV 레그에만 적용 — GSND 는 HOUSE_SITUATION 컬럼이 없음.
+        if precomputed_household_tags is not None:
+            _gen_hh = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            gen_hshd_sttn = _gen_hh if _gen_hh else "일반가구"
+            gen_hshd_synonyms = []
+        else:
+            gen_hshd_sttn, gen_hshd_synonyms = _extract_hshd_sttn_from_message(message)
         logger.debug(
             f"[RAG/general_v2] OKMS 필터 - sigun: {gen_sigun_filters}, "
-            f"lifecycle: '{gen_lifecycle}', hshd_sttn: '{gen_hshd_sttn}' "
-            f"(synonyms={gen_hshd_synonyms})"
+            f"lifecycle: {gen_lifecycle!r}, hshd_sttn: {gen_hshd_sttn!r} (synonyms={gen_hshd_synonyms})"
         )
 
         # OKMS 연도 필터 추출
@@ -419,11 +418,7 @@ async def process_rag_general(
         # ====================================================================
         # Step 6: OKMS GroupA → top N
         # ====================================================================
-        # 필터 ON: 15/8, 필터 OFF: 20/12 (필터 제거 보상)
-        if Config.RELEVANCE_FILTER_ENABLED:
-            _GEN_FINAL_TOP_N = 15 if more_detail else 8
-        else:
-            _GEN_FINAL_TOP_N = 20 if more_detail else 12
+        _GEN_FINAL_TOP_N = 20 if more_detail else 12
         _FALLBACK_THRESHOLD = 1
         okms_final = okms_group_a_top[:_GEN_FINAL_TOP_N]
         logger.info(f"[RAG/general_v2] OKMS 최종: {len(okms_final)}개 (GroupA {len(okms_group_a_top)}개)")
@@ -471,31 +466,23 @@ async def process_rag_general(
         # ====================================================================
         # Step 7 합산: OKMS + GSND
         # ====================================================================
-        if Config.RRF_FUSION_ENABLED:
-            # 서로 다른 소스(OKMS 사업 / GSND)를 풀별 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합.
-            # 두 컬렉션의 WEIGHT 스케일 편향을 제거한다(search center/tel 융합과 동일 취지).
-            okms_sorted = sorted(
-                _deduplicate_documents(okms_final),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            gsnd_sorted = sorted(
-                _deduplicate_documents(gsnd_top),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            top_docs = rerank_by_rrf(okms_sorted, gsnd_sorted)
-            logger.info(
-                "[RAG/general_v2] 최종 선택(RRF 융합): %d개 (OKMS=%d, GSND=%d)",
-                len(top_docs), len(okms_sorted), len(gsnd_sorted),
-            )
-        else:
-            top_docs = sorted(
-                _deduplicate_documents(okms_final + gsnd_top),
-                key=lambda x: float(x.get("WEIGHT", 0) or 0),
-                reverse=True,
-            )
-            logger.info(f"[RAG/general_v2] 최종 선택: {len(top_docs)}개 문서")
+        # 서로 다른 소스(OKMS 사업 / GSND)를 풀별 dedup·WEIGHT 정렬 후 rank 기반 RRF 융합.
+        # 두 컬렉션의 WEIGHT 스케일 편향을 제거한다(search center/tel 융합과 동일 취지).
+        okms_sorted = sorted(
+            _deduplicate_documents(okms_final),
+            key=lambda x: float(x.get("WEIGHT", 0) or 0),
+            reverse=True,
+        )
+        gsnd_sorted = sorted(
+            _deduplicate_documents(gsnd_top),
+            key=lambda x: float(x.get("WEIGHT", 0) or 0),
+            reverse=True,
+        )
+        top_docs = rerank_by_rrf(okms_sorted, gsnd_sorted)
+        logger.info(
+            "[RAG/general_v2] 최종 선택(RRF 융합): %d개 (OKMS=%d, GSND=%d)",
+            len(top_docs), len(okms_sorted), len(gsnd_sorted),
+        )
         for i, doc in enumerate(top_docs, 1):
             logger.debug(f"[RAG/general_v2] #{i} NAME={_get_document_name(doc) or '?'}, WEIGHT={doc.get('WEIGHT', '?')}")
 
@@ -511,21 +498,9 @@ async def process_rag_general(
             log_prefix="[RAG/general_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(
-                reformed_query,
-                top_docs,
-                sigun_filters=gen_sigun_filters,
-                max_judgment_docs=20 if more_detail else None,
-            )
-            logger.info("[TIMING][general] Step7-C 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/general_v2] 관련성 필터 후: {len(top_docs)}개 문서")
-        else:
-            logger.info("[RAG/general_v2] Step7-C 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
-
         # ====================================================================
-        # Step 7-C-3: 관련성 필터 0건 → GroupA 하위 문서 재시도
-        # (상위 N건이 모두 무관 판정된 경우 top-N 이후 문서를 추가 시도)
+        # Step 7-C-3: 최종 0건 → GroupA 하위 문서 재시도
+        # (top-N 이 비면 top-N 이후 문서를 추가 시도)
         # ====================================================================
         if not top_docs:
             lower_docs = okms_group_a_top[_GEN_FINAL_TOP_N:]
@@ -540,13 +515,7 @@ async def process_rag_general(
                     log_prefix="[RAG/general_v2][C3]",
                     apply_enabled=not _skip_policy_boost,
                 )
-                if Config.RELEVANCE_FILTER_ENABLED:
-                    top_docs = await filter_irrelevant_docs(
-                        reformed_query, lower_docs, sigun_filters=gen_sigun_filters
-                    )
-                else:
-                    top_docs = lower_docs
-                    logger.info("[RAG/general_v2] Step7-C-3 관련성 필터 SKIP — lower_docs %d건 그대로", len(top_docs))
+                top_docs = lower_docs
                 logger.info(
                     "[TIMING][general] Step7-C-3 GroupA 하위 재시도: %.3fs", time.monotonic() - _t
                 )
@@ -605,17 +574,7 @@ async def process_rag_general(
                     apply_enabled=not _skip_policy_boost,
                 )
 
-                _t = time.monotonic()
-                if Config.RELEVANCE_FILTER_ENABLED:
-                    top_docs = await filter_irrelevant_docs(
-                        reformed_query, fb_pool, sigun_filters=gen_sigun_filters
-                    )
-                else:
-                    top_docs = fb_pool
-                    logger.info("[RAG/general_v2] Step7-C-4 재검색 관련성 필터 SKIP — fb_pool %d건 그대로", len(top_docs))
-                logger.info(
-                    "[TIMING][general] Step7-C-4 재검색 관련성 필터: %.3fs", time.monotonic() - _t
-                )
+                top_docs = fb_pool
                 logger.info(f"[RAG/general_v2] 재검색 결과: {len(top_docs)}건")
 
         # 최종 안전망
@@ -658,7 +617,7 @@ async def process_rag_general(
             _final_user_msg, top_docs, temperature, _gen_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
-            lifecycle=gen_lifecycle,
+            lifecycle=", ".join(gen_lifecycle) if isinstance(gen_lifecycle, list) else (gen_lifecycle or ""),
             messages=messages,
             policy_priority_tag=precomputed_policy_priority_tag,
             user_region=user_region,

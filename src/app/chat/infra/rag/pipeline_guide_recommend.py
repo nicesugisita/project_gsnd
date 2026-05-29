@@ -40,11 +40,9 @@ from app.chat.infra.rag import (
     filter_okms_keywords,
 )
 from .response_generator import generate_final_response_v2
-from app.chat.routing import expand_query
 from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
 from .policy_priority import resolve_policy_boost_keywords
 from .variable_count import extract_topic_terms, select_variable_count
@@ -98,6 +96,8 @@ async def process_rag_guide_recommend(
     recommended_question_prompt: bool = False,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -113,6 +113,10 @@ async def process_rag_guide_recommend(
     try:
         t_total = time.monotonic()
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
+        # LLM 선별 모드: 룰베이스 개수 결정(reserve/재귀/가변개수)을 끄고 RRF 상위 N건을
+        # 그대로 최종응답 LLM에 넘긴다(관련 문서 선별은 선별 프롬프트가 담당).
+        # more_info 후속(excluded 존재)은 '더 보기' 의미라 이 모드에서 제외(기존 흐름 유지).
+        _llm_select = not _skip_policy_boost
         policy_tags, _ = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
         # guide_recommend에서 low_income 태그는 query-time 부스트를 끄고,
         # elderly/implant 등은 기존 우선 정책을 유지한다.
@@ -147,31 +151,47 @@ async def process_rag_guide_recommend(
 
         birth_year = _extract_birth_year_from_message(message)
 
-        if birth_year:
-            lifecycle = _birth_year_to_lifecycle(birth_year)
-            logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{lifecycle}'")
+        # 생애주기: rewrite 프롬프트(LLM 멀티태그)면 precomputed 사용 — 룰 기반 추출을 완전 대체.
+        # 빈 리스트면 'LLM이 태그 없음'(부모 나이로 추정 금지). precomputed 가 None(비-rewrite/구
+        # 프롬프트)일 때만 기존 룰 기반 단일 추출로 폴백한다.
+        if precomputed_lifecycle_tags is not None:
+            lifecycle_tags = list(precomputed_lifecycle_tags)
+            logger.debug(f"[RAG/guide_recommend_v2] LLM 생애주기 태그: {lifecycle_tags}")
         else:
-            # 생애주기: 현재 message 우선(새 생애주기면 즉시 교체) → 없으면 history 역순 스캔으로
-            # 직전 생애주기 유지(sticky). 폴백 없으면 시군 되묻기 턴(message="창원")에서 생애주기가
-            # 비어 lifecycle 필터가 꺼지고 인접 생애주기('고등학교 무상교육' 등)가 유입된다.
-            from app.chat.lifecycle import extract_lifecycle_from_history
-            lifecycle = (
-                _extract_lifecycle_from_message(message)
-                or extract_lifecycle_from_history(messages or [])
-                or _extract_lifecycle_from_message(reformed_query)
-            )
-            if lifecycle:
-                logger.debug(f"[RAG/guide_recommend_v2] 생애주기 추출(현재→history→reformed): '{lifecycle}'")
+            if birth_year:
+                _lc = _birth_year_to_lifecycle(birth_year)
+                logger.debug(f"[RAG/guide_recommend_v2] 출생연도: {birth_year} → 생애주기: '{_lc}'")
             else:
-                logger.debug(f"[RAG/guide_recommend_v2] 출생연도 추출 불가, 생애주기 필터 미적용")
+                # sticky: 현재 message 우선 → history 역순 → reformed_query 보강.
+                from app.chat.lifecycle import extract_lifecycle_from_history
+                _lc = (
+                    _extract_lifecycle_from_message(message)
+                    or extract_lifecycle_from_history(messages or [])
+                    or _extract_lifecycle_from_message(reformed_query)
+                )
+                if _lc:
+                    logger.debug(f"[RAG/guide_recommend_v2] 생애주기 추출(현재→history→reformed): '{_lc}'")
+                else:
+                    logger.debug(f"[RAG/guide_recommend_v2] 생애주기 단서 없음 → 필터 미적용")
+            lifecycle_tags = [_lc] if _lc else []
 
-        # 멀티턴: 가구상황도 message+reformed_query 결합 텍스트에서 추출 (저소득/한부모 등 유실 방지).
-        # 기본값 '일반가구'라 단순 or 폴백이 안 되므로 두 텍스트를 합쳐 키워드를 스캔한다.
-        gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(f"{message} {reformed_query}")
-        if gr_hshd_sttn:
+        # 가구상황: rewrite 분류기(precomputed)면 LLM 멀티태그 사용 — 룰 추출 대체.
+        # 특정계층(저소득/장애인/한부모·조손/다문화·탈북민/다자녀/보훈)이 있으면 그 리스트로
+        # 소프트 부스트, 없으면 '일반가구'(특정계층 미해당). None(분류기 실패)이면 룰 폴백.
+        if precomputed_household_tags is not None:
+            _hh_specifics = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            gr_hshd_sttn = _hh_specifics if _hh_specifics else "일반가구"
+            gr_hshd_synonyms = []  # 캐노니컬 카테고리명이라 동의어 확장 불필요
             logger.debug(
-                f"[RAG/guide_recommend_v2] 가구상황 추출: '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
+                f"[RAG/guide_recommend_v2] LLM 가구상황 태그: {precomputed_household_tags} → filter={gr_hshd_sttn!r}"
             )
+        else:
+            # (구 프롬프트/분류기 실패 폴백) message+reformed_query 결합 텍스트에서 룰 추출.
+            gr_hshd_sttn, gr_hshd_synonyms = _extract_hshd_sttn_from_message(f"{message} {reformed_query}")
+            if gr_hshd_sttn:
+                logger.debug(
+                    f"[RAG/guide_recommend_v2] 가구상황 추출(룰): '{gr_hshd_sttn}' synonyms={gr_hshd_synonyms}"
+                )
 
         # 연도 필터: guide_recommend 는 항상 현재 연도 문서만 추천 (timeliness 보장).
         # 사용자가 과거/미래 연도를 명시해도 추천 결과는 현재 연도로 강제.
@@ -197,14 +217,7 @@ async def process_rag_guide_recommend(
                 len(gr_expanded),
             )
         else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            gr_expanded = await expand_query(gr_expand_base)
-            logger.info("[TIMING][guide_recommend] StepA-1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not gr_expanded:
-                logger.warning("[RAG/guide_recommend_v2] 쿼리 확장 실패 - 기준 질의 사용")
-                gr_expanded = [gr_expand_base]
+            gr_expanded = [gr_expand_base]
         if not gr_expanded:
             gr_expanded = [gr_expand_base]
         logger.info(f"[RAG/guide_recommend_v2] 확장 완료: {len(gr_expanded)}개 쿼리")
@@ -259,7 +272,7 @@ async def process_rag_guide_recommend(
                     vector, keywords, selected_collection,
                     year_filters=gr_year_filters or None,
                     sigun_filters=gr_sigun_filters,
-                    lifecycle_filter=lifecycle or None,
+                    lifecycle_filter=lifecycle_tags or None,
                     hshd_sttn_filter=gr_hshd_sttn or None,
                     hshd_sttn_synonyms=gr_hshd_synonyms or None,
                     excluded_chunk_ids=excluded_chunk_ids,
@@ -277,7 +290,7 @@ async def process_rag_guide_recommend(
                 return query_gov_okms_documents(
                     search_str,
                     collection=Config.RAG_GOV_OKMS_COLLECTION,
-                    lifecycle_filter=lifecycle or None,
+                    lifecycle_filter=lifecycle_tags or None,
                     sigun_filters=gr_sigun_filters,
                     excluded_chunk_ids=excluded_chunk_ids,
                     excluded_business_keywords=llm_excluded_services,
@@ -330,7 +343,7 @@ async def process_rag_guide_recommend(
         # GOV_OKMS WHERE 의 LIFE_CYCLE 필터(op 34)가 일관적이지 않아 불일치 문서가 통과하는
         # 사례 확인됨 → 결정적 post-filter 로 보강. 사용자 lifecycle 없으면 필터 안 함.
         _gov_okms_pool = _deduplicate_documents(gov_okms_docs)
-        _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle)
+        _gov_okms_pool = filter_gov_okms_docs_by_lifecycle(_gov_okms_pool, lifecycle_tags)
         # B1: GOV 쿼터(3)보다 큰 후보 풀을 유지한다 — off-topic GOV 가 관련성 필터에 떨려도
         # 생존분에서 3건을 확보하기 위함. 쿼터 cap 은 필터 뒤로 미룬다.
         gov_okms_candidates = sorted(
@@ -347,9 +360,8 @@ async def process_rag_guide_recommend(
                 f"  CHUNK_ID={doc.get('CHUNK_ID', '')}"
             )
 
-        # Step D: OKMS 쿼터 → top N (필터 ON: 5, 필터 OFF: 8)
-        # RELEVANCE_FILTER_ENABLED=False 시 dedupe 만으로 노이즈 흡수 가능한지 측정용 보상값.
-        _GR_FINAL_TOP_N = 5 if Config.RELEVANCE_FILTER_ENABLED else 8
+        # Step D: OKMS 쿼터 → top N
+        _GR_FINAL_TOP_N = 8
         # B1: 쿼터(5)보다 큰 OKMS 후보 풀(최대 _GR_GA_TOP_N=10)을 필터에 태운다. cap 은 필터 뒤로.
         gr_top_docs = list(gr_group_a_top)
         logger.info(f"[RAG/guide_recommend_v2] [OKMS] 후보: {len(gr_top_docs)}개 (쿼터 {_GR_FINAL_TOP_N})")
@@ -431,48 +443,27 @@ async def process_rag_guide_recommend(
             _stage_rec_docs("rerank_before", _merged_candidates)
         except Exception:  # noqa: BLE001
             pass
-        if Config.RELEVANCE_FILTER_ENABLED:
-            # 확장 후보 풀(OKMS 15 + GOV 15)을 기본 10건 캡으로 잘라버리면 풀 확대 효과가 사라진다.
-            # 상위 20건까지 판단해 적합 생존분을 늘린다(D-1.7 백필 재료도 함께 확대).
-            _survivors = await filter_irrelevant_docs(
-                reformed_query, _merged_candidates, sigun_filters=gr_sigun_filters,
-                max_judgment_docs=20,
-            )
-            logger.info("[TIMING][guide_recommend] StepD-1 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-        else:
-            _survivors = _merged_candidates
-            logger.info("[RAG/guide_recommend_v2] StepD-1 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(_merged_candidates))
+        _survivors = _merged_candidates
 
-        # 필터 생존분을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
+        # 후보 풀을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
         _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
         _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
-        _okms_reserve_pool: List[Dict[str, Any]]
-        if Config.RRF_FUSION_GUIDE_ENABLED:
-            # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
-            # 쿼터(OKMS 5 + GOV 3) 미보장 — 융합 순위 상위 _GR_TARGET_TOTAL 건 선택, 나머지는 reserve.
-            # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
-            _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-            _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-            _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
-            _cap = _GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N
-            gr_top_docs = _fused[:_cap]
-            _okms_reserve_pool = _fused[_cap:]
-            _gov_in_top = sum(1 for d in gr_top_docs if d.get("CHUNK_ID") in _gov_cand_ids)
-            logger.info(
-                f"[RAG/guide_recommend_v2] 관련성 필터 후 RRF 융합: {len(gr_top_docs)}개 "
-                f"(OKMS {len(gr_top_docs) - _gov_in_top} + GOV {_gov_in_top} | 쿼터 미보장 "
-                f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
-            )
-        else:
-            # 풀별 쿼터 cap (필터 뒤): reserve 는 OKMS 생존 잔여.
-            gov_okms_top_docs = _gov_surv[:_GR_GOV_OKMS_TOP_N]
-            _okms_reserve_pool = _okms_surv[_GR_FINAL_TOP_N:]
-            gr_top_docs = _okms_surv[:_GR_FINAL_TOP_N] + gov_okms_top_docs
-            logger.info(
-                f"[RAG/guide_recommend_v2] 관련성 필터 후 쿼터 확정: {len(gr_top_docs)}개 "
-                f"(OKMS {min(len(_okms_surv), _GR_FINAL_TOP_N)}/{_GR_FINAL_TOP_N} + GOV {len(gov_okms_top_docs)}/{_GR_GOV_OKMS_TOP_N} "
-                f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
-            )
+        # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+        # 쿼터(OKMS 5 + GOV 3) 미보장 — 융합 순위 상위 건 선택, 나머지는 reserve.
+        # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
+        _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+        _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+        _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
+        # LLM 선별 모드: RRF 상위 GUIDE_LLM_SELECT_MAX_DOCS 건을 그대로 LLM에 전달.
+        _cap = Config.GUIDE_LLM_SELECT_MAX_DOCS if _llm_select else (_GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N)
+        gr_top_docs = _fused[:_cap]
+        _okms_reserve_pool: List[Dict[str, Any]] = _fused[_cap:]
+        _gov_in_top = sum(1 for d in gr_top_docs if d.get("CHUNK_ID") in _gov_cand_ids)
+        logger.info(
+            f"[RAG/guide_recommend_v2] 관련성 필터 후 RRF 융합: {len(gr_top_docs)}개 "
+            f"(OKMS {len(gr_top_docs) - _gov_in_top} + GOV {_gov_in_top} | 쿼터 미보장 "
+            f"| 생존 OKMS={len(_okms_surv)} GOV={len(_gov_surv)} reserve={len(_okms_reserve_pool)})"
+        )
 
         # [단계 진단] 리랭킹 후 (관련성 필터 생존분 → RRF 융합/쿼터 cap 결과)
         try:
@@ -507,10 +498,7 @@ async def process_rag_guide_recommend(
         # 재귀 보강(D-1.5)의 타임아웃 조기중단은 부하 따라 후보 풀을 흔드는 비결정성 원천이다.
         # 따라서 가변 개수 활성 + non-more_info 턴이면 보강을 건너뛰어 개수를 결정적으로 만든다.
         # (more_info 후속은 가변 컷에서 제외되므로 보강을 유지해 '더' 결과를 채운다.)
-        _variable_count_active = (
-            Config.GUIDE_VARIABLE_COUNT_ENABLED
-            and not (excluded_chunk_ids or excluded_service_names)
-        )
+        _variable_count_active = not (excluded_chunk_ids or excluded_service_names)
 
         # ====================================================================
         # Step D-1.4: Reserve pool 재활용 (재귀 전, 무료 보강)
@@ -519,7 +507,7 @@ async def process_rag_guide_recommend(
         # - Mariner 호출 0, SLM 필터 0 (reserve 는 초기 검색에서 WEIGHT 검증됨)
         # - D-1이 전부 필터링한 경우(컬렉션 전체 비관련)면 생략
         # ====================================================================
-        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
+        if not _variable_count_active and not _llm_select and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL and _okms_reserve_pool:
             _need = _GR_TARGET_TOTAL - len(gr_top_docs)
             _held_chunk_ids = {d.get("CHUNK_ID") for d in gr_top_docs if d.get("CHUNK_ID")}
             _excl_set = (
@@ -558,7 +546,7 @@ async def process_rag_guide_recommend(
         # ====================================================================
         _GR_RECURSIVE_MAX_ITERS = 3
         _recur_added = False  # 재귀로 SLM 미검증 신규 문서가 추가됐는지 추적 (D-1.6 게이트)
-        if not _variable_count_active and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
+        if not _variable_count_active and not _llm_select and not _d1_filtered_all and len(gr_top_docs) < _GR_TARGET_TOTAL:
             logger.info(
                 f"[RAG/guide_recommend_v2] 관련성 필터 후 {len(gr_top_docs)}건 "
                 f"< {_GR_TARGET_TOTAL}건 → 재귀 보강 시작 (최대 {_GR_RECURSIVE_MAX_ITERS}회)"
@@ -594,7 +582,7 @@ async def process_rag_guide_recommend(
                     break
 
                 relax = _RELAX_PLAN[_iter - 1]
-                _lc = (lifecycle or None) if relax["lifecycle"] else None
+                _lc = (lifecycle_tags or None) if relax["lifecycle"] else None
                 _yr = (gr_year_filters or None) if relax["year"] else None
                 _boost_on = relax["boost"]
 
@@ -742,37 +730,17 @@ async def process_rag_guide_recommend(
                     f"(신규 {len(new_docs)}건 추가)"
                 )
 
-            # 8건 초과 시 상위 8건만 유지
+            # 8건 초과 시 상위 8건만 유지 — 융합 순위(rrf_score) 보존
+            # (재귀로 추가된 미융합 문서는 rrf_score 없음(0)이라 후순위)
             if len(gr_top_docs) > _GR_TARGET_TOTAL:
-                if Config.RRF_FUSION_GUIDE_ENABLED:
-                    # 융합 순위(rrf_score) 보존 — 재귀로 추가된 미융합 문서는 rrf_score 없음(0)이라 후순위.
-                    _cap_key = lambda x: float(x.get("rrf_score", 0.0) or 0.0)
-                else:
-                    _cap_key = lambda x: float(x.get("WEIGHT", 0) or 0)
-                gr_top_docs = sorted(gr_top_docs, key=_cap_key, reverse=True)[:_GR_TARGET_TOTAL]
+                gr_top_docs = sorted(
+                    gr_top_docs,
+                    key=lambda x: float(x.get("rrf_score", 0.0) or 0.0),
+                    reverse=True,
+                )[:_GR_TARGET_TOTAL]
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 후 상위 {_GR_TARGET_TOTAL}건 캡: {len(gr_top_docs)}건")
             else:
                 logger.info(f"[RAG/guide_recommend_v2] 재귀 종료: 최종 {len(gr_top_docs)}건")
-
-        # ====================================================================
-        # Step D-1.6: 재귀 보강 후 SLM 관련성 재필터
-        # 재귀(D-1.5) 내부에서는 속도를 위해 SLM 필터를 생략하므로, 응답 직전에 한 번 더 검증.
-        # 재귀로 신규 문서가 추가된 경우에만 실행.
-        # ====================================================================
-        if _recur_added and Config.RELEVANCE_FILTER_ENABLED:
-            _t = time.monotonic()
-            gr_top_docs = await filter_irrelevant_docs(
-                reformed_query, gr_top_docs, sigun_filters=gr_sigun_filters
-            )
-            logger.info(
-                "[TIMING][guide_recommend] StepD-1.6 재귀 후 관련성 재필터 [8b/sllm]: %.3fs",
-                time.monotonic() - _t,
-            )
-            logger.info(
-                f"[RAG/guide_recommend_v2] 재귀 후 관련성 재필터 결과: {len(gr_top_docs)}개 문서"
-            )
-        elif _recur_added:
-            logger.info("[RAG/guide_recommend_v2] StepD-1.6 재귀 후 재필터 SKIP (RELEVANCE_FILTER_ENABLED=False)")
 
         # Step D-1.7: 가구상황·생애주기 적합 후처리
         # - 기본(일반가구 미명시) 질의: 저소득/다문화·탈북민 등 특정계층 '단독' 태그 제도 제외.
@@ -782,24 +750,72 @@ async def process_rag_guide_recommend(
         # 명시 가구상황 질의(gr_hshd_sttn != '일반가구')면 가구상황 제외는 건너뛰고 생애주기만 적용.
         _GR_GENERAL_MIN_KEEP = 5
         _gr_require_general = (gr_hshd_sttn == "일반가구")
-        if gr_top_docs and (_gr_require_general or lifecycle):
-            _pool = _deduplicate_documents(list(gr_top_docs) + list(_survivors))
+        # 리랭킹 후처리(D-1.7/D-1.75) 적용 여부:
+        # - 기본(플래그 OFF) + LLM 선별 경로 → 후처리 제거(RRF 상위 N건을 그대로 LLM 선별에 위임).
+        # - more_info 등 비-LLM선별(레거시) 경로 → 기존 후처리 유지.
+        # - 플래그 ON → 모든 경로에서 기존 후처리 복원.
+        _apply_post_rerank_filter = Config.GUIDE_POST_RERANK_FILTER_ENABLED or not _llm_select
+        if _apply_post_rerank_filter and gr_top_docs and (_gr_require_general or lifecycle_tags):
+            # LLM 선별 모드: 'RRF 상위 N건만' 보장 — _survivors 로 풀을 다시 키우지 않고
+            # 현재 gr_top_docs(=RRF 상위)만 생애주기/가구 하드필터에 태운다. target 도 cap 동일.
+            if _llm_select:
+                _pool = list(gr_top_docs)
+                _pp_target = Config.GUIDE_LLM_SELECT_MAX_DOCS
+            else:
+                _pool = _deduplicate_documents(list(gr_top_docs) + list(_survivors))
+                _pp_target = _GR_TARGET_TOTAL
             if excluded_chunk_ids or excluded_service_names:
                 _pool = filter_excluded_docs(_pool, excluded_chunk_ids or [], excluded_service_names)
             _before = len(gr_top_docs)
+            # LLM 선별 모드: 유지 대상은 '생애주기 가드'뿐. 가구상황 require_general 은 끈다
+            # (예: '저소득' 태그 임플란트 시술비 지원사업이 '일반가구' 강제로 LLM 전에 탈락하는 누수 방지).
+            _pp_require_general = _gr_require_general and not _llm_select
             gr_top_docs = prioritize_general_household(
-                _pool, target=_GR_TARGET_TOTAL, min_keep=_GR_GENERAL_MIN_KEEP,
-                require_general=_gr_require_general, lifecycle=lifecycle or None,
+                _pool, target=_pp_target, min_keep=_GR_GENERAL_MIN_KEEP,
+                require_general=_pp_require_general, lifecycle=lifecycle_tags or None,
+                # LLM 선별 모드: 생애주기 태그 불일치만으로 명백 관련 문서를 LLM 전에
+                # 하드드롭하지 않도록 demote-not-drop(적합 우선 + target 까지 백필).
+                backfill_to_target=_llm_select,
             )
             logger.info(
                 f"[RAG/guide_recommend_v2] 적합 후처리: {_before} → {len(gr_top_docs)}건 "
-                f"(require_general={_gr_require_general}, lifecycle={lifecycle or None})"
+                f"(require_general={_gr_require_general}, lifecycle={lifecycle_tags or None})"
             )
+
+        # Step D-1.75 (LLM 선별 모드 + 정책 태그 질의 전용): 주제어 결정적 관련성 게이트.
+        # 정책 태그가 있는 '좁은 제도' 질의(임플란트·기초연금 등)에만 적용 — 태그의 큐레이션된
+        # 키워드(+동의어)로 주제 무관 문서를 LLM 전에 컷한다. 태그 없는 대상/영역 질의(대학생·노인 등)는
+        # 게이트를 걸지 않고 완화 선별 프롬프트(recall)에 맡긴다(과잉컷 방지). 환각도 원천 차단.
+        # 전멸 방지: 매칭 0건이면 미적용(전량 유지).
+        # 전용 플래그 GUIDE_TOPIC_GATE_ENABLED(기본 False)로 독립 제어 — 기본은 비활성.
+        if Config.GUIDE_TOPIC_GATE_ENABLED and _llm_select and precomputed_policy_priority_tag and gr_top_docs:
+            from .variable_count import extract_topic_terms as _extract_topic_terms, topical_hit
+            _gate_tags, _gate_boost_kw = resolve_policy_boost_keywords(precomputed_policy_priority_tag)
+            # 태그 키워드 동의어 갭 보강(예: implant 키워드에 틀니·의치보철 누락).
+            _GATE_SYNONYMS = {"implant": ("틀니", "의치", "의치보철")}
+            _extra_syn = [s for t in _gate_tags for s in _GATE_SYNONYMS.get(t, ())]
+            _gate_kw = precomputed_keywords or extract_nouns(reformed_query)
+            _gate_terms = list(dict.fromkeys(
+                list(_gate_boost_kw) + _extra_syn + _extract_topic_terms(_gate_kw, exclude=sigun_raws)
+            ))
+            if _gate_terms:
+                _gate_hits = [d for d in gr_top_docs if topical_hit(d, _gate_terms) > 0]
+                if _gate_hits:  # 1건이라도 맞을 때만 컷 (전멸 방지)
+                    logger.info(
+                        "[RAG/guide_recommend_v2] 주제어 게이트(태그=%s): %d → %d건 (terms=%s)",
+                        precomputed_policy_priority_tag, len(gr_top_docs), len(_gate_hits), _gate_terms,
+                    )
+                    gr_top_docs = _gate_hits
+                else:
+                    logger.info(
+                        "[RAG/guide_recommend_v2] 주제어 게이트: 매칭 0건 → 미적용(전량 유지, terms=%s)",
+                        _gate_terms,
+                    )
 
         # Step D-1.8: 가변 개수 정책 — 고정 top-N(항상 8~11 채움) 대신 주제어 존재 +
         # 점수 임계로 노출 개수를 가변화. 관련 풀이 작으면 적게, 크면 많이.
         # (more_info 후속은 사용자가 "더"를 명시한 추가요청이라 가변 컷에서 제외 — 풀 그대로.)
-        if _variable_count_active and gr_top_docs:
+        if _variable_count_active and not _llm_select and gr_top_docs:
             _vc_keywords = precomputed_keywords or extract_nouns(reformed_query)
             _topic_terms = extract_topic_terms(_vc_keywords, exclude=sigun_raws)
             _vc_before = len(gr_top_docs)
@@ -839,7 +855,7 @@ async def process_rag_guide_recommend(
             _final_user_msg, gr_top_docs, temperature, _gr_max_tokens, stream,
             frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
             intent=intent,
-            lifecycle=lifecycle,
+            lifecycle=", ".join(lifecycle_tags) if lifecycle_tags else "",
             messages=messages,
             policy_priority_tag=precomputed_policy_priority_tag,
             user_region=user_region,

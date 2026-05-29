@@ -10,7 +10,6 @@ from app.core.constants import ROLE_USER
 from app.core.config import Config
 from app.chat.infra.rag.policy_priority import (
     augment_okms_dual_query,
-    policy_extra_okms_searches,
     policy_supplement_welfare_queries,
     resolve_policy_boost_keywords,
 )
@@ -52,7 +51,7 @@ def _filter_gov_okms_stopwords(query: str) -> str:
 
 def filter_gov_okms_docs_by_lifecycle(
     docs: List[Dict[str, Any]],
-    user_lifecycle: Optional[str],
+    user_lifecycle: Optional[List[str]],  # str 도 허용(단일 태그 호환)
 ) -> List[Dict[str, Any]]:
     """GOV_OKMS 결과를 LIFE_CYCLE 필드 기준으로 post-filter.
 
@@ -67,28 +66,33 @@ def filter_gov_okms_docs_by_lifecycle(
       문서 LIFE_CYCLE 멀티값(쉼표·세미콜론·슬래시 구분)에 포함되어야 유지.
     - 문서 LIFE_CYCLE 필드 자체가 빈값: 전체 대상 문서일 수 있어 **보수적으로 유지**.
     """
-    if not user_lifecycle:
+    # user_lifecycle: str 또는 List[str] (멀티태그). 빈값/[] 이면 필터 없이 원본 반환.
+    _in = [user_lifecycle] if isinstance(user_lifecycle, str) else list(user_lifecycle or [])
+    _in = [v for v in _in if v and str(v).strip()]
+    if not _in:
         return docs
     if not docs:
         return docs
 
-    # 매핑은 queryset_gov_okms 의 SSOT 사용 (lazy import 로 순환 회피)
-    try:
-        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
-        target = (_map_lifecycle_for_gov_okms(user_lifecycle) or "").strip()
-    except Exception:
-        target = str(user_lifecycle or "").strip()
-    if not target:
-        return docs
-
-    kept: List[Dict[str, Any]] = []
-    removed_samples: List[str] = []
     def _norm_lc(s: str) -> str:
         # 가운데점(·) 주변 공백 변형을 통일: "임신 · 출산" / "임신· 출산" → "임신·출산"
         # 일반 공백/탭/NBSP 모두 제거 후 가운데점 표준화.
         return s.replace(" ", "").replace(" ", "").replace("\t", "").strip()
 
-    target_norm = _norm_lc(target)
+    # 매핑은 queryset_gov_okms 의 SSOT + 유의어 양방향 확장(노인↔노년). lazy import 로 순환 회피.
+    try:
+        from app.mariner.queryset_gov_okms import _expand_lifecycle_for_gov_okms
+        _targets: List[str] = []
+        for v in _in:
+            _targets.extend(_expand_lifecycle_for_gov_okms(v))
+    except Exception:
+        _targets = list(_in)
+    targets_norm = {_norm_lc(t) for t in _targets if t and str(t).strip()}
+    if not targets_norm:
+        return docs
+
+    kept: List[Dict[str, Any]] = []
+    removed_samples: List[str] = []
     for doc in docs:
         raw_field = str(doc.get("LIFE_CYCLE", "") or "").strip()
         if not raw_field:
@@ -105,7 +109,7 @@ def filter_gov_okms_docs_by_lifecycle(
             tokens = [t.strip() for t in tokens[0].split() if t.strip()]
         # 가운데점 주변 공백 통일 후 비교
         normalized_tokens = [_norm_lc(t) for t in tokens]
-        if target_norm in normalized_tokens:
+        if any(t in targets_norm for t in normalized_tokens):
             kept.append(doc)
         else:
             if len(removed_samples) < 5:
@@ -119,8 +123,8 @@ def filter_gov_okms_docs_by_lifecycle(
 
     if len(kept) < len(docs):
         logger.info(
-            "[GOV_OKMS][LifecyclePostFilter] target=%s | 입력=%d → %d 유지 (제거 %d건, 샘플=%s)",
-            target,
+            "[GOV_OKMS][LifecyclePostFilter] targets=%s | 입력=%d → %d 유지 (제거 %d건, 샘플=%s)",
+            _in,
             len(docs),
             len(kept),
             len(docs) - len(kept),
@@ -212,7 +216,8 @@ def prioritize_general_household(
     min_keep: int,
     *,
     require_general: bool = True,
-    lifecycle: Optional[str] = None,
+    lifecycle: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
+    backfill_to_target: bool = False,
 ) -> List[Dict[str, Any]]:
     """가구상황·생애주기 적합 문서를 우선하고 부적합 문서를 제외하는 최종 후처리.
 
@@ -231,15 +236,25 @@ def prioritize_general_household(
         min_keep: 최소 보장 건수 — 적합 문서가 이보다 적으면 부적합분에서 백필.
         require_general: 일반가구 태그 요구 여부 (명시 가구상황 질의면 False).
         lifecycle: 요구 생애주기 ('' / None 이면 생애주기 미적용).
+        backfill_to_target: True 면 부적합 문서를 '제외'하지 않고 적합 문서 뒤로 밀어
+            target 까지 백필(demote-not-drop). 적합 우선순위(precision)는 유지하되
+            태그 불일치만으로 명백 관련 문서가 하드드롭되는 recall 손실을 막는다.
+            (LLM 선별 모드: 어차피 RRF 상위 N건을 LLM 에 넘겨 선별하므로 컷이 아니라
+             재정렬만 의도 — 골든이 태그 불일치로 LLM 전에 사라지는 누수 차단.)
     """
-    # 파이프라인 생애주기 라벨("노인")과 문서 LIFE_CYCLE 표준값("노년")이 다르므로
-    # 비교 전에 문서 표준 토큰으로 매핑한다. 미매핑 시 노인 질의에서 모든 문서가
-    # 부적합 판정돼 min_keep 으로만 백필되는 버그가 발생한다.
+    # lifecycle 은 str 또는 List[str](멀티태그). 파이프라인 라벨("노인")과 문서 LIFE_CYCLE
+    # 표준값("노년")이 다르므로 유의어 양방향 확장 후 any-of 로 비교한다(미매핑 시 노인 질의에서
+    # 전 문서가 부적합 판정돼 min_keep 으로만 백필되는 버그 방지).
+    _lc_in = [lifecycle] if isinstance(lifecycle, str) else list(lifecycle or [])
+    _lc_in = [v for v in _lc_in if v and str(v).strip()]
     try:
-        from app.mariner.queryset_gov_okms import _map_lifecycle_for_gov_okms
-        _lc_target = (_map_lifecycle_for_gov_okms(lifecycle) or "").strip() if lifecycle else ""
+        from app.mariner.queryset_gov_okms import _expand_lifecycle_for_gov_okms
+        _lc_targets = set()
+        for v in _lc_in:
+            _lc_targets.update(_expand_lifecycle_for_gov_okms(v))
     except Exception:
-        _lc_target = str(lifecycle or "").strip()
+        _lc_targets = set(_lc_in)
+    _lc_targets = {t for t in _lc_targets if t and str(t).strip()}
 
     def _w(d: Dict[str, Any]) -> float:
         try:
@@ -250,16 +265,21 @@ def prioritize_general_household(
     def _fit(d: Dict[str, Any]) -> bool:
         if require_general and "일반가구" not in str(d.get("HOUSE_SITUATION", "") or ""):
             return False
-        if _lc_target and _lc_target not in str(d.get("LIFE_CYCLE", "") or ""):
-            return False
+        if _lc_targets:
+            field = str(d.get("LIFE_CYCLE", "") or "")
+            if not any(t in field for t in _lc_targets):
+                return False
         return True
 
     fit = sorted([d for d in pool if _fit(d)], key=_w, reverse=True)
     unfit = sorted([d for d in pool if not _fit(d)], key=_w, reverse=True)
 
     result = fit[:target]
-    if len(result) < min_keep:
-        result += unfit[: max(0, min_keep - len(result))]
+    # 완화 모드: 부적합을 제외하지 않고 적합 뒤로 밀어 target 까지 백필(demote-not-drop).
+    # 기존 모드: 적합이 min_keep 미달일 때만 부적합으로 백필(하드드롭 유지).
+    backfill_floor = target if backfill_to_target else min_keep
+    if len(result) < backfill_floor:
+        result += unfit[: max(0, backfill_floor - len(result))]
     return result
 
 
@@ -294,11 +314,6 @@ async def collect_okms_groupa_and_gov_docs(
     """OKMS GroupA + GOV_OKMS 병렬 수집 공통 실행기."""
     loop = asyncio.get_event_loop()
 
-    policy_extra_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)
-        if policy_search_boost_enabled
-        else []
-    )
     # OKMS Group A 듀얼 쿼리 쌍 (vector, keyword) — 정책 부스트 포함.
     # GOV_OKMS 도 동일 쿼리를 쓰도록 여기서 한 번 만들어 공유한다.
     ga_query_pairs = [
@@ -312,10 +327,6 @@ async def collect_okms_groupa_and_gov_docs(
     ga_pair_futures = [
         loop.run_in_executor(None, run_group_a, v, k) for v, k in ga_query_pairs
     ]
-    ga_policy_extra_futures = [
-        loop.run_in_executor(None, run_group_a, v, k)
-        for v, k in policy_extra_pairs
-    ]
 
     # GOV_OKMS: OKMS 와 동일한 검색쿼리(vector/keyword 레그 + 정책 부스트)로 검색한다.
     # (과거엔 명사 핵심어만·stopword 제거·anchor 제외했으나, OKMS 검색식과 동일화 요청으로 폐기.
@@ -323,7 +334,7 @@ async def collect_okms_groupa_and_gov_docs(
     #  트레이드오프: 전국 DB 라 anchor("기초연금"→「연금」)·일반어가 광역 매칭될 수 있음.)
     _gov_seen: set = set()
     gov_strings: List[str] = []
-    for vec, kw in [*ga_query_pairs, *policy_extra_pairs]:
+    for vec, kw in ga_query_pairs:
         for s in (vec, kw):
             s = (s or "").strip()
             if s and s not in _gov_seen:
@@ -337,14 +348,11 @@ async def collect_okms_groupa_and_gov_docs(
         await status_callback("문서를 검색하고 있습니다")
     all_results = await asyncio.gather(
         *ga_pair_futures,
-        *ga_policy_extra_futures,
         *gov_okms_futures,
     )
     n_core_ga = len(ga_pair_futures)
-    n_policy_x = len(ga_policy_extra_futures)
     ga_pair_results = all_results[:n_core_ga]
-    ga_policy_extra_results = all_results[n_core_ga : n_core_ga + n_policy_x]
-    gov_okms_results = all_results[n_core_ga + n_policy_x :]
+    gov_okms_results = all_results[n_core_ga:]
 
     ga_vector_results = [pair[1] for pair in ga_pair_results]
     ga_keyword_results = [pair[0] for pair in ga_pair_results]
@@ -367,14 +375,6 @@ async def collect_okms_groupa_and_gov_docs(
             logger.info("[%s] [GroupA] 트리플쿼리 #%d: %d개 문서", log_prefix, i, min(len(docs), per_query_limit))
         elif log_skip_empty_triple:
             logger.info("[%s] [GroupA] 트리플쿼리 #%d: 0개 문서", log_prefix, i)
-
-    for pair in ga_policy_extra_results:
-        if pair[1]:
-            okms_group_a_docs.extend(pair[1][:per_query_limit])
-        if pair[0]:
-            okms_group_a_docs.extend(pair[0][:per_query_limit])
-    if policy_extra_pairs:
-        logger.debug("[%s] 정책 검색 보강: GroupA 추가 %d쌍", log_prefix, len(policy_extra_pairs))
 
     gov_okms_docs: List[Dict[str, Any]] = []
     for i, docs in enumerate(gov_okms_results, 1):
@@ -414,29 +414,14 @@ async def collect_okms_groupa_fallback_docs(
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    fb_policy_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
-        if policy_search_boost_enabled
-        else []
-    )
-    ga_fb_extra_futures = [
-        loop.run_in_executor(None, run_group_a_fallback, v, k)
-        for v, k in fb_policy_pairs
-    ]
-    fb_results_all = await asyncio.gather(*ga_fb_futures, *ga_fb_extra_futures)
-    ga_fb_results = fb_results_all[: len(ga_fb_futures)]
-    ga_fb_extra_results = fb_results_all[len(ga_fb_futures) :]
+    fb_results_all = await asyncio.gather(*ga_fb_futures)
+    ga_fb_results = list(fb_results_all)
 
     fb_docs: List[Dict[str, Any]] = []
     for i, pair in enumerate(ga_fb_results, 1):
         if pair[1]:
             fb_docs.extend(pair[1][:per_query_limit])
         if tri_built[i - 1] and pair[0]:
-            fb_docs.extend(pair[0][:per_query_limit])
-    for pair in ga_fb_extra_results:
-        if pair[1]:
-            fb_docs.extend(pair[1][:per_query_limit])
-        if pair[0]:
             fb_docs.extend(pair[0][:per_query_limit])
     return fb_docs
 
@@ -465,13 +450,6 @@ async def collect_okms_groupa_and_gov_fallback_docs(
         )
         for eq, sq in zip_longest(expanded_queries, tri_built, fillvalue="")
     ]
-    policy_pairs = (
-        policy_extra_okms_searches(policy_priority_tag, reformed_query)[:max_policy_pairs]
-        if policy_search_boost_enabled
-        else []
-    )
-    fb_pairs.extend(policy_pairs)
-
     fb_pair_futures = [
         loop.run_in_executor(None, run_group_a, vec, kw)
         for vec, kw in fb_pairs

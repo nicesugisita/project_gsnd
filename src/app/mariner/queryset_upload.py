@@ -47,7 +47,7 @@ def query_mariner_documents(
     conv_id: Optional[str] = None,
     year_filters: Optional[List[str]] = None,
     sigun_filters: Optional[List[str]] = None,
-    lifecycle_filter: Optional[str] = None,
+    lifecycle_filter: Optional[List[str]] = None,  # str 도 허용(단일 태그 호환)
     facility_type_filter: Optional[str] = None,
     search_mode: str = "hybrid",
 ) -> List[Dict[str, Any]]:
@@ -228,10 +228,16 @@ def query_mariner_documents(
                         continue
 
                 if lifecycle_filter:
-                    doc_lifecycle = str(doc.get("LIFE_CYCLE", "") or "").strip()
-                    check_terms = _LIFECYCLE_CONTENT_KEYWORDS.get(lifecycle_filter, [lifecycle_filter])
-                    if doc_lifecycle not in check_terms:
-                        continue
+                    # lifecycle_filter 는 str 또는 List[str] — 태그들의 키워드 합집합으로 any-of 매칭.
+                    _lc_in = [lifecycle_filter] if isinstance(lifecycle_filter, str) else list(lifecycle_filter or [])
+                    _check_terms = set()
+                    for _v in _lc_in:
+                        if _v and str(_v).strip():
+                            _check_terms.update(_LIFECYCLE_CONTENT_KEYWORDS.get(_v, [_v]))
+                    if _check_terms:
+                        doc_lifecycle = str(doc.get("LIFE_CYCLE", "") or "").strip()
+                        if doc_lifecycle not in _check_terms:
+                            continue
 
             elif _uses_gsnd_v7_schema(collection):
                 if target_siguns:

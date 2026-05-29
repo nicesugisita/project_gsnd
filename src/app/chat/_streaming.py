@@ -28,7 +28,6 @@ from ._pipeline_steps import (
     run_out_of_scope_check,
     run_sigun_check,
     run_unified_preprocess,
-    run_extract_excluded_services,
     run_lifecycle_check,
     build_preprocess_skip_unified_recommended_question,
 )
@@ -578,18 +577,11 @@ async def _streaming_chat_flow(
                 logger.info("[ChatFlow] recommended-question API → unified_preprocess LLM 생략 (stream)")
             else:
                 yield build_status_message("질문을 재구성하고 있습니다")
-                # rewrite 모드: unified가 must_not_keywords를 함께 산출 → extract 호출 생략 (32B 1회 절약).
-                # expand 모드: 기존대로 extract LLM을 병렬 호출.
-                if Config.QUERY_REWRITING_ENABLED:
-                    pp = await run_unified_preprocess(
-                        user_message, chat_request.messages, use_rag
-                    )
-                    llm_excluded_services = list(pp.must_not_keywords or [])
-                else:
-                    pp, llm_excluded_services = await asyncio.gather(
-                        run_unified_preprocess(user_message, chat_request.messages, use_rag),
-                        run_extract_excluded_services(user_message, chat_request.messages, use_rag),
-                    )
+                # unified가 must_not_keywords를 함께 산출 → extract 호출 생략 (32B 1회 절약).
+                pp = await run_unified_preprocess(
+                    user_message, chat_request.messages, use_rag
+                )
+                llm_excluded_services = list(pp.must_not_keywords or [])
             _timings["t_unified_preprocess"] = pp.elapsed
             user_message = pp.query
             await _update_user_message(chat_request.messages, user_message)
@@ -599,6 +591,8 @@ async def _streaming_chat_flow(
                 "keywords": pp.keywords,
                 "search_target": pp.search_target,
                 "policy_priority_tag": pp.policy_priority_tag,
+                "lifecycle_tags": pp.lifecycle_tags,
+                "household_tags": pp.household_tags,
                 "detail_requested": pp.detail_requested,
             }
 
@@ -608,6 +602,8 @@ async def _streaming_chat_flow(
         keywords         = preprocess_data["keywords"]
         search_target    = preprocess_data.get("search_target")
         policy_priority_tag = preprocess_data.get("policy_priority_tag")
+        lifecycle_tags   = preprocess_data.get("lifecycle_tags")
+        household_tags   = preprocess_data.get("household_tags")
 
         # MORE_INFO는 직전 intent와 무관하게 guide_recommend로 강제한다.
         # (MORE_DETAIL은 기존 축 유지)
@@ -683,6 +679,8 @@ async def _streaming_chat_flow(
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
             precomputed_policy_priority_tag=policy_priority_tag,
+            precomputed_lifecycle_tags=lifecycle_tags,
+            precomputed_household_tags=household_tags,
             service_target=getattr(chat_request, "service_target", None) or "official",
             excluded_chunk_ids=more.excluded_chunk_ids,
             excluded_service_names=more.excluded_service_names,

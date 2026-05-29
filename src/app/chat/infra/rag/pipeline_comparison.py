@@ -36,12 +36,10 @@ from app.chat.infra.rag import (
 )
 from .response_generator import generate_final_response_v2
 from app.chat.routing import (
-    expand_query,
     extract_triples,
 )
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
-from app.shared.utils.relevance_filter import filter_irrelevant_docs
 from .common import dedupe_cap_expanded_queries, apply_policy_priority_to_documents
 from .pipeline_utils import (
     collect_okms_groupa_and_gov_docs,
@@ -76,6 +74,8 @@ async def process_rag_with_documents_v2(
     final_user_message: Optional[str] = None,
     precomputed_search_target: Optional[str] = None,
     precomputed_policy_priority_tag: Optional[str] = None,
+    precomputed_lifecycle_tags: Optional[List[str]] = None,
+    precomputed_household_tags: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -87,7 +87,7 @@ async def process_rag_with_documents_v2(
 
     _ = precomputed_search_target
     _ = service_target  # comparison은 GSND 미사용 — 시그니처 호환 위해 받기만 함
-    precomputed_policy_priority_tag = None  # 정책 우선순위는 guide_recommend 전용
+    # 정책 우선순위 태그도 분류기에서 받아 comparison 의 OKMS/GOV 레그 부스트에 사용(3축 전부).
 
     try:
         t_total = time.monotonic()
@@ -108,14 +108,7 @@ async def process_rag_with_documents_v2(
                 len(expanded_queries),
             )
         else:
-            if status_callback:
-                await status_callback("최적의 답변방식을 찾고 있습니다")
-            _t = time.monotonic()
-            expanded_queries = await expand_query(reformed_query)
-            logger.info("[TIMING][comparison] Step1 쿼리 확장: %.3fs", time.monotonic() - _t)
-            if not expanded_queries:
-                logger.warning("[RAG/comparison_v2] 쿼리 확장 실패 - 원본 질의 사용")
-                expanded_queries = [reformed_query]
+            expanded_queries = [reformed_query]
         if not expanded_queries:
             expanded_queries = [reformed_query]
         logger.info(f"[RAG/comparison_v2] 확장 완료: {len(expanded_queries)}개 쿼리")
@@ -161,15 +154,24 @@ async def process_rag_with_documents_v2(
             _comp_city_filters = [s for s in _comp_normalized if s.startswith("경상남도 ")]
             comp_sigun_filters = list(dict.fromkeys(_comp_city_filters)) if _comp_city_filters else []
         comp_birth_year = _extract_birth_year_from_message(message)
-        comp_lifecycle = (
-            _birth_year_to_lifecycle(comp_birth_year)
-            if comp_birth_year
-            else _extract_lifecycle_from_message(message)
-        )
-        comp_hshd_sttn, comp_hshd_synonyms = _extract_hshd_sttn_from_message(message)
+        # 생애주기/가구상황: 분류기(precomputed)면 LLM 멀티태그, None(분류기 실패)이면 룰 폴백.
+        if precomputed_lifecycle_tags is not None:
+            comp_lifecycle = list(precomputed_lifecycle_tags)
+        else:
+            comp_lifecycle = (
+                _birth_year_to_lifecycle(comp_birth_year)
+                if comp_birth_year
+                else _extract_lifecycle_from_message(message)
+            )
+        if precomputed_household_tags is not None:
+            _comp_hh = [t for t in precomputed_household_tags if t and t != "일반가구"]
+            comp_hshd_sttn = _comp_hh if _comp_hh else "일반가구"
+            comp_hshd_synonyms = []
+        else:
+            comp_hshd_sttn, comp_hshd_synonyms = _extract_hshd_sttn_from_message(message)
         logger.debug(
             f"[RAG/comparison_v2] 필터 - sigun: {comp_sigun_filters}, "
-            f"lifecycle: '{comp_lifecycle}', hshd_sttn: '{comp_hshd_sttn}'"
+            f"lifecycle: {comp_lifecycle!r}, hshd_sttn: {comp_hshd_sttn!r}"
         )
 
         comp_year_filters = extract_year_filters(message)
@@ -339,12 +341,6 @@ async def process_rag_with_documents_v2(
             log_prefix="[RAG/comparison_v2]",
             apply_enabled=not _skip_policy_boost,
         )
-        if Config.RELEVANCE_FILTER_ENABLED:
-            top_docs = await filter_irrelevant_docs(reformed_query, top_docs, sigun_filters=comp_sigun_filters)
-            logger.info("[TIMING][comparison] Step7 관련성 필터 [8b/sllm]: %.3fs", time.monotonic() - _t)
-            logger.info(f"[RAG/comparison_v2] 관련성 필터 후: {len(top_docs)}개")
-        else:
-            logger.info("[RAG/comparison_v2] Step7 관련성 필터 SKIP (RELEVANCE_FILTER_ENABLED=False) — 입력 %d건 그대로 진행", len(top_docs))
 
         if excluded_chunk_ids or excluded_service_names:
             from .common import filter_excluded_docs

@@ -47,23 +47,9 @@ def _load_prompt_file(filename: str, default: str = "") -> str:
 
     Returns:
         Content of the prompt file or default value
-
-    Note:
-        Config.USE_SHORT_PROMPTS=True 이면 prompts/short/<filename> 가
-        존재할 때 그것을 우선 사용한다. 응답시간 실험용 토글.
     """
     try:
         prompt_file = os.path.join(_PROMPT_BASE_DIR, filename)
-
-        # 단축 프롬프트 우선 로드 (실험용 토글, 실패 시 일반 경로로 폴백)
-        try:
-            from app.core.config import Config
-            if getattr(Config, "USE_SHORT_PROMPTS", False):
-                short_file = os.path.join(_PROMPT_BASE_DIR, "short", filename)
-                if os.path.exists(short_file):
-                    prompt_file = short_file
-        except Exception:
-            pass
 
         if not os.path.exists(prompt_file):
             return default
@@ -201,6 +187,15 @@ def load_classification_recommended_prompt() -> str:
     return _load_prompt_file('classification_recommended_prompt.txt')
 
 
+def load_classification_recommended_select_prompt() -> str:
+    """Load Classification Recommended *선별* prompt (LLM relevance-select 모드) from file.
+
+    classification_recommended_prompt.txt(전수 안내)와 달리, retrieved_documents 중
+    user_query와 관련된 사업만 선별 출력하도록 지시한다.
+    """
+    return _load_prompt_file('classification_recommended_select_prompt.txt')
+
+
 def load_classification_llm_recommended_prompt() -> str:
     """Load LLM-style recommended-question final answer prompt from file."""
     return _load_prompt_file('classification_llm_recommended_prompt.txt')
@@ -232,18 +227,13 @@ def load_uploaded_qa_prompt() -> str:
 
 
 def load_unified_preprocessing_prompt() -> str:
-    """Load Unified Preprocessing prompt — config QUERY_REWRITING_ENABLED 에 따라 분기.
+    """Load Unified Preprocessing prompt (단일 self-contained 쿼리, expansion 없음)."""
+    return _load_prompt_file('unified_preprocessing_prompt_rewrite.txt')
 
-    - True : unified_preprocessing_prompt_rewrite.txt (단일 self-contained 쿼리, expansion 없음)
-    - False(기본): unified_preprocessing_prompt.txt (의미 보존 expansion 5개)
 
-    런타임 분기지만 _load_prompt_file 가 mtime 캐시를 가지므로 양쪽 모두 캐시된다.
-    """
-    # lazy import: Config 의존을 prompt_loader 모듈 초기화에 끌어들이지 않기 위해 지연.
-    from app.core.config import Config
-    if getattr(Config, "QUERY_REWRITING_ENABLED", False):
-        return _load_prompt_file('unified_preprocessing_prompt_rewrite.txt')
-    return _load_prompt_file('unified_preprocessing_prompt.txt')
+def load_lifecycle_classification_prompt() -> str:
+    """Load 생애주기 태그 분류 prompt — unified_preprocess와 분리된 단일-task 분류기."""
+    return _load_prompt_file('lifecycle_classification_prompt.txt')
 
 
 def load_next_intent_prompt() -> str:
@@ -254,11 +244,6 @@ def load_next_intent_prompt() -> str:
 def load_pre_check_prompt() -> str:
     """Load Pre-check prompt (use_rag + clarification) from file."""
     return _load_prompt_file('pre_check_prompt.txt')
-
-
-def load_excluded_service_extraction_prompt() -> str:
-    """Load Excluded Service Extraction prompt from file."""
-    return _load_prompt_file('excluded_service_extraction_prompt.txt')
 
 
 def load_contextual_query_rewriter_multi_turn_prompt() -> str:
