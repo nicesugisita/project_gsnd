@@ -110,3 +110,6 @@ tests/llm_eval_results/
 SEARCH_RECALL_PLAN.md
 snug-leaping-dolphin.md
 
+
+# cross-encoder 배포 토큰(.env) 커밋 방지
+cross_encoder/.env
