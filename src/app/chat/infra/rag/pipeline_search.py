@@ -86,6 +86,9 @@ async def process_rag_search(
     precomputed_policy_priority_tag: Optional[str] = None,
     precomputed_lifecycle_tags: Optional[List[str]] = None,
     precomputed_household_tags: Optional[List[str]] = None,
+    precomputed_topic_category: Optional[List[str]] = None,   # guide_recommend 외엔 미사용(시그니처 호환)
+    precomputed_topic_keyword: Optional[List[str]] = None,
+    precomputed_must_not_keywords: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """

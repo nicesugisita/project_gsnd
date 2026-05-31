@@ -216,6 +216,8 @@ def build_chat_response(
     referenced_documents: Optional[List[Dict[str, str]]] = None,
     conv_id: Optional[str] = None,
     is_clarification: bool = False,
+    topic_chips: Optional[List[Dict[str, Any]]] = None,
+    slots: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build a Chat API response.
@@ -257,6 +259,12 @@ def build_chat_response(
 
     if referenced_documents:
         response["referenced_documents"] = referenced_documents
+
+    if topic_chips:
+        response["topic_chips"] = topic_chips
+
+    if slots:
+        response["slots"] = slots
 
     if conv_id:
         response["conv_id"] = conv_id

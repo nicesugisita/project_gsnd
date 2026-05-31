@@ -74,6 +74,158 @@ def _extract_sigun_from_history(messages: Optional[list]) -> list:
     return []
 
 
+def _card_to_doc(card: Dict[str, Any], sigun: str, year: str) -> Dict[str, Any]:
+    """welfare_recommend 카드 → generate_final_response_v2 입력 doc 포맷.
+
+    doc 키 규약(response_generator): NAME·SIGUN·YEAR·PURPOSE·CONTENT·TEL·APPLICATION_PERIOD.
+    그룹/주제 메타는 _접두 키로 보존(후속 프론트 contract용, 본문 생성엔 미사용).
+    """
+    parts: List[str] = []
+    if card.get("target"):
+        parts.append(f"지원대상 : {card['target']}")
+    if card.get("benefit"):
+        parts.append(f"지원내용 : {card['benefit']}")
+    content = "\n".join(parts) or (card.get("purpose") or "")
+    return {
+        "NAME": card.get("service_name", ""),
+        "SIGUN": sigun or "",
+        "YEAR": str(year or ""),
+        "PURPOSE": card.get("purpose", ""),
+        "CONTENT": content,
+        "TEL": card.get("application_contact", ""),
+        "APPLICATION_PERIOD": card.get("application_period", ""),
+        "_topic": card.get("topic"),
+        "_household_group": card.get("household_group"),
+        "_db_source": card.get("source"),
+    }
+
+
+def _format_direct_by_topic(sigun, lifecycle, result) -> str:
+    """정보부족(주제 미정)·다건(broad) 시 LLM 생성 없이 분야별 그룹 텍스트 직접 포맷.
+
+    조회형='검색+포맷, RAG 생성 X' 원칙(§2). DB 구조화 카드를 분야별로 묶어 즉시 응답.
+    """
+    cards = result.get("cards", [])
+    chips = result.get("topic_chips", [])
+    region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
+    lc = ", ".join(lifecycle or [])
+    head = f"{region}{(' ' + lc) if lc else ''}에서 받을 수 있는 복지가 {len(cards)}건 있어요. 분야별로 정리해 드릴게요.\n\n"
+    lines = []
+    for ch in chips:
+        names = [c.get("service_name") for c in cards if ch["label"] in (c.get("topics") or [c.get("topic")])]
+        names = [n for n in names if n][:3]
+        more = " 등" if ch["count"] > len(names) else ""
+        lines.append(f"■ {ch['label']} ({ch['count']}건): " + ", ".join(names) + more)
+    tail = "\n\n어느 분야를 자세히 보고 싶으신지 알려주세요."
+    return head + "\n".join(lines) + tail
+
+
+def _format_drilldown(sigun, lifecycle, topic_label, cards) -> str:
+    """주제 선택(드릴다운) 결과가 다건일 때 LLM 없이 서비스 리스트 직접 포맷.
+
+    가구상황 그룹(일반가구 우선 / 특정대상 더보기)으로 묶어 노출(§3-5-1·A-3).
+    """
+    region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
+    lc = ", ".join(lifecycle or [])
+    head = f"{region}{(' ' + lc) if lc else ''}의 '{topic_label}' 분야 복지 {len(cards)}건입니다.\n\n"
+    pri = [c for c in cards if c.get("household_group") == "우선"]
+    rest = [c for c in cards if c.get("household_group") != "우선"]
+
+    def _block(items, title):
+        if not items:
+            return ""
+        out = [f"[{title}]"]
+        for c in items:
+            tel = c.get("application_contact") or ""
+            out.append(f"- {c.get('service_name','')}" + (f"  (문의 {tel})" if tel else ""))
+        return "\n".join(out)
+
+    body = _block(pri, "일반 대상")
+    if rest:
+        body += ("\n\n" if body else "") + _block(rest, "특정 대상(저소득·장애인·한부모 등)")
+    return head + body
+
+
+async def _recommend_via_db(
+    *, message, sigun_filters, lifecycle_tags, household_tags, topic_category,
+    topic_keyword, must_not, temperature, max_tokens, stream, frequency_penalty,
+    repetition_penalty, top_p, top_k, seed, tools, intent, messages,
+    recommended_question_prompt, status_callback, out_meta=None,
+):
+    """GUIDE_DB_DIRECT_ENABLED 경로: okms2 두 뷰 직접조회.
+
+    하이브리드(확정): 주제 미정 OR 카드 > GUIDE_MAX_RESULTS → 분야별 직접 포맷(LLM X, 즉시).
+    그 외(구체·소량) → 기존 generate_final_response_v2(LLM 자연어 답변).
+    """
+    from app.chat.infra.db.welfare_recommend import search_recommend
+
+    sigun = (sigun_filters or [None])[0]
+    hh = [t for t in (household_tags or []) if t and t != "일반가구"]
+    if status_callback:
+        await status_callback("복지 정보를 검색하고 있습니다")
+    _t = time.monotonic()
+    result = await asyncio.to_thread(
+        search_recommend, sigun, list(lifecycle_tags or []), hh,
+        list(topic_category or []), list(topic_keyword or []), list(must_not or []),
+    )
+    logger.info("[TIMING][guide_recommend/DB] search_recommend: %.3fs", time.monotonic() - _t)
+
+    cards = result.get("cards", [])
+    cards.sort(key=lambda c: 0 if c.get("household_group") == "우선" else 1)  # 우선 그룹 먼저
+    yL = (result.get("year") or {}).get("local", "")
+    docs = [_card_to_doc(c, sigun, yL) for c in cards]
+    referenced = build_referenced_documents(docs)
+    user_region = (sigun or "").replace("경상남도", "").strip()
+    _gr_max_tokens = max(max_tokens or 0, GUIDE_RECOMMEND_MAX_TOKENS)
+
+    topic_given = bool(topic_category or topic_keyword)
+    many = len(cards) > Config.GUIDE_MAX_RESULTS
+    if many and not topic_given:
+        mode = "direct_topic"      # broad → 분야별 그룹
+    elif many and topic_given:
+        mode = "drilldown_list"    # 주제 다건 → 서비스 리스트(가구그룹)
+    else:
+        mode = "llm"               # 소량 → LLM 자연어
+    if out_meta is not None:  # 프론트 칩/그룹용 메타(응답에 노출)
+        out_meta["topic_chips"] = result.get("topic_chips", [])
+        out_meta["total"] = result.get("total", len(cards))
+        out_meta["mode"] = mode
+        out_meta["slots"] = {  # B2: 칩 드릴다운용 슬롯 echo
+            "sigun": sigun, "lifecycle": list(lifecycle_tags or []),
+            "household": [t for t in (household_tags or []) if t and t != "일반가구"],
+        }
+    logger.info(
+        "[guide_recommend/DB] cards=%d fallback=%s mode=%s chips=%s",
+        len(cards), result.get("fallback") or "-", mode,
+        [(c["label"], c["count"]) for c in result.get("topic_chips", [])[:6]],
+    )
+
+    if mode == "direct_topic":
+        # 주제 미정·다건 → 분야별 그룹 직접 노출(즉시·결정적). 문자열 반환=스트림 자동처리.
+        return _format_direct_by_topic(sigun, lifecycle_tags, result), referenced
+    if mode == "drilldown_list":
+        # 주제 선택·다건 → 서비스 리스트(가구상황 그룹) 직접 노출(LLM 없이, 22건 결정적 재현).
+        topic_label = (list(topic_keyword) or list(topic_category) or ["선택"])[0]
+        return _format_drilldown(sigun, lifecycle_tags, topic_label, cards), referenced
+
+    # 소량 → LLM 자연어 최종응답
+    if status_callback:
+        await status_callback("최종답변을 생성하고 있습니다")
+    response = await generate_final_response_v2(
+        (message or "").strip(), docs, temperature, _gr_max_tokens, stream,
+        frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
+        intent=intent,
+        lifecycle=", ".join(lifecycle_tags or []),
+        messages=messages,
+        policy_priority_tag=None,
+        user_region=user_region,
+        user_birth_year="",
+        more_info_mode=False,
+        use_llm_recommended_prompt=recommended_question_prompt,
+    )
+    return response, referenced
+
+
 async def process_rag_guide_recommend(
     message: str,
     reformed_query: str,
@@ -101,6 +253,10 @@ async def process_rag_guide_recommend(
     precomputed_policy_priority_tag: Optional[str] = None,
     precomputed_lifecycle_tags: Optional[List[str]] = None,
     precomputed_household_tags: Optional[List[str]] = None,
+    precomputed_topic_category: Optional[List[str]] = None,
+    precomputed_topic_keyword: Optional[List[str]] = None,
+    precomputed_must_not_keywords: Optional[List[str]] = None,
+    out_meta: Optional[Dict[str, Any]] = None,   # DB 경로: topic_chips 등 메타를 채워 반환(프론트 칩용)
     service_target: Optional[str] = "official",
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
@@ -115,6 +271,26 @@ async def process_rag_guide_recommend(
 
     try:
         t_total = time.monotonic()
+
+        # ── guide_recommend DB 직접조회 경로 (플래그 ON 시 Mariner 대체) ──
+        if Config.GUIDE_DB_DIRECT_ENABLED:
+            return await _recommend_via_db(
+                message=message,
+                sigun_filters=sigun_filters,
+                lifecycle_tags=precomputed_lifecycle_tags,
+                household_tags=precomputed_household_tags,
+                topic_category=precomputed_topic_category,
+                topic_keyword=precomputed_topic_keyword,
+                must_not=precomputed_must_not_keywords,
+                temperature=temperature, max_tokens=max_tokens, stream=stream,
+                frequency_penalty=frequency_penalty, repetition_penalty=repetition_penalty,
+                top_p=top_p, top_k=top_k, seed=seed, tools=tools,
+                intent=intent, messages=messages,
+                recommended_question_prompt=recommended_question_prompt,
+                status_callback=status_callback,
+                out_meta=out_meta,
+            )
+
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
         # LLM 선별 모드: 룰베이스 개수 결정(reserve/재귀/가변개수)을 끄고 RRF 상위 N건을
         # 그대로 최종응답 LLM에 넘긴다(관련 문서 선별은 선별 프롬프트가 담당).

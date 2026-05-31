@@ -108,6 +108,8 @@ tests/llm_eval_results/
 
 # ─── Local planning / scratch docs ────────────────────────────
 SEARCH_RECALL_PLAN.md
+ROUTING_REDESIGN_PLAN.md
+ELDERLY_PRIORITY_DRILLDOWN_PLAN.md
 snug-leaping-dolphin.md
 
 

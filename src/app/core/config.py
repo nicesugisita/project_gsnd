@@ -134,6 +134,12 @@ class Settings(BaseSettings):
     # 선별은 LLM 선별 프롬프트에 위임. True 면 좁은 정책질의 환각/off-topic 차단용으로 복원.
     GUIDE_TOPIC_GATE_ENABLED: bool = False
 
+    # ── guide_recommend DB 직접조회 (라우팅 재설계) ──────────────────────────
+    # True면 guide_recommend 검색을 Mariner 대신 okms2 두 뷰 직접조회(welfare_recommend)로 수행.
+    # 시군/생애주기/가구/주제/배제어 구조화 WHERE → 카드 → 기존 generate_final_response_v2 재사용.
+    # False(기본)면 기존 Mariner 경로 유지(무회귀·롤백).
+    GUIDE_DB_DIRECT_ENABLED: bool = True
+
     # ── Cross-Encoder 리랭커 ──────────────────────────────────────────────────
     # 검색 결과 리랭킹을 RRF(rank 융합) 대신 cross-encoder(query·본문 관련성 점수)로 수행.
     # True(기본)면 후보를 합쳐 cross_encoder 서비스(/rerank)로 점수 정렬. False 면 기존 RRF

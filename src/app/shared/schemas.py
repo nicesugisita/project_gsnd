@@ -110,6 +110,14 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional chat mode (e.g. 'guide_recommend'). /v1/chat/recommended-question 은 mode·의도와 무관하게 전용 경로만 탄다.",
     )
+    drilldown: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "B2 구조화 칩 드릴다운. 직전 추천의 영속 슬롯 + 선택 주제를 그대로 담아 보내면 "
+            "pre_check·재작성·분류를 전부 건너뛰고 guide_recommend DB 조회로 직행한다(결정적). "
+            "shape: {sigun, lifecycle:[...], household:[...], topic_category, topic_keyword:[...], must_not:[...]}"
+        ),
+    )
 
     @validator('messages')
     def validate_messages(cls, v):

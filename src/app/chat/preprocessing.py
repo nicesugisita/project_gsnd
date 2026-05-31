@@ -26,7 +26,6 @@ from app.chat.intent_registry import get_intent_names as _get_intent_names
 VALID_INTENTS = _get_intent_names()
 
 SEARCH_TARGETS = frozenset({"admin_local_office", "welfare_facility", "ambiguous"})
-POLICY_PRIORITY_TAGS = frozenset({"implant", "low_income", "elderly_benefits"})
 EXCLUSION_INTENTS = frozenset({
     "NONE", "PURE_EXCLUSION", "ANCHOR_COMPARISON",
     "RESIDUAL_CATEGORY", "SUBSTITUTION",
@@ -106,25 +105,6 @@ def _normalize_search_target(intent: str, raw: Any) -> Optional[str]:
     return "ambiguous"
 
 
-def _raw_policy_priority_tag_from_parsed(parsed: Dict[str, Any]) -> Any:
-    """LLM JSON에서 정책 우선순위 태그 읽기(스네이크/카멜·빈값·문자열 null 허용)."""
-    order = ("policy_priority_tag", "policyPriorityTag")
-    for key in order:
-        value = parsed.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                continue
-            low = stripped.lower().replace("-", "_")
-            if low in ("null", "none"):
-                continue
-            return low
-        return value
-    return None
-
-
 def _normalize_detail_requested(parsed: Dict[str, Any]) -> bool:
     """LLM JSON에서 detail_requested 읽기. True/False 외 표현(문자열 'true'/'1' 등)도 허용.
 
@@ -146,16 +126,6 @@ def _normalize_detail_requested(parsed: Dict[str, Any]) -> bool:
     return False
 
 
-def _normalize_policy_priority_tag(raw: Any) -> Optional[str]:
-    if raw is None:
-        return None
-    value = str(raw).strip().lower().replace("-", "_")
-    if not value or value in ("null", "none"):
-        return None
-    if value in POLICY_PRIORITY_TAGS:
-        return value
-    logger.warning("[UnifiedPreprocess] 알 수 없는 policy_priority_tag=%r → None", raw)
-    return None
 
 
 def _normalize_exclusion_intent(raw: Any) -> str:
@@ -234,60 +204,50 @@ def _normalize_household_tags(parsed: Dict[str, Any]) -> List[str]:
     return _specifics if _specifics else out
 
 
-# 정책 태그 우선순위(더 좁은 것 우선) — policy_priority._TAG_FALLBACK_PRIORITY 와 동일.
-_POLICY_TAG_PRIORITY = ("implant", "low_income", "elderly_benefits")
+# 주제 category 화이트리스트 — DB 관심주제 canonical 16종.
+_TOPIC_CATEGORY_WHITELIST = (
+    "주거", "일자리", "보육", "교육", "신체건강", "정신건강", "보호돌봄", "생활지원",
+    "안전위기", "임신출산", "문화여가", "법률", "금융", "에너지", "입양위탁", "기타",
+)
+# 주제 keyword 금칙어 — 일반어는 사업명 LIKE에 무의미·과다매칭이라 제외.
+_TOPIC_KEYWORD_BANNED = ("지원", "지원금", "복지", "혜택", "서비스", "제도", "도움")
 
 
-def _normalize_policy_tags_to_single(parsed: Dict[str, Any]) -> Optional[str]:
-    """분류기 JSON의 policy_tags 배열 → 단일 정책 우선순위 태그(우선순위 순). 없으면 None."""
-    raw = _read_field(parsed, "policy_tags", "policyTags")
-    tags = [t for t in _normalize_str_list(raw) if t in POLICY_PRIORITY_TAGS]
-    if not tags:
-        return None
-    for p in _POLICY_TAG_PRIORITY:
-        if p in tags:
-            return p
-    return tags[0]
+def _normalize_topic_category(parsed: Dict[str, Any]) -> List[str]:
+    """분류기 JSON의 topic_category 정규화. canonical 16종만 통과(중복 제거, 순서 보존)."""
+    raw = _read_field(parsed, "topic_category", "topicCategory")
+    out: List[str] = []
+    for t in _normalize_str_list(raw):
+        if t in _TOPIC_CATEGORY_WHITELIST and t not in out:
+            out.append(t)
+        elif t not in _TOPIC_CATEGORY_WHITELIST:
+            logger.warning("[QueryTags] 알 수 없는 topic_category=%r → 무시", t)
+    return out
 
 
-def _resolve_policy_priority_tag(query: str, raw_tag: Optional[str]) -> Optional[str]:
-    """정책 태그 후처리: DB excludes 무력화 → 없으면 룰 기반 fallback.
-
-    LLM이 준 태그를 strip_tag_by_exclusions 로 검증하고(예: '치매' 포함 시 elderly 무력화),
-    그래도 None 이면 infer_policy_priority_tag_by_keywords 로 채워 anchor 검색을 안정 발동시킨다.
-    """
-    tag = raw_tag
-    try:
-        from app.chat.infra.rag.policy_priority import strip_tag_by_exclusions
-        before = tag
-        tag = strip_tag_by_exclusions(query, tag)
-        if before and tag is None:
-            logger.info("[QueryTags] policy_priority_tag 무력화: %s → None (DB excludes)", before)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[QueryTags] exclude check failed: %s", e)
-    if tag is None:
-        try:
-            from app.chat.infra.rag.policy_priority import infer_policy_priority_tag_by_keywords
-            inferred = infer_policy_priority_tag_by_keywords(query)
-            if inferred:
-                tag = inferred
-                logger.info("[QueryTags] policy_priority_tag 룰 fallback: None → %s", inferred)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[QueryTags] tag inference fallback failed: %s", e)
-    return tag
+def _normalize_topic_keyword(parsed: Dict[str, Any]) -> List[str]:
+    """분류기 JSON의 topic_keyword 정규화. 금칙어·1글자 제외(중복 제거, 순서 보존)."""
+    raw = _read_field(parsed, "topic_keyword", "topicKeyword")
+    out: List[str] = []
+    for t in _normalize_str_list(raw):
+        t = t.strip()
+        if len(t) >= 2 and t not in _TOPIC_KEYWORD_BANNED and t not in out:
+            out.append(t)
+    return out
 
 
 async def classify_query_tags(
     user_query: str,
     messages: Optional[List[Dict[str, Any]]] = None,
-) -> tuple[Optional[List[str]], Optional[str], Optional[List[str]]]:
-    """분리 분류기(생애주기 + 정책 우선순위 + 가구상황 3축). unified_preprocess와 병렬 호출.
+) -> tuple[Optional[List[str]], Optional[List[str]], List[str], List[str]]:
+    """분리 분류기(생애주기 + 가구상황 + 주제 3축). unified_preprocess와 병렬 호출.
 
     Returns:
-        (lifecycle_tags, policy_priority_tag, household_tags)
+        (lifecycle_tags, household_tags, topic_category, topic_keyword)
         - lifecycle_tags: 성공 시 정규화 리스트([] 포함), LLM/파싱 실패 시 None(→ 파이프라인 룰 폴백).
-        - policy_priority_tag: LLM 1차 → excludes 무력화 → 없으면 룰 fallback (단일값, 실패해도 룰로 충당).
         - household_tags: 성공 시 정규화 리스트(특정계층 또는 ['일반가구']), 실패 시 None(→ 룰 폴백).
+        - topic_category: canonical 16종 0+개(실패 시 []). DB 추천 WHERE 주제 필터용.
+        - topic_keyword: free 특정어 0+개(실패 시 []). 사업명 LIKE용(keyword 우선).
     """
     from app.shared.utils.prompt_loader import load_lifecycle_classification_prompt
     template = load_lifecycle_classification_prompt()
@@ -313,13 +273,13 @@ async def classify_query_tags(
 
     lifecycle_tags = _normalize_lifecycle_tags(parsed) if parsed is not None else None
     household_tags = _normalize_household_tags(parsed) if parsed is not None else None
-    raw_policy = _normalize_policy_tags_to_single(parsed) if parsed is not None else None
-    policy_priority_tag = _resolve_policy_priority_tag(user_query, raw_policy)
+    topic_category = _normalize_topic_category(parsed) if parsed is not None else []
+    topic_keyword = _normalize_topic_keyword(parsed) if parsed is not None else []
     logger.info(
-        "[QueryTags] lifecycle=%s | policy=%s | household=%s (used_32b=%s)",
-        lifecycle_tags, policy_priority_tag, household_tags, used_32b,
+        "[QueryTags] lifecycle=%s | household=%s | topic_cat=%s | topic_kw=%s (used_32b=%s)",
+        lifecycle_tags, household_tags, topic_category, topic_keyword, used_32b,
     )
-    return lifecycle_tags, policy_priority_tag, household_tags
+    return lifecycle_tags, household_tags, topic_category, topic_keyword
 
 
 async def unified_preprocess(
@@ -338,7 +298,6 @@ async def unified_preprocess(
         expanded_queries: list[str]  (use_rag=False이면 [])
         keywords        : list[str]  (use_rag=False이면 [])
         search_target   : str | None (intent=search일 때만 admin_local_office | welfare_facility | ambiguous)
-        policy_priority_tag: str | None (implant | low_income | elderly_benefits)
     """
     # [단계 진단] 요청 시작 — 이전 요청 잔여 단계 데이터 제거 (RESPONSE_TRACE_ENABLED 시만 동작)
     try:
@@ -434,8 +393,6 @@ async def unified_preprocess(
             keywords = []
 
     search_target = _normalize_search_target(intent, _raw_search_target_from_parsed(parsed))
-    # 정책 우선순위 태그는 분리 분류기(classify_query_tags)가 산출 — 여기선 미사용(None).
-    policy_priority_tag = None
     detail_requested = _normalize_detail_requested(parsed)
 
     # [작업 6] 배제 의도 분석 — rewrite 모드 프롬프트에서만 채워짐. expand 모드 폴백 시 안전 default.
@@ -458,7 +415,6 @@ async def unified_preprocess(
         "expanded_queries": expanded,
         "keywords":         keywords,
         "search_target":    search_target,
-        "policy_priority_tag": policy_priority_tag,
         "detail_requested": detail_requested,
         "exclusion_intent": exclusion_intent,
         "vector_query":     vector_query,
@@ -467,8 +423,8 @@ async def unified_preprocess(
     }
 
     logger.info(
-        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | policy_priority_tag=%s | detail_requested=%s | exclusion_intent=%s | mustNot=%s | anchor=%s | use_rag(input)=%s",
-        query[:50], intent, search_target, policy_priority_tag, detail_requested,
+        "[UnifiedPreprocess] query=%s | intent=%s | search_target=%s | detail_requested=%s | exclusion_intent=%s | mustNot=%s | anchor=%s | use_rag(input)=%s",
+        query[:50], intent, search_target, detail_requested,
         exclusion_intent, must_not_keywords, anchor_entities, use_rag,
     )
 
@@ -491,7 +447,6 @@ def _make_fallback(user_query: str) -> Dict[str, Any]:
         "expanded_queries": [user_query],
         "keywords":         [],
         "search_target":    None,
-        "policy_priority_tag": None,
         "exclusion_intent": "NONE",
         "vector_query":     user_query,
         "must_not_keywords": [],

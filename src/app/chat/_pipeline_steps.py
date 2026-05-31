@@ -51,9 +51,10 @@ class PreprocessResult:
     keywords: List[str] = field(default_factory=list)
     elapsed: float = 0.0
     search_target: Optional[str] = None
-    policy_priority_tag: Optional[str] = None
     lifecycle_tags: Optional[List[str]] = None
     household_tags: Optional[List[str]] = None
+    topic_category: List[str] = field(default_factory=list)
+    topic_keyword: List[str] = field(default_factory=list)
     detail_requested: bool = False
     # 작업 6: 배제 의도 분석 (rewrite 모드 unified_preprocess에서만 의미 있게 채워짐)
     exclusion_intent: str = "NONE"
@@ -167,7 +168,6 @@ def build_preprocess_skip_unified_recommended_question(user_message: str) -> Pre
         keywords=list(kw) if kw else [],
         elapsed=0.0,
         search_target=None,
-        policy_priority_tag=None,
     )
 
 
@@ -178,20 +178,19 @@ async def run_unified_preprocess(
 ) -> PreprocessResult:
     """[5단계] 통합 전처리: 의도 분류, 쿼리 개선, 확장, 키워드 추출.
 
-    생애주기·정책 우선순위 태그 분류는 별도 분류기(classify_query_tags)로 분리돼 있어
+    생애주기·가구상황·주제 태그 분류는 별도 분류기(classify_query_tags)로 분리돼 있어
     여기서 unified_preprocess와 asyncio.gather 로 병렬 호출한다. 분류기 lifecycle_tags가
-    None이면(LLM/파싱 실패) 파이프라인이 기존 룰 기반 생애주기로 폴백하고, policy는 분류기
-    내부에서 excludes 무력화 + 룰 fallback까지 마쳐 반환한다.
+    None이면(LLM/파싱 실패) 파이프라인이 기존 룰 기반 생애주기로 폴백한다.
     """
     _t = time.monotonic()
-    result, (lifecycle_tags, policy_priority_tag, household_tags) = await asyncio.gather(
+    result, (lifecycle_tags, household_tags, topic_category, topic_keyword) = await asyncio.gather(
         unified_preprocess(user_message, messages, use_rag=use_rag),
         classify_query_tags(user_message, messages),
     )
     elapsed = round(time.monotonic() - _t, 3)
     logger.info(
-        "[TIMING] unified_preprocess(+tags): %.3fs | lifecycle=%s | policy=%s | household=%s",
-        elapsed, lifecycle_tags, policy_priority_tag, household_tags,
+        "[TIMING] unified_preprocess(+tags): %.3fs | lifecycle=%s | household=%s | topic_cat=%s | topic_kw=%s",
+        elapsed, lifecycle_tags, household_tags, topic_category, topic_keyword,
     )
     return PreprocessResult(
         query=result.get("query", user_message),
@@ -202,9 +201,10 @@ async def run_unified_preprocess(
         keywords=result.get("keywords") or [],
         elapsed=elapsed,
         search_target=result.get("search_target"),
-        policy_priority_tag=policy_priority_tag,
         lifecycle_tags=lifecycle_tags,
         household_tags=household_tags,
+        topic_category=topic_category,
+        topic_keyword=topic_keyword,
         detail_requested=bool(result.get("detail_requested", False)),
         exclusion_intent=result.get("exclusion_intent", "NONE"),
         vector_query=result.get("vector_query") or result.get("reformed_query") or user_message,
