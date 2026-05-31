@@ -218,6 +218,7 @@ def build_chat_response(
     is_clarification: bool = False,
     topic_chips: Optional[List[Dict[str, Any]]] = None,
     slots: Optional[Dict[str, Any]] = None,
+    guide_services: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Build a Chat API response.
@@ -265,6 +266,9 @@ def build_chat_response(
 
     if slots:
         response["slots"] = slots
+
+    if guide_services:
+        response["guide_services"] = guide_services
 
     if conv_id:
         response["conv_id"] = conv_id

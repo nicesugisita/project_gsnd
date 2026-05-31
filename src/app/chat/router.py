@@ -179,6 +179,7 @@ async def _chat_completions_core(request: Request, *, llm_recommended_followup: 
                 topic_category=_dd_topic_cat,
                 topic_keyword=_dd_topic_kw,
                 must_not_keywords=[str(t).strip() for t in (dd.get("must_not") or []) if str(t).strip()],
+                is_drilldown=True,
             )
 
         if llm_recommended_followup:

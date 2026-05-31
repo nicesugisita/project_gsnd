@@ -465,6 +465,9 @@ async def _streaming_chat_flow(
 
         if filtered_referenced_documents:
             yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+        if guide_meta.get("guide_services"):
+            # 드릴다운(분야 선택): 서비스 카드 캐러셀용 구조화 데이터.
+            yield f"data: {json.dumps({'guide_services': guide_meta['guide_services']}, ensure_ascii=False)}\n\n"
         if guide_meta.get("topic_chips"):
             # B2: 칩(topic_chips) + 검색 슬롯(slots)을 함께 내보내 stateless 드릴다운 계약 구성.
             # 프론트는 chip 클릭 시 {**slots, topic_category: chip.label} 로 drilldown 요청을 재전송한다.

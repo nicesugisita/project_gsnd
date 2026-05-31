@@ -100,6 +100,23 @@ def _card_to_doc(card: Dict[str, Any], sigun: str, year: str) -> Dict[str, Any]:
     }
 
 
+def _subj(word: str) -> str:
+    """한국어 주격조사(이/가) — 마지막 글자 받침 유무로 선택. '노인'→'노인이', '청년'→'청년이', '영유아'→'영유아가'."""
+    if not word:
+        return ""
+    ch = word[-1]
+    if "가" <= ch <= "힣":
+        return word + ("이" if (ord(ch) - 0xAC00) % 28 else "가")
+    return word + "가"
+
+
+def _recipient_phrase(region: str, lc: str) -> str:
+    """수혜자 자연어 구. lc 있으면 '{region}에 사는 {lc}이 받을 수 있는', 없으면 '{region}에서 받을 수 있는'."""
+    if lc:
+        return f"{region}에 사는 {_subj(lc)} 받을 수 있는"
+    return f"{region}에서 받을 수 있는"
+
+
 def _format_direct_by_topic(sigun, lifecycle, result) -> str:
     """정보부족(주제 미정)·다건(broad) 시 LLM 생성 없이 분야별 그룹 텍스트 직접 포맷.
 
@@ -109,48 +126,39 @@ def _format_direct_by_topic(sigun, lifecycle, result) -> str:
     chips = result.get("topic_chips", [])
     region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
     lc = ", ".join(lifecycle or [])
-    head = f"{region}{(' ' + lc) if lc else ''}에서 받을 수 있는 복지가 {len(cards)}건 있어요. 분야별로 정리해 드릴게요.\n\n"
+    # "창원시에 사는 노인이 받을 수 있는 복지가 206건 있어요." (lc 없으면 "창원시에서 …")
+    head = f"{_recipient_phrase(region, lc)} 복지가 **{len(cards)}건** 있어요.\n\n"
+    # 마크다운 리스트(- ) → 분야마다 줄바꿈 렌더. 분야명 굵게 · 건수 · 대표 3건.
     lines = []
     for ch in chips:
         names = [c.get("service_name") for c in cards if ch["label"] in (c.get("topics") or [c.get("topic")])]
         names = [n for n in names if n][:3]
         more = " 등" if ch["count"] > len(names) else ""
-        lines.append(f"■ {ch['label']} ({ch['count']}건): " + ", ".join(names) + more)
-    tail = "\n\n어느 분야를 자세히 보고 싶으신지 알려주세요."
+        lines.append(f"- **{ch['label']}** {ch['count']}건 · " + ", ".join(names) + more)
+    tail = "\n\n👇 아래에서 분야를 선택하면 자세히 볼 수 있어요."
     return head + "\n".join(lines) + tail
 
 
-def _format_drilldown(sigun, lifecycle, topic_label, cards) -> str:
-    """주제 선택(드릴다운) 결과가 다건일 때 LLM 없이 서비스 리스트 직접 포맷.
+# (구) _format_drilldown(텍스트 서비스 리스트)은 카드 캐러셀(out_meta.guide_services)로 대체됨.
+_GUIDE_SERVICE_FIELDS = (
+    "service_name", "purpose", "target", "benefit",
+    "application_period", "application_contact", "referenced_documents_name",
+)
 
-    가구상황 그룹(일반가구 우선 / 특정대상 더보기)으로 묶어 노출(§3-5-1·A-3).
-    """
-    region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
-    lc = ", ".join(lifecycle or [])
-    head = f"{region}{(' ' + lc) if lc else ''}의 '{topic_label}' 분야 복지 {len(cards)}건입니다.\n\n"
-    pri = [c for c in cards if c.get("household_group") == "우선"]
-    rest = [c for c in cards if c.get("household_group") != "우선"]
 
-    def _block(items, title):
-        if not items:
-            return ""
-        out = [f"[{title}]"]
-        for c in items:
-            tel = c.get("application_contact") or ""
-            out.append(f"- {c.get('service_name','')}" + (f"  (문의 {tel})" if tel else ""))
-        return "\n".join(out)
-
-    body = _block(pri, "일반 대상")
-    if rest:
-        body += ("\n\n" if body else "") + _block(rest, "특정 대상(저소득·장애인·한부모 등)")
-    return head + body
+def _cards_to_guide_services(cards) -> list:
+    """정렬된 카드 → 프론트 GuideServiceItem(카드 캐러셀) 배열. A-1 정렬 순서 보존."""
+    out = []
+    for c in cards:
+        out.append({k: (c.get(k) or "") for k in _GUIDE_SERVICE_FIELDS})
+    return out
 
 
 async def _recommend_via_db(
     *, message, sigun_filters, lifecycle_tags, household_tags, topic_category,
     topic_keyword, must_not, temperature, max_tokens, stream, frequency_penalty,
     repetition_penalty, top_p, top_k, seed, tools, intent, messages,
-    recommended_question_prompt, status_callback, out_meta=None,
+    recommended_question_prompt, status_callback, out_meta=None, is_drilldown=False,
 ):
     """GUIDE_DB_DIRECT_ENABLED 경로: okms2 두 뷰 직접조회.
 
@@ -186,20 +194,34 @@ async def _recommend_via_db(
 
     topic_given = bool(topic_category or topic_keyword)
     many = len(cards) > Config.GUIDE_MAX_RESULTS
-    if many and not topic_given:
-        mode = "direct_topic"      # broad → 분야별 그룹
-    elif many and topic_given:
-        mode = "drilldown_list"    # 주제 다건 → 서비스 리스트(가구그룹)
+    if is_drilldown and topic_given:
+        mode = "cards"             # 칩 클릭(B2 드릴다운) → 서비스 카드 캐러셀(건수 무관)
+    elif many:
+        mode = "direct_topic"      # 일반 질의·다건 → 분야별 그룹 목록 + 칩(주제 추출됐어도 먼저 개요)
     else:
         mode = "llm"               # 소량 → LLM 자연어
-    if out_meta is not None:  # 프론트 칩/그룹용 메타(응답에 노출)
-        out_meta["topic_chips"] = result.get("topic_chips", [])
+    if out_meta is not None:  # 프론트 칩/그룹/카드용 메타(응답에 노출)
+        # llm 모드(구체 질의·소량 자연어 답변)는 분야 칩 불필요 — 클릭해도 의미 없어 미출력.
+        if mode != "llm":
+            out_meta["topic_chips"] = result.get("topic_chips", [])
         out_meta["total"] = result.get("total", len(cards))
         out_meta["mode"] = mode
         out_meta["slots"] = {  # B2: 칩 드릴다운용 슬롯 echo
             "sigun": sigun, "lifecycle": list(lifecycle_tags or []),
             "household": [t for t in (household_tags or []) if t and t != "일반가구"],
         }
+        if mode == "cards":  # 드릴다운: 서비스 카드 캐러셀용 구조화 데이터
+            out_meta["guide_services"] = _cards_to_guide_services(cards)
+            # 칩은 '원래 광역 분야 분포'(주제 필터 없이 동일 슬롯)로 — 다른 분야로 전환해도
+            # 건수가 일관(생활지원 68 유지). 주제 필터된 부분집합 멤버십(생활지원 10)으로 덮지 않음.
+            try:
+                broad = await asyncio.to_thread(
+                    search_recommend, sigun, list(lifecycle_tags or []), hh, [], [], list(must_not or []),
+                )
+                out_meta["topic_chips"] = broad.get("topic_chips", [])
+                out_meta["total"] = broad.get("total", out_meta["total"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[guide_recommend/DB] 드릴다운 광역 칩 재계산 실패: %s", e)
     logger.info(
         "[guide_recommend/DB] cards=%d fallback=%s mode=%s chips=%s",
         len(cards), result.get("fallback") or "-", mode,
@@ -209,10 +231,14 @@ async def _recommend_via_db(
     if mode == "direct_topic":
         # 주제 미정·다건 → 분야별 그룹 직접 노출(즉시·결정적). 문자열 반환=스트림 자동처리.
         return _format_direct_by_topic(sigun, lifecycle_tags, result), referenced
-    if mode == "drilldown_list":
-        # 주제 선택·다건 → 서비스 리스트(가구상황 그룹) 직접 노출(LLM 없이, 22건 결정적 재현).
+    if mode == "cards":
+        # 분야 선택(드릴다운) → 서비스 카드 캐러셀(out_meta.guide_services). 본문은 짧은 헤더만
+        # (프론트가 카드 있으면 본문 숨기고 캐러셀 렌더). LLM 없이 결정적.
         topic_label = (list(topic_keyword) or list(topic_category) or ["선택"])[0]
-        return _format_drilldown(sigun, lifecycle_tags, topic_label, cards), referenced
+        region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
+        lc = ", ".join(lifecycle_tags or [])
+        head = f"{_recipient_phrase(region, lc)} '{topic_label}' 분야 복지 {len(cards)}건이에요."
+        return head, referenced
 
     # 소량 → LLM 자연어 최종응답
     if status_callback:
@@ -264,6 +290,7 @@ async def process_rag_guide_recommend(
     precomputed_must_not_keywords: Optional[List[str]] = None,
     out_meta: Optional[Dict[str, Any]] = None,   # DB 경로: topic_chips 등 메타를 채워 반환(프론트 칩용)
     service_target: Optional[str] = "official",
+    is_drilldown: bool = False,   # True=칩 클릭(B2 드릴다운) → 카드 캐러셀, False=일반 질의 → 분야 목록
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — guide_recommend 전용
@@ -295,6 +322,7 @@ async def process_rag_guide_recommend(
                 recommended_question_prompt=recommended_question_prompt,
                 status_callback=status_callback,
                 out_meta=out_meta,
+                is_drilldown=is_drilldown,
             )
 
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)

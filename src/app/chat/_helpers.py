@@ -235,6 +235,7 @@ async def _handle_rag_mode(
     final_user_message: str | None = None,
     more_info: bool = False,
     more_detail: bool = False,
+    is_drilldown: bool = False,
 ) -> JSONResponse | StreamingResponse:
     """Handle RAG mode response using query reform and retrieval."""
     from app.shared.utils.status_messages import build_status_message, STATUS_QUERY_REFORM
@@ -329,6 +330,7 @@ async def _handle_rag_mode(
             guide_meta: dict = {}
             if intent == "guide_recommend":
                 _rag_stream_kw["out_meta"] = guide_meta   # DB 경로 topic_chips 수신용
+                _rag_stream_kw["is_drilldown"] = is_drilldown   # 칩 클릭이면 카드 캐러셀
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
             async for status_msg in drain_status_until_done(rag_task, status_queue):
@@ -365,6 +367,8 @@ async def _handle_rag_mode(
                     # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
                     # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
                     yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+                if guide_meta.get("guide_services"):
+                    yield f"data: {json.dumps({'guide_services': guide_meta['guide_services']}, ensure_ascii=False)}\n\n"
                 if guide_meta.get("topic_chips"):
                     yield f"data: {json.dumps({'topic_chips': guide_meta['topic_chips'], 'slots': guide_meta.get('slots')}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
@@ -491,6 +495,7 @@ async def _handle_rag_mode(
         guide_meta: dict = {}
         if intent == "guide_recommend":
             _rag_kw["out_meta"] = guide_meta   # DB 경로 topic_chips 수신용
+            _rag_kw["is_drilldown"] = is_drilldown   # 칩 클릭이면 카드 캐러셀
         response_message, referenced_documents = await rag_processor(**_rag_kw)
 
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
@@ -541,5 +546,6 @@ async def _handle_rag_mode(
             conv_id=conv_id,
             topic_chips=guide_meta.get("topic_chips"),
             slots=guide_meta.get("slots"),
+            guide_services=guide_meta.get("guide_services"),
         )
         return JSONResponse(content=response, status_code=200)
