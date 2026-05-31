@@ -171,7 +171,13 @@ async def _recommend_via_db(
     logger.info("[TIMING][guide_recommend/DB] search_recommend: %.3fs", time.monotonic() - _t)
 
     cards = result.get("cards", [])
-    cards.sort(key=lambda c: 0 if c.get("household_group") == "우선" else 1)  # 우선 그룹 먼저
+    # A-1: (가구상황 우선 그룹, 생애주기 특화도) 순. lc_tag_count 적을수록 그 생애주기 특화
+    # 제도 → 상단(노년 단독 제도가 다생애주기 범용보다 먼저). 미상(None)은 하단으로.
+    def _sort_key(c):
+        grp = 0 if c.get("household_group") == "우선" else 1
+        lc = c.get("lc_tag_count")
+        return (grp, lc if isinstance(lc, int) else 99)
+    cards.sort(key=_sort_key)
     yL = (result.get("year") or {}).get("local", "")
     docs = [_card_to_doc(c, sigun, yL) for c in cards]
     referenced = build_referenced_documents(docs)

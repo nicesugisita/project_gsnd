@@ -141,7 +141,7 @@ def _build_gov(lifecycle, household, cats, kws, must_not, year, drop_life=False)
     sql = (
         "SELECT serv_nm, MAX(wlfare_info_outl_cn), MAX(tgtr_dtl_cn), MAX(alw_serv_cn), "
         "MAX(rprs_ctadr), MAX(jur_mnof_nm), MAX(trgter_indvdl_array), "
-        "MAX(IFNULL(intrs_thema_array,'기타')) "
+        f"MAX(IFNULL(intrs_thema_array,'기타')), MIN({_LC_TAGS_GOV}) "
         f"FROM VIEW_GOV_WLF_SRVC WHERE {' AND '.join(conds)} GROUP BY serv_nm"
     )
     return sql, params
@@ -238,9 +238,10 @@ def search_recommend(
             "topic": topics[0],
             "topics": topics,
             "household_group": _household_group(hshd, household),
+            "lc_tag_count": (int(_t) if _t is not None else None),  # A-1: 생애주기 태그수(쉼표수=태그-1), 적을수록 특화
             "source": "local",
         })
-    for (name, outl, tgt, alw, ctadr, mnof, trg, theme) in rowsG:
+    for (name, outl, tgt, alw, ctadr, mnof, trg, theme, lcg) in rowsG:
         # GOV theme 다중값 → canonical 토큰 멤버십(드릴다운 intrs_thema LIKE와 동일)
         topics = []
         for t in str(theme or "").split(","):
@@ -260,6 +261,7 @@ def search_recommend(
             "topic": topics[0],
             "topics": topics,
             "household_group": _household_group(trg, household),
+            "lc_tag_count": (int(lcg) if lcg is not None else None),  # A-1: 생애주기 태그수(쉼표수)
             "source": "gov",
         })
 
