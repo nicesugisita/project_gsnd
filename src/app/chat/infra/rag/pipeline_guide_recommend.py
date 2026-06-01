@@ -110,14 +110,20 @@ def _subj(word: str) -> str:
     return word + "가"
 
 
-def _recipient_phrase(region: str, lc: str) -> str:
-    """수혜자 자연어 구. lc 있으면 '{region}에 사는 {lc}이 받을 수 있는', 없으면 '{region}에서 받을 수 있는'."""
+def _recipient_phrase(region: str, lc: str, topic: str = "") -> str:
+    """수혜자 자연어 구. 주제(분야) 필터 시 '{lc}이 {topic} 분야에서 받을 수 있는'으로 분야 명시.
+    예) '창원시에 사는 아동이 교육 분야에서 받을 수 있는', '창원시에 사는 노인이 받을 수 있는'.
+    """
+    if lc and topic:
+        return f"{region}에 사는 {_subj(lc)} {topic} 분야에서 받을 수 있는"
     if lc:
         return f"{region}에 사는 {_subj(lc)} 받을 수 있는"
+    if topic:
+        return f"{region}에서 받을 수 있는 {topic} 분야"
     return f"{region}에서 받을 수 있는"
 
 
-def _format_direct_by_topic(sigun, lifecycle, result) -> str:
+def _format_direct_by_topic(sigun, lifecycle, result, topic_label="") -> str:
     """정보부족(주제 미정)·다건(broad) 시 LLM 생성 없이 분야별 그룹 텍스트 직접 포맷.
 
     조회형='검색+포맷, RAG 생성 X' 원칙(§2). DB 구조화 카드를 분야별로 묶어 즉시 응답.
@@ -126,8 +132,8 @@ def _format_direct_by_topic(sigun, lifecycle, result) -> str:
     chips = result.get("topic_chips", [])
     region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
     lc = ", ".join(lifecycle or [])
-    # "창원시에 사는 노인이 받을 수 있는 복지가 206건 있어요." (lc 없으면 "창원시에서 …")
-    head = f"{_recipient_phrase(region, lc)} 복지가 **{len(cards)}건** 있어요.\n\n"
+    # "창원시에 사는 노인이 받을 수 있는 복지가 206건" / 주제 필터 시 "…아동이 교육 분야에서 받을 수 있는 18건"
+    head = f"{_recipient_phrase(region, lc, topic_label)} 복지가 **{len(cards)}건** 있어요.\n\n"
     # 마크다운 리스트(- ) → 분야마다 줄바꿈 렌더. 분야명 굵게 · 건수 · 대표 3건.
     lines = []
     for ch in chips:
@@ -229,12 +235,13 @@ async def _recommend_via_db(
     )
 
     if mode == "direct_topic":
-        # 주제 미정·다건 → 분야별 그룹 직접 노출(즉시·결정적). 문자열 반환=스트림 자동처리.
-        return _format_direct_by_topic(sigun, lifecycle_tags, result), referenced
+        # 분야별 그룹 직접 노출(즉시·결정적). 주제 필터됐으면 헤더에 분야 명시. 문자열 반환=스트림 자동처리.
+        _dt_topic = (list(topic_keyword or []) or list(topic_category or []) or [""])[0]
+        return _format_direct_by_topic(sigun, lifecycle_tags, result, topic_label=_dt_topic), referenced
     if mode == "cards":
         # 분야 선택(드릴다운) → 서비스 카드 캐러셀(out_meta.guide_services). 본문은 짧은 헤더만
         # (프론트가 카드 있으면 본문 숨기고 캐러셀 렌더). LLM 없이 결정적.
-        topic_label = (list(topic_keyword) or list(topic_category) or ["선택"])[0]
+        topic_label = (list(topic_keyword or []) or list(topic_category or []) or ["선택"])[0]
         region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
         lc = ", ".join(lifecycle_tags or [])
         head = f"{_recipient_phrase(region, lc)} '{topic_label}' 분야 복지 {len(cards)}건이에요."

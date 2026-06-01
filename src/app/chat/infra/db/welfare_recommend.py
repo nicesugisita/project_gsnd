@@ -205,7 +205,10 @@ def search_recommend(
         sqlL, pL = _build_local(sigun, lifecycle, household, topic_category, topic_keyword, must_not, yL)
         cur.execute(sqlL, pL); rowsL = cur.fetchall()
         fallback = ""
-        if not rowsL and lifecycle:
+        # 주제(분야/키워드) 지정 시엔 생애주기 제거 금지 — 떼면 전 연령 해당주제(예: 아동 일자리 0건
+        # →노인·청년 일자리)가 딸려와 칩 건수와 불일치+무관 결과. 폴백은 '주제 없는 광역' 질의에만.
+        topic_given = bool(topic_category or topic_keyword)
+        if not rowsL and lifecycle and not topic_given:
             sqlL, pL = _build_local(sigun, lifecycle, household, topic_category, topic_keyword, must_not, yL, drop_life=True)
             cur.execute(sqlL, pL); rowsL = cur.fetchall()
             fallback = "생애주기제거"
