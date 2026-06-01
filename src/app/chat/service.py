@@ -10,14 +10,8 @@ from app.chat.sigun import (
     MAX_SIGUN_ASK_ATTEMPTS,
 )
 from app.chat.lifecycle import check_lifecycle
-from app.chat.more_results import (
-    get_last_preprocess_from_history,
-    get_base_user_query_from_history,
-    get_excluded_info_from_history,
-)
 from app.chat.query_reform import reform_query_if_needed, reform_query_with_history
 from app.chat.routing import (
-    classify_next_intent,
     expand_query,
     extract_triples,
     query_recreation,
@@ -42,10 +36,8 @@ __all__ = [
     "check_sigun", "check_out_of_scope_region", "count_sigun_ask_attempts",
     "MSG_SIGUN_FAILURE", "MSG_OUT_OF_SCOPE_TEMPLATE", "MAX_SIGUN_ASK_ATTEMPTS",
     "check_lifecycle",
-    "get_last_preprocess_from_history", "get_base_user_query_from_history",
-    "get_excluded_info_from_history",
     "reform_query_with_history", "reform_query_if_needed",
-    "classify_next_intent", "expand_query",
+    "expand_query",
     "extract_triples", "query_recreation",
     "call_llm_api", "convert_korean_to_standard", "ask_judgment", "re_ask",
     "rag_norag_judgment", "clean_query_text", "mandatory_condition_check",

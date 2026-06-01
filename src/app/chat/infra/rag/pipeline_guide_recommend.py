@@ -44,6 +44,7 @@ from app.shared.utils.keyword_extractor import extract_nouns
 from app.mariner.sigun_utils import normalize_sigun
 from app.shared.utils.year_filter import extract_year_filters
 from app.chat.infra.rag.rrf_reranker import rerank_by_rrf
+from app.chat.infra.rag.cross_encoder_client import rerank_by_cross_encoder
 from .policy_priority import resolve_policy_boost_keywords
 from .variable_count import extract_topic_terms, select_variable_count
 from .pipeline_utils import (
@@ -73,6 +74,197 @@ def _extract_sigun_from_history(messages: Optional[list]) -> list:
     return []
 
 
+def _card_to_doc(card: Dict[str, Any], sigun: str, year: str) -> Dict[str, Any]:
+    """welfare_recommend 카드 → generate_final_response_v2 입력 doc 포맷.
+
+    doc 키 규약(response_generator): NAME·SIGUN·YEAR·PURPOSE·CONTENT·TEL·APPLICATION_PERIOD.
+    그룹/주제 메타는 _접두 키로 보존(후속 프론트 contract용, 본문 생성엔 미사용).
+    """
+    parts: List[str] = []
+    if card.get("target"):
+        parts.append(f"지원대상 : {card['target']}")
+    if card.get("benefit"):
+        parts.append(f"지원내용 : {card['benefit']}")
+    content = "\n".join(parts) or (card.get("purpose") or "")
+    return {
+        "NAME": card.get("service_name", ""),
+        "SIGUN": sigun or "",
+        "YEAR": str(year or ""),
+        "PURPOSE": card.get("purpose", ""),
+        "CONTENT": content,
+        "TEL": card.get("application_contact", ""),
+        "APPLICATION_PERIOD": card.get("application_period", ""),
+        "_topic": card.get("topic"),
+        "_household_group": card.get("household_group"),
+        "_db_source": card.get("source"),
+    }
+
+
+def _subj(word: str) -> str:
+    """한국어 주격조사(이/가) — 마지막 글자 받침 유무로 선택. '노인'→'노인이', '청년'→'청년이', '영유아'→'영유아가'."""
+    if not word:
+        return ""
+    ch = word[-1]
+    if "가" <= ch <= "힣":
+        return word + ("이" if (ord(ch) - 0xAC00) % 28 else "가")
+    return word + "가"
+
+
+def _recipient_phrase(region: str, lc: str, topic: str = "") -> str:
+    """수혜자 자연어 구. 주제(분야) 필터 시 '{lc}이 {topic} 분야에서 받을 수 있는'으로 분야 명시.
+    예) '창원시에 사는 아동이 교육 분야에서 받을 수 있는', '창원시에 사는 노인이 받을 수 있는'.
+    """
+    if lc and topic:
+        return f"{region}에 사는 {_subj(lc)} {topic} 분야에서 받을 수 있는"
+    if lc:
+        return f"{region}에 사는 {_subj(lc)} 받을 수 있는"
+    if topic:
+        return f"{region}에서 받을 수 있는 {topic} 분야"
+    return f"{region}에서 받을 수 있는"
+
+
+def _format_direct_by_topic(sigun, lifecycle, result, topic_label="") -> str:
+    """정보부족(주제 미정)·다건(broad) 시 LLM 생성 없이 분야별 그룹 텍스트 직접 포맷.
+
+    조회형='검색+포맷, RAG 생성 X' 원칙(§2). DB 구조화 카드를 분야별로 묶어 즉시 응답.
+    """
+    cards = result.get("cards", [])
+    chips = result.get("topic_chips", [])
+    region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
+    lc = ", ".join(lifecycle or [])
+    # "창원시에 사는 노인이 받을 수 있는 복지가 206건" / 주제 필터 시 "…아동이 교육 분야에서 받을 수 있는 18건"
+    head = f"{_recipient_phrase(region, lc, topic_label)} 복지가 **{len(cards)}건** 있어요.\n\n"
+    # 마크다운 리스트(- ) → 분야마다 줄바꿈 렌더. 분야명 굵게 · 건수 · 대표 3건.
+    lines = []
+    for ch in chips:
+        names = [c.get("service_name") for c in cards if ch["label"] in (c.get("topics") or [c.get("topic")])]
+        names = [n for n in names if n][:3]
+        more = " 등" if ch["count"] > len(names) else ""
+        lines.append(f"- **{ch['label']}** {ch['count']}건 · " + ", ".join(names) + more)
+    tail = "\n\n👇 아래에서 분야를 선택하면 자세히 볼 수 있어요."
+    return head + "\n".join(lines) + tail
+
+
+# (구) _format_drilldown(텍스트 서비스 리스트)은 카드 캐러셀(out_meta.guide_services)로 대체됨.
+_GUIDE_SERVICE_FIELDS = (
+    "service_name", "purpose", "target", "benefit",
+    "application_period", "application_contact", "referenced_documents_name",
+)
+
+
+def _cards_to_guide_services(cards) -> list:
+    """정렬된 카드 → 프론트 GuideServiceItem(카드 캐러셀) 배열. A-1 정렬 순서 보존."""
+    out = []
+    for c in cards:
+        out.append({k: (c.get(k) or "") for k in _GUIDE_SERVICE_FIELDS})
+    return out
+
+
+async def _recommend_via_db(
+    *, message, sigun_filters, lifecycle_tags, household_tags, topic_category,
+    topic_keyword, must_not, temperature, max_tokens, stream, frequency_penalty,
+    repetition_penalty, top_p, top_k, seed, tools, intent, messages,
+    recommended_question_prompt, status_callback, out_meta=None, is_drilldown=False,
+):
+    """GUIDE_DB_DIRECT_ENABLED 경로: okms2 두 뷰 직접조회.
+
+    하이브리드(확정): 주제 미정 OR 카드 > GUIDE_MAX_RESULTS → 분야별 직접 포맷(LLM X, 즉시).
+    그 외(구체·소량) → 기존 generate_final_response_v2(LLM 자연어 답변).
+    """
+    from app.chat.infra.db.welfare_recommend import search_recommend
+
+    sigun = (sigun_filters or [None])[0]
+    hh = [t for t in (household_tags or []) if t and t != "일반가구"]
+    if status_callback:
+        await status_callback("복지 정보를 검색하고 있습니다")
+    _t = time.monotonic()
+    result = await asyncio.to_thread(
+        search_recommend, sigun, list(lifecycle_tags or []), hh,
+        list(topic_category or []), list(topic_keyword or []), list(must_not or []),
+    )
+    logger.info("[TIMING][guide_recommend/DB] search_recommend: %.3fs", time.monotonic() - _t)
+
+    cards = result.get("cards", [])
+    # A-1: (가구상황 우선 그룹, 생애주기 특화도) 순. lc_tag_count 적을수록 그 생애주기 특화
+    # 제도 → 상단(노년 단독 제도가 다생애주기 범용보다 먼저). 미상(None)은 하단으로.
+    def _sort_key(c):
+        grp = 0 if c.get("household_group") == "우선" else 1
+        lc = c.get("lc_tag_count")
+        return (grp, lc if isinstance(lc, int) else 99)
+    cards.sort(key=_sort_key)
+    yL = (result.get("year") or {}).get("local", "")
+    docs = [_card_to_doc(c, sigun, yL) for c in cards]
+    referenced = build_referenced_documents(docs)
+    user_region = (sigun or "").replace("경상남도", "").strip()
+    _gr_max_tokens = max(max_tokens or 0, GUIDE_RECOMMEND_MAX_TOKENS)
+
+    topic_given = bool(topic_category or topic_keyword)
+    many = len(cards) > Config.GUIDE_MAX_RESULTS
+    if is_drilldown and topic_given:
+        mode = "cards"             # 칩 클릭(B2 드릴다운) → 서비스 카드 캐러셀(건수 무관)
+    elif many:
+        mode = "direct_topic"      # 일반 질의·다건 → 분야별 그룹 목록 + 칩(주제 추출됐어도 먼저 개요)
+    else:
+        mode = "llm"               # 소량 → LLM 자연어
+    if out_meta is not None:  # 프론트 칩/그룹/카드용 메타(응답에 노출)
+        # llm 모드(구체 질의·소량 자연어 답변)는 분야 칩 불필요 — 클릭해도 의미 없어 미출력.
+        if mode != "llm":
+            out_meta["topic_chips"] = result.get("topic_chips", [])
+        out_meta["total"] = result.get("total", len(cards))
+        out_meta["mode"] = mode
+        out_meta["slots"] = {  # B2: 칩 드릴다운용 슬롯 echo
+            "sigun": sigun, "lifecycle": list(lifecycle_tags or []),
+            "household": [t for t in (household_tags or []) if t and t != "일반가구"],
+        }
+        if mode == "cards":  # 드릴다운: 서비스 카드 캐러셀용 구조화 데이터
+            out_meta["guide_services"] = _cards_to_guide_services(cards)
+            # 칩은 '원래 광역 분야 분포'(주제 필터 없이 동일 슬롯)로 — 다른 분야로 전환해도
+            # 건수가 일관(생활지원 68 유지). 주제 필터된 부분집합 멤버십(생활지원 10)으로 덮지 않음.
+            try:
+                broad = await asyncio.to_thread(
+                    search_recommend, sigun, list(lifecycle_tags or []), hh, [], [], list(must_not or []),
+                )
+                out_meta["topic_chips"] = broad.get("topic_chips", [])
+                out_meta["total"] = broad.get("total", out_meta["total"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[guide_recommend/DB] 드릴다운 광역 칩 재계산 실패: %s", e)
+    logger.info(
+        "[guide_recommend/DB] cards=%d fallback=%s mode=%s chips=%s",
+        len(cards), result.get("fallback") or "-", mode,
+        [(c["label"], c["count"]) for c in result.get("topic_chips", [])[:6]],
+    )
+
+    if mode == "direct_topic":
+        # 분야별 그룹 직접 노출(즉시·결정적). 주제 필터됐으면 헤더에 분야 명시. 문자열 반환=스트림 자동처리.
+        _dt_topic = (list(topic_keyword or []) or list(topic_category or []) or [""])[0]
+        return _format_direct_by_topic(sigun, lifecycle_tags, result, topic_label=_dt_topic), referenced
+    if mode == "cards":
+        # 분야 선택(드릴다운) → 서비스 카드 캐러셀(out_meta.guide_services). 본문은 짧은 헤더만
+        # (프론트가 카드 있으면 본문 숨기고 캐러셀 렌더). LLM 없이 결정적.
+        topic_label = (list(topic_keyword or []) or list(topic_category or []) or ["선택"])[0]
+        region = (sigun or "").replace("경상남도", "").strip() or "경상남도"
+        lc = ", ".join(lifecycle_tags or [])
+        head = f"{_recipient_phrase(region, lc)} '{topic_label}' 분야 복지 {len(cards)}건이에요."
+        return head, referenced
+
+    # 소량 → LLM 자연어 최종응답
+    if status_callback:
+        await status_callback("최종답변을 생성하고 있습니다")
+    response = await generate_final_response_v2(
+        (message or "").strip(), docs, temperature, _gr_max_tokens, stream,
+        frequency_penalty, repetition_penalty, top_p, top_k, seed, tools,
+        intent=intent,
+        lifecycle=", ".join(lifecycle_tags or []),
+        messages=messages,
+        policy_priority_tag=None,
+        user_region=user_region,
+        user_birth_year="",
+        more_info_mode=False,
+        use_llm_recommended_prompt=recommended_question_prompt,
+    )
+    return response, referenced
+
+
 async def process_rag_guide_recommend(
     message: str,
     reformed_query: str,
@@ -100,7 +292,12 @@ async def process_rag_guide_recommend(
     precomputed_policy_priority_tag: Optional[str] = None,
     precomputed_lifecycle_tags: Optional[List[str]] = None,
     precomputed_household_tags: Optional[List[str]] = None,
+    precomputed_topic_category: Optional[List[str]] = None,
+    precomputed_topic_keyword: Optional[List[str]] = None,
+    precomputed_must_not_keywords: Optional[List[str]] = None,
+    out_meta: Optional[Dict[str, Any]] = None,   # DB 경로: topic_chips 등 메타를 채워 반환(프론트 칩용)
     service_target: Optional[str] = "official",
+    is_drilldown: bool = False,   # True=칩 클릭(B2 드릴다운) → 카드 캐러셀, False=일반 질의 → 분야 목록
 ) -> tuple[Any, List[Dict[str, str]]]:
     """
     RAG 문서 검색 및 최종 응답 생성 — guide_recommend 전용
@@ -114,6 +311,27 @@ async def process_rag_guide_recommend(
 
     try:
         t_total = time.monotonic()
+
+        # ── guide_recommend DB 직접조회 경로 (플래그 ON 시 Mariner 대체) ──
+        if Config.GUIDE_DB_DIRECT_ENABLED:
+            return await _recommend_via_db(
+                message=message,
+                sigun_filters=sigun_filters,
+                lifecycle_tags=precomputed_lifecycle_tags,
+                household_tags=precomputed_household_tags,
+                topic_category=precomputed_topic_category,
+                topic_keyword=precomputed_topic_keyword,
+                must_not=precomputed_must_not_keywords,
+                temperature=temperature, max_tokens=max_tokens, stream=stream,
+                frequency_penalty=frequency_penalty, repetition_penalty=repetition_penalty,
+                top_p=top_p, top_k=top_k, seed=seed, tools=tools,
+                intent=intent, messages=messages,
+                recommended_question_prompt=recommended_question_prompt,
+                status_callback=status_callback,
+                out_meta=out_meta,
+                is_drilldown=is_drilldown,
+            )
+
         _skip_policy_boost = bool(excluded_chunk_ids or excluded_service_names)
         # LLM 선별 모드: 룰베이스 개수 결정(reserve/재귀/가변개수)을 끄고 RRF 상위 N건을
         # 그대로 최종응답 LLM에 넘긴다(관련 문서 선별은 선별 프롬프트가 담당).
@@ -450,12 +668,16 @@ async def process_rag_guide_recommend(
         # 후보 풀을 출처별로 분리 (GOV 는 CHUNK_ID 로 식별, 나머지는 OKMS).
         _gov_surv = [d for d in _survivors if d.get("CHUNK_ID") in _gov_cand_ids]
         _okms_surv = [d for d in _survivors if d.get("CHUNK_ID") not in _gov_cand_ids]
-        # 쿼터 concat 대신 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
-        # 쿼터(OKMS 5 + GOV 3) 미보장 — 융합 순위 상위 건 선택, 나머지는 reserve.
-        # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
-        _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-        _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
-        _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
+        # 쿼터(OKMS 5 + GOV 3) 미보장 — 리랭킹 순위 상위 건 선택, 나머지는 reserve.
+        if Config.CROSS_ENCODER_ENABLED:
+            # 생존 후보를 합쳐 cross-encoder 관련성 점수로 단일 정렬(풀 구분 불필요).
+            _fused = await rerank_by_cross_encoder(reformed_query, _deduplicate_documents(_survivors))
+        else:
+            # 두 풀을 rank 기반 RRF 융합 (출처 간 WEIGHT 스케일 편향 제거).
+            # RRF 는 입력 리스트가 정렬돼 있다고 가정하므로 풀별 WEIGHT 사전 정렬.
+            _okms_sorted = sorted(_okms_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _gov_sorted = sorted(_gov_surv, key=lambda x: float(x.get("WEIGHT", 0) or 0), reverse=True)
+            _fused = rerank_by_rrf(_okms_sorted, _gov_sorted)
         # LLM 선별 모드: RRF 상위 GUIDE_LLM_SELECT_MAX_DOCS 건을 그대로 LLM에 전달.
         _cap = Config.GUIDE_LLM_SELECT_MAX_DOCS if _llm_select else (_GR_FINAL_TOP_N + _GR_GOV_OKMS_TOP_N)
         gr_top_docs = _fused[:_cap]

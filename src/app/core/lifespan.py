@@ -78,6 +78,14 @@ def _init_ds_client(settings) -> httpx.AsyncClient:
     return client
 
 
+def _init_cross_encoder_client() -> httpx.AsyncClient:
+    """Cross-Encoder 리랭커 HTTP 클라이언트 사전 생성 (모듈 lazy 싱글턴 워밍)."""
+    from app.chat.infra.rag.cross_encoder_client import _get_ce_client
+    client = _get_ce_client()
+    logger.info("[Startup] Cross-Encoder httpx 클라이언트 초기화 완료")
+    return client
+
+
 def _init_db_pool(settings):
     """MySQL 커넥션 풀 초기화. DB 미설정 시 None 반환."""
     if not settings.DB_HOST:
@@ -224,6 +232,7 @@ async def lifespan(app: FastAPI):
 
     app.state.llm_client = _init_llm_client(settings)
     app.state.ds_client  = _init_ds_client(settings)
+    app.state.cross_encoder_client = _init_cross_encoder_client()
     app.state.db_pool    = _init_db_pool(settings)
     app.state.retriever  = _init_retriever()   # JVM 초기화 이후에 생성
 
@@ -239,6 +248,7 @@ async def lifespan(app: FastAPI):
 
     await _close_http_client("LLM",        app.state.llm_client)
     await _close_http_client("DeepServer", app.state.ds_client)
+    await _close_http_client("Cross-Encoder", getattr(app.state, "cross_encoder_client", None))
     _close_db_pool(app.state.db_pool)
     _stop_policy_priority_refresh_worker()
 

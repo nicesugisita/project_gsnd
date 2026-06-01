@@ -454,6 +454,15 @@ def _apply_assistant_enrichments(msg: dict, kwargs: dict) -> None:
         if rd is None:
             rd = []
         merge_assistant_reference_docs(msg, rd if isinstance(rd, list) else [])
+    # 추천 카드(서비스 카드/주제 칩/슬롯): 라이브 응답(build_chat_response)과 동일한
+    # 최상위 키로 영속 → 대화 복원 시 그대로 재현. 값이 없으면(None/빈값) 키 제거.
+    for _k in ("guide_services", "topic_chips", "slots"):
+        if _k in kwargs:
+            _v = kwargs[_k]
+            if _v:
+                msg[_k] = _v
+            else:
+                msg.pop(_k, None)
 
 
 def _save_chat_history(chat_request: ChatRequest, assistant_message: str, processed_user_message: str = None, **kwargs) -> Optional[str]:
@@ -464,14 +473,19 @@ def _save_chat_history(chat_request: ChatRequest, assistant_message: str, proces
         chat_request: Chat request object
         assistant_message: Assistant response message
         processed_user_message: Processed user message after cleaning and standardization (for title generation)
-        kwargs: user_message, preprocess(dict), referenced_documents(list) — DB 복원·MORE_INFO 제외용 메타
+        kwargs: user_message, preprocess(dict), referenced_documents(list),
+                guide_services(list), topic_chips(list), slots(dict) — DB 복원·MORE_INFO 제외용 메타
 
     Returns:
         conv_id (newly created or existing)
     """
 
     user_message = kwargs.get('user_message') or processed_user_message
-    enrich_kw = {k: kwargs[k] for k in ("preprocess", "referenced_documents") if k in kwargs}
+    enrich_kw = {
+        k: kwargs[k]
+        for k in ("preprocess", "referenced_documents", "guide_services", "topic_chips", "slots")
+        if k in kwargs
+    }
     has_enrichments = bool(enrich_kw)
 
     user_id = chat_request.user_id

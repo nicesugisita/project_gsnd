@@ -56,20 +56,36 @@ def _build_assistant_preprocess_payload(
     reformed_query: str | None,
     expanded_queries: list | None,
     search_target: str | None,
-    policy_priority_tag: str | None,
     more_info: bool = False,
+    sigun_filters: list | None = None,
+    lifecycle_tags: list | None = None,
+    household_tags: list | None = None,
+    topic_category: list | None = None,
+    topic_keyword: list | None = None,
+    must_not_keywords: list | None = None,
 ) -> dict:
-    """히스토리 저장용 assistant preprocess 메타를 구성."""
+    """히스토리 저장용 assistant preprocess 메타를 구성.
+
+    B1(슬롯 영속): 시군·생애주기·가구·주제·배제어를 함께 저장 → 후속턴(칩 드릴다운 등)에서
+    직전 컨텍스트 복원·재주입 가능. (없으면 키 생략)
+    """
     final_reformed = (reformed_query or user_message or "").strip()
-    return {
+    payload = {
         "query": user_message,
         "intent": intent or "general",
         "reformed_query": final_reformed,
         "expanded_queries": expanded_queries or ([final_reformed] if final_reformed else []),
         "more_info": bool(more_info),
         "search_target": search_target,
-        "policy_priority_tag": policy_priority_tag,
     }
+    for key, val in (
+        ("sigun_filters", sigun_filters), ("lifecycle_tags", lifecycle_tags),
+        ("household_tags", household_tags), ("topic_category", topic_category),
+        ("topic_keyword", topic_keyword), ("must_not_keywords", must_not_keywords),
+    ):
+        if val:
+            payload[key] = list(val)
+    return payload
 
 
 def _get_rag_processor(intent: str, *, recommended_question_route: bool = False):
@@ -208,15 +224,18 @@ async def _handle_rag_mode(
     keywords: list = None,
     llm_recommended_followup: bool = False,
     search_target: str | None = None,
-    policy_priority_tag: str | None = None,
     lifecycle_tags: list | None = None,
     household_tags: list | None = None,
+    topic_category: list | None = None,
+    topic_keyword: list | None = None,
+    must_not_keywords: list | None = None,
     excluded_chunk_ids: list | None = None,
     excluded_service_names: list | None = None,
     llm_excluded_services: list | None = None,
     final_user_message: str | None = None,
     more_info: bool = False,
     more_detail: bool = False,
+    is_drilldown: bool = False,
 ) -> JSONResponse | StreamingResponse:
     """Handle RAG mode response using query reform and retrieval."""
     from app.shared.utils.status_messages import build_status_message, STATUS_QUERY_REFORM
@@ -296,9 +315,11 @@ async def _handle_rag_mode(
                 precomputed_expanded_queries=expanded_queries,
                 precomputed_keywords=keywords,
                 precomputed_search_target=search_target,
-                precomputed_policy_priority_tag=policy_priority_tag,
                 precomputed_lifecycle_tags=lifecycle_tags,
                 precomputed_household_tags=household_tags,
+                precomputed_topic_category=topic_category,
+                precomputed_topic_keyword=topic_keyword,
+                precomputed_must_not_keywords=must_not_keywords,
                 excluded_chunk_ids=excluded_chunk_ids,
                 excluded_service_names=excluded_service_names,
                 llm_excluded_services=llm_excluded_services,
@@ -306,6 +327,10 @@ async def _handle_rag_mode(
             )
             if intent == "general":
                 _rag_stream_kw["more_detail"] = more_detail
+            guide_meta: dict = {}
+            if intent == "guide_recommend":
+                _rag_stream_kw["out_meta"] = guide_meta   # DB 경로 topic_chips 수신용
+                _rag_stream_kw["is_drilldown"] = is_drilldown   # 칩 클릭이면 카드 캐러셀
             rag_task = asyncio.create_task(rag_processor(**_rag_stream_kw))
 
             async for status_msg in drain_status_until_done(rag_task, status_queue):
@@ -342,6 +367,10 @@ async def _handle_rag_mode(
                     # 문서 스니펫/내용 노출 방지: 상세 JSON 로그 비활성화
                     # logger.info(f"[RAG Referenced Documents JSON]\n{json.dumps(referenced_documents, ensure_ascii=False, indent=2)}")
                     yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+                if guide_meta.get("guide_services"):
+                    yield f"data: {json.dumps({'guide_services': guide_meta['guide_services']}, ensure_ascii=False)}\n\n"
+                if guide_meta.get("topic_chips"):
+                    yield f"data: {json.dumps({'topic_chips': guide_meta['topic_chips'], 'slots': guide_meta.get('slots')}, ensure_ascii=False)}\n\n"
                 if intent == "guide_recommend" and assistant_content:
                     preprocess_payload = _build_assistant_preprocess_payload(
                         user_message=user_message,
@@ -349,8 +378,13 @@ async def _handle_rag_mode(
                         reformed_query=reformed_query,
                         expanded_queries=expanded_queries,
                         search_target=search_target,
-                        policy_priority_tag=policy_priority_tag,
                         more_info=more_info,
+                        sigun_filters=sigun_filters,
+                        lifecycle_tags=lifecycle_tags,
+                        household_tags=household_tags,
+                        topic_category=topic_category,
+                        topic_keyword=topic_keyword,
+                        must_not_keywords=must_not_keywords,
                     )
                     await asyncio.to_thread(
                         partial(
@@ -360,6 +394,9 @@ async def _handle_rag_mode(
                             user_message,
                             preprocess=preprocess_payload,
                             referenced_documents=persist_referenced_documents,
+                            guide_services=guide_meta.get("guide_services"),
+                            topic_chips=guide_meta.get("topic_chips"),
+                            slots=guide_meta.get("slots"),
                         )
                     )
                 yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}, ensure_ascii=False)}\n\n"
@@ -377,6 +414,8 @@ async def _handle_rag_mode(
                             if filtered_referenced_documents:
                                 logger.info(f"[RAG Referenced Documents] Count: {len(filtered_referenced_documents)}, Docs: {[d.get('name', 'N/A') for d in filtered_referenced_documents]}")
                                 yield f"data: {json.dumps({'referenced_documents': filtered_referenced_documents}, ensure_ascii=False)}\n\n"
+                            if guide_meta.get("topic_chips"):
+                                yield f"data: {json.dumps({'topic_chips': guide_meta['topic_chips'], 'slots': guide_meta.get('slots')}, ensure_ascii=False)}\n\n"
                             if intent == "guide_recommend" and assistant_content:
                                 preprocess_payload = _build_assistant_preprocess_payload(
                                     user_message=user_message,
@@ -384,8 +423,13 @@ async def _handle_rag_mode(
                                     reformed_query=reformed_query,
                                     expanded_queries=expanded_queries,
                                     search_target=search_target,
-                                    policy_priority_tag=policy_priority_tag,
                                     more_info=more_info,
+                                    sigun_filters=sigun_filters,
+                                    lifecycle_tags=lifecycle_tags,
+                                    household_tags=household_tags,
+                                    topic_category=topic_category,
+                                    topic_keyword=topic_keyword,
+                                    must_not_keywords=must_not_keywords,
                                 )
                                 await asyncio.to_thread(
                                     partial(
@@ -395,6 +439,9 @@ async def _handle_rag_mode(
                                         user_message,
                                         preprocess=preprocess_payload,
                                         referenced_documents=persist_referenced_documents,
+                                        guide_services=guide_meta.get("guide_services"),
+                                        topic_chips=guide_meta.get("topic_chips"),
+                                        slots=guide_meta.get("slots"),
                                     )
                                 )
                             yield chunk
@@ -438,9 +485,11 @@ async def _handle_rag_mode(
             precomputed_expanded_queries=expanded_queries,
             precomputed_keywords=keywords,
             precomputed_search_target=search_target,
-            precomputed_policy_priority_tag=policy_priority_tag,
             precomputed_lifecycle_tags=lifecycle_tags,
             precomputed_household_tags=household_tags,
+            precomputed_topic_category=topic_category,
+            precomputed_topic_keyword=topic_keyword,
+            precomputed_must_not_keywords=must_not_keywords,
             excluded_chunk_ids=excluded_chunk_ids,
             excluded_service_names=excluded_service_names,
             llm_excluded_services=llm_excluded_services,
@@ -449,6 +498,10 @@ async def _handle_rag_mode(
         )
         if intent == "general":
             _rag_kw["more_detail"] = more_detail
+        guide_meta: dict = {}
+        if intent == "guide_recommend":
+            _rag_kw["out_meta"] = guide_meta   # DB 경로 topic_chips 수신용
+            _rag_kw["is_drilldown"] = is_drilldown   # 칩 클릭이면 카드 캐러셀
         response_message, referenced_documents = await rag_processor(**_rag_kw)
 
         referenced_documents = await asyncio.to_thread(_enrich_referenced_documents, referenced_documents)
@@ -463,8 +516,13 @@ async def _handle_rag_mode(
             reformed_query=reformed_query,
             expanded_queries=expanded_queries,
             search_target=search_target,
-            policy_priority_tag=policy_priority_tag,
             more_info=more_info,
+            sigun_filters=sigun_filters,
+            lifecycle_tags=lifecycle_tags,
+            household_tags=household_tags,
+            topic_category=topic_category,
+            topic_keyword=topic_keyword,
+            must_not_keywords=must_not_keywords,
         )
         conv_id = await asyncio.to_thread(
             partial(
@@ -474,6 +532,9 @@ async def _handle_rag_mode(
                 user_message,
                 preprocess=preprocess_payload,
                 referenced_documents=persist_referenced_documents,
+                guide_services=guide_meta.get("guide_services"),
+                topic_chips=guide_meta.get("topic_chips"),
+                slots=guide_meta.get("slots"),
             )
         )
 
@@ -492,5 +553,8 @@ async def _handle_rag_mode(
             model_name=Config.MODEL_NAME,
             referenced_documents=filtered_referenced_documents,
             conv_id=conv_id,
+            topic_chips=guide_meta.get("topic_chips"),
+            slots=guide_meta.get("slots"),
+            guide_services=guide_meta.get("guide_services"),
         )
         return JSONResponse(content=response, status_code=200)

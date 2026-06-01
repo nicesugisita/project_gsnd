@@ -12,14 +12,11 @@ Router Service - Query Routing and Classification
 
 import json
 import logging
-import re
-from typing import Dict, Any, List, Optional, Sequence
+from typing import Dict, Any, List
 
 from app.core.config import Config
-from app.core.constants import ROLE_USER, ROLE_ASSISTANT
-from app.chat.infra.llm import call_llm_api
+from app.core.constants import ROLE_USER
 from app.chat.infra.llm.classifier_fallback import call_classifier_with_fallback
-from .more_results import get_base_user_query_from_history
 from app.chat.infra.deepserver.client import (
     deepserver_expand_query,
     deepserver_extract_comparison_attributes,
@@ -121,157 +118,6 @@ async def query_recreation(
     except Exception as e:
         logger.error("[Query Recreation] 오류: %s", e)
         return ""
-
-
-def build_next_intent_fallback(messages: list, current_query: str) -> tuple[dict, str]:
-    """LLM 생략·실패 시와 동일한 OTHER 폴백 구조. (dict, base_user_query) 반환."""
-    base_user_query = get_base_user_query_from_history(messages) or ""
-    fallback_re_query = base_user_query or current_query
-    return (
-        {"intent": "OTHER", "re_query": fallback_re_query, "llm_re_query": ""},
-        base_user_query,
-    )
-
-
-_VALID_NEXT_INTENTS = ("MORE_INFO", "MORE_DETAIL", "NEW_SEARCH", "REFINE_SEARCH", "CLARIFY_REPLY")
-
-
-def _prior_nonempty_assistant_exists(messages: list) -> bool:
-    """마지막 메시지 직전까지의 이력에 비어 있지 않은 assistant 턴이 있는지.
-
-    MORE_INFO는 '직전 봇 답변에 이어지는 사용자 발화'일 때만 성립하므로,
-    그런 대화 구조가 아니면 LLM을 부르지 않아도 OTHER로 확정할 수 있다.
-    """
-    if not messages or len(messages) < 2:
-        return False
-    for msg in messages[:-1]:
-        if msg.get("role") != ROLE_ASSISTANT:
-            continue
-        if str(msg.get("content", "") or "").strip():
-            return True
-    return False
-
-
-async def classify_next_intent(
-    messages: list,
-    current_query: str,
-    *,
-    prior_intent: Optional[str] = None,
-    prior_service_names: Optional[Sequence[str]] = None,
-    is_clarification_question: bool = False,
-) -> dict:
-    """
-    이전 대화 + 현재 질문 기반 후속 의도 분류.
-
-    Args:
-        prior_intent: 직전 assistant 응답의 unified_preprocess intent.
-        prior_service_names: 직전 답변에서 안내된 사업명 목록(중복 제거).
-        is_clarification_question: 직전 챗봇 발화가 되묻기 질문인지 여부.
-
-    Returns:
-        {
-            "intent": "MORE_INFO" | "MORE_DETAIL" | "NEW_SEARCH"
-                    | "REFINE_SEARCH" | "CLARIFY_REPLY" | "OTHER",
-            "re_query": str,
-            "llm_re_query": str,
-        }
-    """
-    from app.shared.utils.prompt_loader import load_next_intent_prompt
-
-    fallback, base_user_query = build_next_intent_fallback(messages, current_query)
-    fallback_re_query = fallback["re_query"]
-
-    if not Config.NEXT_INTENT_LLM_ENABLED or not Config.LLM_ENABLED:
-        logger.debug("[NextIntent] LLM 비활성(NEXT_INTENT_LLM_ENABLED/LLM_ENABLED) → OTHER, 호출 생략")
-        return fallback
-
-    if not _prior_nonempty_assistant_exists(messages):
-        logger.debug("[NextIntent] 이전 assistant 없음 → MORE_INFO 불가, LLM 생략")
-        return fallback
-
-    try:
-        prompt = load_next_intent_prompt()
-        if not prompt:
-            return fallback
-
-        before_user = ""
-        before_assistant = ""
-        for msg in reversed(messages or []):
-            role = msg.get("role")
-            content = str(msg.get("content", "") or "").strip()
-            if not content:
-                continue
-            if not before_assistant and role == ROLE_ASSISTANT:
-                before_assistant = content
-            elif not before_user and role == ROLE_USER:
-                before_user = content
-            if before_user and before_assistant:
-                break
-
-        prior_intent_str = (prior_intent or "").strip() or "unknown"
-        service_names = [s for s in (prior_service_names or []) if s]
-        prior_service_names_str = ", ".join(service_names) if service_names else "(없음)"
-        is_clarify_str = "true" if is_clarification_question else "false"
-
-        formatted_prompt = (
-            prompt
-            .replace("{before_user_input}", before_user)
-            .replace("{before_answer}", before_assistant)
-            .replace("{user_input}", current_query)
-            .replace("{prior_intent}", prior_intent_str)
-            .replace("{prior_service_names}", prior_service_names_str)
-            .replace("{is_clarification_question}", is_clarify_str)
-        )
-
-        parsed, response, used_32b = await call_classifier_with_fallback(
-            classifier_name="NextIntent",
-            message=formatted_prompt,
-            temperature=0,
-            response_format={"type": "json_object"},
-            extra_system_prompts=[],
-        )
-        if parsed is None:
-            # 마지막 방어선: raw 응답에서 { ... } 패턴 추출 후 재파싱
-            text = str(response or "").strip()
-            match = re.search(r"\{.*\}", text, re.DOTALL)
-            if match:
-                try:
-                    parsed = json.loads(match.group(0))
-                except Exception:
-                    parsed = None
-        if not isinstance(parsed, dict):
-            logger.warning("[NextIntent] SLM/32B 모두 파싱 실패 → OTHER 폴백 (used_32b=%s)", used_32b)
-            return fallback
-        if used_32b:
-            logger.info("[NextIntent] 32B 폴백 응답 사용")
-
-        raw_intent = str(parsed.get("intent", "OTHER")).upper()
-        if raw_intent in _VALID_NEXT_INTENTS:
-            mapped_intent = raw_intent
-        else:
-            mapped_intent = "OTHER"
-        llm_re_query = str(parsed.get("re_query", "") or "").strip()
-        re_query = llm_re_query or fallback_re_query
-        if mapped_intent == "MORE_INFO" and base_user_query:
-            # "더 알려줘"는 원질문 컨텍스트(예: 지역/대상)를 우선 유지한다.
-            re_query = base_user_query
-        # llm_re_query: next_intent LLM이 생성한 문장(개수/추가요청 등). 최종 LLM에만 쓰고 검색 질의는 streaming/RAG 쪽 히스토리 재사용.
-        result = {
-            "intent": mapped_intent,
-            "re_query": re_query,
-            "llm_re_query": llm_re_query,
-        }
-        logger.info(
-            "[NextIntent] intent=%s, base_query=%s, llm_re_query=%s, re_query=%s",
-            mapped_intent,
-            shorten_text(base_user_query, 80),
-            shorten_text(llm_re_query, 80),
-            shorten_text(re_query, 80),
-        )
-        return result
-    except Exception as e:
-        logger.warning("[NextIntent] 분류 실패: %s", e)
-        return fallback
 
 
 async def expand_query(reformed_query: str) -> list:
