@@ -66,6 +66,8 @@ async def process_rag_recommended_question(
     precomputed_topic_keyword: Optional[List[str]] = None,
     precomputed_must_not_keywords: Optional[List[str]] = None,
     service_target: Optional[str] = "official",
+    out_meta: Optional[Dict[str, Any]] = None,   # guide_recommend 경로 호환 — 이 파이프라인에서는 미사용
+    is_drilldown: bool = False,                   # guide_recommend 경로 호환 — 이 파이프라인에서는 미사용
 ) -> Tuple[Any, List[Dict[str, str]]]:
     """
     호출 시그니처는 process_rag_guide_recommend와 동일하게 유지한다.
