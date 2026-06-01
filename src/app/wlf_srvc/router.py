@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-import mysql.connector
 from fastapi import APIRouter, Depends, Query, status
+import mysql.connector
 
 from app.core.config import get_config
 from app.wlf_srvc.repository import WlfSrvcRepository
@@ -30,7 +30,7 @@ def _get_service():
         connection_timeout=cfg.DB_CONNECTION_TIMEOUT,
     )
     try:
-        yield WlfSrvcService(WlfSrvcRepository(conn, table=cfg.HWPX_TARGET_TABLE))
+        yield WlfSrvcService(WlfSrvcRepository(conn, table=cfg.HWPX_SOURCE_UUID_TABLE))
     finally:
         conn.close()
 
