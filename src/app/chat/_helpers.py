@@ -394,6 +394,9 @@ async def _handle_rag_mode(
                             user_message,
                             preprocess=preprocess_payload,
                             referenced_documents=persist_referenced_documents,
+                            guide_services=guide_meta.get("guide_services"),
+                            topic_chips=guide_meta.get("topic_chips"),
+                            slots=guide_meta.get("slots"),
                         )
                     )
                 yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}, ensure_ascii=False)}\n\n"
@@ -436,6 +439,9 @@ async def _handle_rag_mode(
                                         user_message,
                                         preprocess=preprocess_payload,
                                         referenced_documents=persist_referenced_documents,
+                                        guide_services=guide_meta.get("guide_services"),
+                                        topic_chips=guide_meta.get("topic_chips"),
+                                        slots=guide_meta.get("slots"),
                                     )
                                 )
                             yield chunk
@@ -526,6 +532,9 @@ async def _handle_rag_mode(
                 user_message,
                 preprocess=preprocess_payload,
                 referenced_documents=persist_referenced_documents,
+                guide_services=guide_meta.get("guide_services"),
+                topic_chips=guide_meta.get("topic_chips"),
+                slots=guide_meta.get("slots"),
             )
         )
 
