@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     HWPX_SOURCE_UUID_TABLE: str = "tbl_wlf_srvc"
     HWPX_WELFARE_YEAR: str = "2026"
     HWPX_REGION: str = ""           # 비어 있으면 유관기관(None)으로 처리
-    HWPX_FILE_DIR: str = ""         # DB FILE_DIR 컬럼에 들어갈 서버 배치 경로
+    HWPX_FILE_DIR: str = "/data/okms/okms/webManager/backend/WEB-INF/classes/webcont/dataFile/welfareServiceNew/3"
     HWPX_DELETE_EXISTING: bool = True
 
     # ── 원격 텍스트 전송 ──────────────────────────────────────────────────────

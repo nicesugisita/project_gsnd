@@ -8,19 +8,39 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class WlfSrvcUpdate(BaseModel):
-    """관리자가 수정 가능한 필드만 포함."""
+    """관리자가 수정 가능한 전체 필드."""
 
-    wlf_yr: str | None = Field(None, max_length=4, description="복지연도")
-    wlf_srvc_nm: str | None = Field(None, max_length=100, description="복지서비스명")
-    sigun_cd: str | None = Field(None, max_length=10, description="시군코드")
-    use_yn: str | None = Field(None, max_length=1, description="사용여부 (Y/N)")
-    aply_yn: str | None = Field(None, max_length=1, description="신청여부 (Y/N)")
-    remark: str | None = Field(None, max_length=100, description="비고")
-    itrst_tpc1: str | None = Field(None, max_length=100, description="관심분야1")
-    itrst_tpc2: str | None = Field(None, max_length=100, description="관심분야2")
-    telno: str | None = Field(None, max_length=100, description="전화번호")
-    tkcg_dept: str | None = Field(None, max_length=1000, description="담당부서")
-    inqpl: str | None = Field(None, max_length=2000, description="문의처")
+    wlf_yr: str | None = Field(None, max_length=4)
+    wlf_srvc_nm: str | None = Field(None, max_length=100)
+    sigun_cd: str | None = Field(None, max_length=10)
+    org_nm: str | None = Field(None, max_length=500)
+    lftm_cycl_cd: str | None = None
+    hshd_sttn_cd: str | None = None
+    wlf_srvc_cn: str | None = None
+    aply_yn: str | None = Field(None, max_length=1)
+    aply_bgng_dt: str | None = Field(None, max_length=14)
+    aply_end_dt: str | None = Field(None, max_length=14)
+    aply_prd_type: str | None = None
+    use_yn: str | None = Field(None, max_length=1)
+    aply_qlfc: str | None = None
+    bss: str | None = None
+    prps: str | None = None
+    pvsn_type: str | None = None
+    sprt_cn: str | None = None
+    sprt_trgt: str | None = None
+    enfc_mnbd: str | None = None
+    aply_mthd: str | None = None
+    inqpl: str | None = None
+    tkcg_dept: str | None = Field(None, max_length=1000)
+    telno: str | None = Field(None, max_length=100)
+    sbmsn_dcmnt: str | None = None
+    sprt_trgt_cn: str | None = None
+    enfc_mnbd_cn: str | None = None
+    remark: str | None = Field(None, max_length=500)
+    itrst_tpc1: str | None = Field(None, max_length=100)
+    itrst_tpc2: str | None = Field(None, max_length=100)
+    file_dir: str | None = None
+    uuid_nm: str | None = None
 
 
 class WlfSrvcResponse(BaseModel):

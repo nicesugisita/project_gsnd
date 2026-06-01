@@ -327,3 +327,175 @@ def insert_rows(
 
     logger.info("INSERT 완료: %d건 → %s", inserted_count, target_table)
     return deleted_count, inserted_count
+
+
+_TEMP_WRITE_COL_MAP: dict[str, str] = {
+    "wlf_yr": "WLF_YR",
+    "wlf_srvc_nm": "WLF_SRVC_NM",
+    "sigun_cd": "SIGUN_CD",
+    "org_nm": "ORG_NM",
+    "lftm_cycl_cd": "LFTM_CYCL_CD",
+    "hshd_sttn_cd": "HSHD_STTN_CD",
+    "wlf_srvc_cn": "WLF_SRVC_CN",
+    "aply_yn": "APLY_YN",
+    "aply_bgng_dt": "APLY_BGNG_DT",
+    "aply_end_dt": "APLY_END_DT",
+    "aply_prd_type": "APLY_PRD_TYPE",
+    "use_yn": "USE_YN",
+    "aply_qlfc": "APLY_QLFC",
+    "bss": "BSS",
+    "prps": "PRPS",
+    "pvsn_type": "PVSN_TYPE",
+    "sprt_cn": "SPRT_CN",
+    "sprt_trgt": "SPRT_TRGT",
+    "enfc_mnbd": "ENFC_MNBD",
+    "aply_mthd": "APLY_MTHD",
+    "inqpl": "INQPL",
+    "tkcg_dept": "TKCG_DEPT",
+    "telno": "TELNO",
+    "sbmsn_dcmnt": "SBMSN_DCMNT",
+    "sprt_trgt_cn": "SPRT_TRGT_CN",
+    "enfc_mnbd_cn": "ENFC_MNBD_CN",
+    "remark": "REMARK",
+    "itrst_tpc1": "ITRST_TPC1",
+    "itrst_tpc2": "ITRST_TPC2",
+    "file_dir": "FILE_DIR",
+    "uuid_nm": "UUID_NM",
+}
+
+
+def delete_temp_row_by_sn(conn: Any, *, table: str, sn: int) -> bool:
+    """temp 테이블에서 단일 행을 삭제한다. 삭제 성공 시 True 반환."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"DELETE FROM {_quote_ident(table)} WHERE WLF_SRVC_SN = %s",
+            (sn,),
+        )
+        return cursor.rowcount > 0
+    finally:
+        cursor.close()
+
+
+def delete_temp_rows_by_filter(conn: Any, *, table: str, wlf_yr: str | None = None) -> int:
+    """temp 테이블에서 조건에 맞는 행을 일괄 삭제한다. 삭제 건수 반환.
+
+    wlf_yr 지정 시 해당 연도만, None이면 전체 삭제.
+    """
+    tbl = _quote_ident(table)
+    cursor = conn.cursor()
+    try:
+        if wlf_yr:
+            cursor.execute(f"DELETE FROM {tbl} WHERE WLF_YR = %s", (wlf_yr,))
+        else:
+            cursor.execute(f"DELETE FROM {tbl}")
+        count = cursor.rowcount
+        logger.info("temp 행 삭제: %d건 (table=%s, wlf_yr=%s)", count, table, wlf_yr)
+        return count
+    finally:
+        cursor.close()
+
+
+def update_temp_row_in_db(conn: Any, *, table: str, sn: int, data: dict) -> bool:
+    """temp 테이블의 특정 행을 업데이트한다. 변경된 필드만 SET 절에 포함."""
+    set_clauses: list[str] = []
+    values: list[Any] = []
+    for field, col in _TEMP_WRITE_COL_MAP.items():
+        if field in data:
+            set_clauses.append(f"`{col}` = %s")
+            values.append(data[field])
+    if not set_clauses:
+        return False
+    values.append(sn)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"UPDATE {_quote_ident(table)} SET {', '.join(set_clauses)} WHERE WLF_SRVC_SN = %s",
+            values,
+        )
+        return cursor.rowcount > 0
+    finally:
+        cursor.close()
+
+
+def publish_rows(
+    conn: Any,
+    *,
+    source_table: str,
+    target_table: str,
+    year: str | None = None,
+    org_names: list[str] | None = None,
+) -> tuple[int, int, list[str]]:
+    """source_table(temp)의 데이터를 target_table(실 테이블)로 반영한다.
+
+    1. source_table에서 반영 대상 ORG_NM 목록을 조회한다.
+    2. target_table에서 해당 ORG_NM 행을 삭제한다.
+    3. INSERT SELECT로 source_table → target_table에 복사한다.
+    4. 트랜잭션은 호출자(service)가 관리한다.
+
+    Returns:
+        (deleted_count, inserted_count, published_org_names)
+    """
+    src = _quote_ident(source_table)
+    tgt = _quote_ident(target_table)
+
+    # 반영 대상 ORG_NM 조회
+    cursor = conn.cursor()
+    try:
+        where_clauses: list[str] = ["ORG_NM IS NOT NULL"]
+        params: list[Any] = []
+
+        if year:
+            where_clauses.append("WLF_YR = %s")
+            params.append(year)
+
+        if org_names:
+            placeholders = ", ".join(["%s"] * len(org_names))
+            where_clauses.append(f"ORG_NM IN ({placeholders})")
+            params.extend(org_names)
+
+        where_sql = " AND ".join(where_clauses)
+        cursor.execute(
+            f"SELECT DISTINCT ORG_NM FROM {src} WHERE {where_sql} ORDER BY ORG_NM",
+            params,
+        )
+        target_org_names: list[str] = [row[0] for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+    if not target_org_names:
+        logger.info("publish: 반영 대상 없음 (source=%s, year=%s)", source_table, year)
+        return 0, 0, []
+
+    # target_table에서 기존 행 삭제
+    deleted_count = 0
+    cursor = conn.cursor()
+    try:
+        for i in range(0, len(target_org_names), 500):
+            chunk = target_org_names[i : i + 500]
+            in_sql = ", ".join(["%s"] * len(chunk))
+            cursor.execute(f"DELETE FROM {tgt} WHERE ORG_NM IN ({in_sql})", chunk)
+            deleted_count += cursor.rowcount
+    finally:
+        cursor.close()
+    logger.info("publish: 기존 행 삭제 %d건 (ORG_NM %d개)", deleted_count, len(target_org_names))
+
+    # INSERT SELECT: INSERT_COLUMNS 기준 (WLF_SRVC_SN 제외)
+    col_sql = ", ".join(_quote_ident(c) for c in INSERT_COLUMNS)
+    inserted_count = 0
+    cursor = conn.cursor()
+    try:
+        for i in range(0, len(target_org_names), 500):
+            chunk = target_org_names[i : i + 500]
+            in_sql = ", ".join(["%s"] * len(chunk))
+            cursor.execute(
+                f"INSERT INTO {tgt} ({col_sql}) "
+                f"SELECT {col_sql} FROM {src} WHERE ORG_NM IN ({in_sql})",
+                chunk,
+            )
+            inserted_count += cursor.rowcount
+    finally:
+        cursor.close()
+
+    logger.info("publish: INSERT 완료 %d건 → %s", inserted_count, target_table)
+    return deleted_count, inserted_count, target_org_names

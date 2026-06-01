@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 import mysql.connector
 
 from app.core.config import get_config
-from app.parsing.schemas import HwpxUploadResponse
+from app.parsing.schemas import (
+    DeleteTempRowsResponse,
+    HwpxUploadResponse,
+    PublishRequest,
+    PublishResponse,
+    TempRowUpdate,
+)
 from app.parsing.service import HwpxParserService
+from app.wlf_srvc.schemas import WlfSrvcListResponse, WlfSrvcResponse
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,103 @@ def _get_conn():
 
 
 _ConnDep = Annotated[object, Depends(_get_conn)]
+
+
+def _resolve_table(cfg, table_key: Literal["temp", "real"]) -> str:
+    return cfg.HWPX_TARGET_TABLE if table_key == "temp" else cfg.HWPX_SOURCE_UUID_TABLE
+
+
+@router.get(
+    "/rows",
+    response_model=WlfSrvcListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="파싱 테이블 데이터 목록 조회",
+)
+async def list_rows(
+    conn: _ConnDep,
+    table_key: Literal["temp", "real"] = Query("temp", description="조회 테이블: temp=임시, real=실 테이블"),
+    wlf_yr: str | None = Query(None),
+    sigun_cd: str | None = Query(None),
+    keyword: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> WlfSrvcListResponse:
+    cfg = get_config()
+    service = HwpxParserService(conn)
+    return service.list_temp_rows(
+        temp_table=_resolve_table(cfg, table_key),
+        wlf_yr=wlf_yr,
+        sigun_cd=sigun_cd,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.patch(
+    "/rows/{sn}",
+    response_model=WlfSrvcResponse,
+    status_code=status.HTTP_200_OK,
+    summary="파싱 테이블 행 수정",
+)
+async def update_row(
+    sn: int,
+    body: TempRowUpdate,
+    conn: _ConnDep,
+    table_key: Literal["temp", "real"] = Query("temp"),
+) -> WlfSrvcResponse:
+    cfg = get_config()
+    service = HwpxParserService(conn)
+    result = service.update_temp_row(
+        temp_table=_resolve_table(cfg, table_key),
+        sn=sn,
+        data=body.model_dump(exclude_unset=True),
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"SN={sn} 행을 찾을 수 없습니다.",
+        )
+    return result
+
+
+@router.delete(
+    "/rows/{sn}",
+    response_model=DeleteTempRowsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="파싱 테이블 행 단건 삭제",
+)
+async def delete_row(
+    sn: int,
+    conn: _ConnDep,
+    table_key: Literal["temp", "real"] = Query("temp"),
+) -> DeleteTempRowsResponse:
+    cfg = get_config()
+    service = HwpxParserService(conn)
+    table = _resolve_table(cfg, table_key)
+    deleted = service.delete_row(temp_table=table, sn=sn)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"SN={sn} 행을 찾을 수 없습니다.")
+    return DeleteTempRowsResponse(table=table, deleted_count=1)
+
+
+@router.delete(
+    "/rows",
+    response_model=DeleteTempRowsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="파싱 테이블 행 일괄 삭제",
+    description="wlf_yr 지정 시 해당 연도만, 미지정 시 전체 삭제.",
+)
+async def delete_rows(
+    conn: _ConnDep,
+    table_key: Literal["temp", "real"] = Query("temp"),
+    wlf_yr: str | None = Query(None, description="삭제할 복지연도. 미지정 시 전체."),
+) -> DeleteTempRowsResponse:
+    cfg = get_config()
+    service = HwpxParserService(conn)
+    table = _resolve_table(cfg, table_key)
+    count = service.delete_rows(temp_table=table, wlf_yr=wlf_yr)
+    return DeleteTempRowsResponse(table=table, deleted_count=count)
 
 
 @router.post(
@@ -96,3 +200,50 @@ async def upload_hwpx(
         )
 
     return result
+
+
+@router.post(
+    "/publish",
+    response_model=PublishResponse,
+    status_code=status.HTTP_200_OK,
+    summary="temp 테이블 → 실 테이블 반영",
+    description=(
+        "temp 테이블의 데이터를 실 테이블로 반영합니다.\n\n"
+        "- `year` 지정 시 해당 연도만 반영합니다.\n"
+        "- `org_names` 지정 시 해당 ORG_NM만 반영합니다.\n"
+        "- 둘 다 None이면 temp 테이블 전체를 반영합니다.\n\n"
+        "반영 대상 테이블은 서버 `.env`의 `HWPX_TARGET_TABLE`(temp)과 `HWPX_SOURCE_UUID_TABLE`(실 테이블)로 결정됩니다."
+    ),
+)
+async def publish_hwpx(
+    conn: _ConnDep,
+    body: PublishRequest,
+) -> PublishResponse:
+    """temp 테이블 데이터를 실 테이블에 반영한다."""
+    cfg = get_config()
+
+    source_table = cfg.HWPX_TARGET_TABLE
+    target_table = cfg.HWPX_SOURCE_UUID_TABLE
+
+    if source_table == target_table:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"source({source_table})와 target({target_table})이 동일합니다. "
+                ".env의 HWPX_TARGET_TABLE(temp)과 HWPX_SOURCE_UUID_TABLE(실 테이블)을 확인하세요."
+            ),
+        )
+
+    service = HwpxParserService(conn)
+    try:
+        return service.publish_to_real_table(
+            source_table=source_table,
+            target_table=target_table,
+            year=body.year,
+            org_names=body.org_names,
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
