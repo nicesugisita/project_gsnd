@@ -1,0 +1,121 @@
+# ──────────────────── Server ────────────────────
+HOST=0.0.0.0
+PORT=8000
+DEBUG=False
+LOG_LEVEL=INFO
+
+# ──────────────────── Model ─────────────────────
+MODEL_NAME=luxia3-llm-32b-0731
+
+# ──────────────────── LLM ───────────────────────
+LLM_ENABLED=True
+LLM_API_URL=http://10.215.18.235:15006
+LLM_API_TIMEOUT=120
+RELEVANCE_LLM_API_URL=http://10.215.18.237:15019
+RELEVANCE_LLM_MODEL_NAME=/sllm
+
+# ──────────────────── STT ───────────────────────
+STT_WEBSOCKET_URL=ws://10.215.18.238:32000/client/ws
+STT_PING_INTERVAL=20
+STT_PING_TIMEOUT=10
+STT_CLOSE_TIMEOUT=5
+STT_CONNECTION_TIMEOUT=10.0
+
+# ──────────────────── TTS ───────────────────────
+TTS_SERVER_URL=http://10.215.18.237:45200
+TTS_MASTER_KEY=master260420122856425624
+TTS_REQUEST_TIMEOUT=30.0
+SID=0
+TEMPO=1
+PAD_SILENCE=0
+AMPLIFY=1
+GAIN_DB=0
+
+# ──────────────────── Preprocessing ─────────────
+TEXT_CLEANING_ENABLED=True
+KOREAN_STANDARDIZATION_ENABLED=True
+
+# ──────────────────── DeepServer ────────────────
+DEEP_SERVER_URL=http://10.215.18.237:15022
+DEEPSERVER_TIMEOUT=30.0
+MULTITURN_MAX_TURNS=3
+MULTITURN_ASSISTANT_SUMMARY_LEN=150
+
+# ──────────────────── RAG ───────────────────────
+RAG_ENABLED=True
+RAG_COLLECTION=GSND_DATASET_V8
+RAG_THRESHOLD=0
+RAG_USE_QA_WHEN_EMPTY=True
+RAG_NUM_REFERENCED_DOCS=5
+RAG_UI_MAX_DOCS=5
+RAG_OKMS_COLLECTION=GSND_BIZ_DATASET_V4
+RAG_GOV_OKMS_COLLECTION=GOV_OKMS_V1
+RAG_WELFARE_CENTER_COLLECTION=GSND_WELFARE_CENTER_V1
+RAG_WELFARE_TEL_COLLECTION=GSND_OUR_REGION_TEL
+RETRIEVAL_JUDGMENT_ENABLED=False
+
+# ──────────────────── Mariner ───────────────────
+MARINER_IP=10.215.18.232
+MARINER_PORT=5555
+MARINER_TIMEOUT=60000
+MARINER_THRESHOLD=0.5
+MARINER_MAX_RESULTS=5
+MARINER_LOCAL_HOST=localhost
+MARINER_LOCAL_PORT=5555
+MARINER_INDEX_API_URL=http://10.215.18.232:5000/collections/index
+MARINER_UPLOAD_COLLECTION=GSND_UPLOADED_FILE_V1
+MARINER_INDEX_TIMEOUT=30
+
+# ──────────────────── File Upload ───────────────
+UPLOAD_DIR=/home/gsnd-mgr/gsnd_rag_v4/backend_v2/uploaded_texts
+JAR_LIB_PATH=/home/gsnd-mgr/gsnd_rag_v4/backend_v2/jar_lib
+
+# ──────────────────── Remote Transfer ───────────
+UPLOADED_TEXT_REMOTE_ENABLED=True
+UPLOADED_TEXT_REMOTE_HOST=10.215.18.232
+UPLOADED_TEXT_REMOTE_PORT=8218
+UPLOADED_TEXT_REMOTE_USER=iworks
+UPLOADED_TEXT_REMOTE_DIR=/home/gsnd-mgr/gsnd_rag_v4/backend_v2/uploaded_texts
+UPLOADED_TEXT_REMOTE_TIMEOUT=30
+UPLOADED_TEXT_REMOTE_SSH_KEY_PATH=
+UPLOADED_TEXT_REMOTE_PASSWORD=1qw2#ER$
+
+# ──────────────────── Database ──────────────────
+DB_HOST=10.215.18.232
+DB_PORT=3306
+DB_USER=diquest
+DB_PASSWORD=1qw2#ER$
+DB_NAME=mariner5
+OKMS2_DB_NAME=okms
+DB_CONNECTION_TIMEOUT=5
+
+# ──────────────────── Session ───────────────────
+SESSION_TIMEOUT_MINUTES=10
+SESSION_TABLE=gsnd_users_sessions
+MAX_CONCURRENT_USERS=50
+CONV_LOCKS_MAX=1000
+DEFAULT_CONVERSATION_TITLE=새로운 대화
+JAVA_MIN_MEMORY=32m
+JAVA_MAX_MEMORY=512m
+
+# ──────────────────── Clarification ─────────────
+MAX_CLARIFY_ATTEMPTS=3
+CLARIFY_FAILURE_MESSAGE=입력하신 정보만으로는\n원하시는 복지 서비스를 정확하게 안내하기 어렵습니다.\n보다 정확한 안내를 위해\n경상남도 복지 상담 창구를 이용해 주세요.
+
+# ──────────────────── Questions ─────────────────
+MAX_SUGGESTED_QUESTIONS=5
+
+# ──────────────────── Document Service ──────────
+OKMS_DOC_TABLE=VIEW_OKMS_DOC
+OKMS_VIEW_TABLE=VIEW_WLF_SRVC
+ALLOWED_BASE_DIRS=/data/okms,/data/okms/okms,/data/okms/okms/webManager,/data/okms/okms/webManager/backend,/mnt/okms,/data/okms/okms/webManager/backend/WEB-INF/classes/webcont
+BASE_PATH_ALIASES=/data/okms/okms/webManager/backend/WEB-INF/classes/webcont:/mnt/okms,/data/okms/okms/webManager/backend/WEB-INF/classes/webcont/:/mnt/okms
+
+# ──────────────────── LLM Seed ──────────────────
+FIXED_LLM_SEED=42
+
+# ──────────────────── Greeting ──────────────────
+GREETING_MESSAGE=안녕하세요 경상남도청 복지챗봇입니다. 살고 계시는 지역과 함께 궁금한 복지서비스가 있다면 질문해 주세요.
+
+# ──────────────────── Environment ───────────────
+ENVIRONMENT=development
